@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 from datetime import datetime as dt
 import plotly.graph_objects as go
+from matplotlib.pyplot import xlabel
 from vectorbt.portfolio.enums import SizeType, Direction, NoOrder, OrderStatus, OrderSide
 
 class BackTesting:
@@ -109,12 +110,8 @@ class BackTesting:
         return results, full_results
 
     def plot_performance(self):
-        fig = self.data[["Open", "High", "Low", "Close"]].vbt.ohlcv.plot()
-        self.pf.positions.plot(close_trace_kwargs=dict(visible=False), fig=fig)
-        fig.update_xaxes(
-            range=[self.data['Date'].min(), self.data['Date'].max()],  # Set range to min and max dates in your data
-            tickformat='%YYYY-%mm-%dd',  # Adjust tick format as needed
-        )
+        fig = self.data[["Open", "High", "Low", "Close"]].vbt.ohlcv.plot(xaxis=self.data['Date'])
+        self.pf.positions.plot(xaxis=self.data['Date'],close_trace_kwargs=dict(visible=False), fig=fig)
 
         gauge = vbt.plotting.Gauge(
             value=2,
