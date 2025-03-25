@@ -4,8 +4,10 @@ import numpy as np
 import pandas as pd
 from datetime import datetime as dt
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from matplotlib.pyplot import xlabel
 from vectorbt.portfolio.enums import SizeType, Direction, NoOrder, OrderStatus, OrderSide
+import quantstats as qt
 
 class BackTesting:
     def __init__(self, data, ticker, initial_capital, slippage=0.001, transaction_fees=0.000, use_confidence=True, use_fractional_shares=True):
@@ -20,6 +22,8 @@ class BackTesting:
         if type(ticker) == str:
             # Prepare data
             self.data = data[data['Ticker'] == ticker]
+            self.data['Date'] = pd.to_datetime(self.data['Date'])
+            self.data = self.data.set_index('Date')
         else:
             raise ValueError("Invalid Ticker. Please provide a string.")
 
@@ -42,43 +46,18 @@ class BackTesting:
             allow_partial=self.use_fractional_shares,
             size=size,
             size_type=SizeType.Percent,
+            accumulate=True
         )
 
         return portfolio
         
     @staticmethod
-    def BenchMarkSignals(bm_data, short_window=25, long_window=50, rsi_window=10, rsi_type='simple'):
+    def BenchMarkSignals(bm_data, short_window=50, long_window=200):
 
-        bm_data["short_ma"] = bm_data["Close"].rolling(short_window).mean()
-        bm_data["long_ma"] = bm_data["Close"].rolling(long_window).mean()
-
-        # Calculate RSI
-        close_delta = bm_data["Close"].diff()
-        up = close_delta.clip(lower=0)
-        down = -1 * close_delta.clip(upper=0)
-
-        if rsi_type == "simple":
-            ma_up = up.rolling(window=rsi_window).mean()
-            ma_down = down.rolling(window=rsi_window).mean()
-        elif rsi_type == "exponential":
-            ma_up = up.ewm(span=rsi_window).mean()
-            ma_down = down.ewm(span=rsi_window).mean()
-        else:
-            raise ValueError("Invalid RSI type")
-
-        rs = ma_up / ma_down
-        bm_data["rsi"] = 100 - (100 / (1 + rs))
-
-        # Calculate EMA200
-        bm_data["ema200"] = bm_data["Close"].ewm(span=200).mean()
-
-        # Generate signals
-        bm_data["signal"] = 0
-        bm_data.loc[(bm_data["short_ma"] > bm_data["long_ma"]) & (bm_data["Close"] > bm_data["ema200"]) & (bm_data["rsi"] < 30), "signal"] = 1
-        bm_data.loc[(bm_data["short_ma"] < bm_data["long_ma"]) | (bm_data["rsi"] > 70), "signal"] = -1
-
-        bm_data['entry_signal'] = bm_data['signal'] == 1  # Buy signal
-        bm_data['exit_signal'] = bm_data['signal'] == -1  # Sell signal
+        fast_ma = vbt.MA.run(bm_data['Close'], short_window, short_name='fast_ma')
+        slow_ma = vbt.MA.run(bm_data['Close'], long_window, short_name='slow_ma')
+        bm_data['entry_signal'] = fast_ma.ma_crossed_above(slow_ma)
+        bm_data['exit_signal'] = fast_ma.ma_crossed_below(slow_ma)
 
         return bm_data
         
@@ -108,15 +87,36 @@ class BackTesting:
 
 
         return results, full_results
-
+        
     def plot_performance(self):
-        fig = self.data[["Open", "High", "Low", "Close"]].vbt.ohlcv.plot(xaxis=self.data['Date'])
-        self.pf.positions.plot(xaxis=self.data['Date'],close_trace_kwargs=dict(visible=False), fig=fig)
+        sim_fig = make_subplots(rows=3, cols=1, subplot_titles=('Order PnL', 'Portfolio Value','Net Exposure'))
+        
+        # Plot OHLCV - Order PnL
+        self.data[["Open", "High", "Low", "Close","Volume"]].vbt.ohlcv.plot(ohlc_add_trace_kwargs=dict(row=1, col=1), fig=sim_fig,show_volume=True)
+        self.pf.positions.plot(close_trace_kwargs=dict(visible=False), add_trace_kwargs=dict(row=1, col=1), fig=sim_fig)
+        
+        # Plot Portfolio Value
+        self.pf.plot_value(trace_kwargs=dict(name='Strategy',color='blue',row=2,col=1), fig=sim_fig, free=True)
+        self.benchmark_pf.plot_value(trace_kwargs=dict(name='Benchmark',color='blue',row=2,col=1), fig=sim_fig, free=True)
+
+        # Plot Exposure Value
+        self.pf.plot_net_exposure(trace_names='Strategy',add_trace_kwargs=dict(color='blue',row=3,col=1),fig=sim_fig)
+        self.benchmark_pf.plot_net_exposure(trace_names='Benchmark',add_trace_kwargs=dict(color='yellow',row=3,col=1), fig=sim_fig)
+        
+
+        sim_fig.update_layout(xaxis_title='Date',
+                          yaxis_title='Price (USD)',
+                          #template='plotly_white',
+                          legend=dict(orientation="h", yanchor="bottom", y=1.02)
+                         )
+        sim_fig.update_yaxes(title_text="Price (USD)", row=1, col=1)
+        sim_fig.update_yaxes(title_text="Portfolio Value (USD)", row=2, col=1)
+        sim_fig.update_yaxes(title_text="Exposure %", row=3, col=1)
 
         gauge = vbt.plotting.Gauge(
             value=2,
             value_range=(1, 3),
             label='My Gauge'
-        )
+        ).fig
 
-        return fig, gauge.fig
+        return sim_fig
