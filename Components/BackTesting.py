@@ -6,8 +6,8 @@ from datetime import datetime as dt
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from matplotlib.pyplot import xlabel
+from sympy.physics.units import volume
 from vectorbt.portfolio.enums import SizeType, Direction, NoOrder, OrderStatus, OrderSide
-import quantstats as qt
 
 class BackTesting:
     def __init__(self, data, ticker, initial_capital, slippage=0.001, transaction_fees=0.000, use_confidence=True, use_fractional_shares=True):
@@ -45,8 +45,7 @@ class BackTesting:
             slippage=self.slippage,
             allow_partial=self.use_fractional_shares,
             size=size,
-            size_type=SizeType.Percent,
-            accumulate=True
+            size_type=SizeType.Percent
         )
 
         return portfolio
@@ -89,29 +88,22 @@ class BackTesting:
         return results, full_results
         
     def plot_performance(self):
-        sim_fig = make_subplots(rows=3, cols=1, subplot_titles=('Order PnL', 'Portfolio Value','Net Exposure'))
-        
+        vbt.settings.set_theme("dark")
+
         # Plot OHLCV - Order PnL
-        self.data[["Open", "High", "Low", "Close","Volume"]].vbt.ohlcv.plot(ohlc_add_trace_kwargs=dict(row=1, col=1), fig=sim_fig,show_volume=True)
-        self.pf.positions.plot(close_trace_kwargs=dict(visible=False), add_trace_kwargs=dict(row=1, col=1), fig=sim_fig)
-        
+        trades_fig = self.data[["Open", "High", "Low", "Close","Volume"]].vbt.ohlcv.plot(xaxis=dict(rangeslider=dict(visible=False)))
+        self.pf.positions.plot(close_trace_kwargs=dict(visible=False), fig=trades_fig)
+        trades_fig.update_layout(yaxis=dict(title="Price (USD)"))
+
         # Plot Portfolio Value
-        self.pf.plot_value(trace_kwargs=dict(name='Strategy',color='blue',row=2,col=1), fig=sim_fig, free=True)
-        self.benchmark_pf.plot_value(trace_kwargs=dict(name='Benchmark',color='blue',row=2,col=1), fig=sim_fig, free=True)
+        value_fig = self.pf.plot_value(trace_kwargs=dict(name="Strategy",line=dict(color='blue')))
+        self.benchmark_pf.plot_value(trace_kwargs=dict(name="Benchmark",line=dict(color='orange')), fig=value_fig)
+        value_fig.update_layout(yaxis=dict(title="Portfolio Value (USD)"))
 
         # Plot Exposure Value
-        self.pf.plot_net_exposure(trace_names='Strategy',add_trace_kwargs=dict(color='blue',row=3,col=1),fig=sim_fig)
-        self.benchmark_pf.plot_net_exposure(trace_names='Benchmark',add_trace_kwargs=dict(color='yellow',row=3,col=1), fig=sim_fig)
-        
-
-        sim_fig.update_layout(xaxis_title='Date',
-                          yaxis_title='Price (USD)',
-                          #template='plotly_white',
-                          legend=dict(orientation="h", yanchor="bottom", y=1.02)
-                         )
-        sim_fig.update_yaxes(title_text="Price (USD)", row=1, col=1)
-        sim_fig.update_yaxes(title_text="Portfolio Value (USD)", row=2, col=1)
-        sim_fig.update_yaxes(title_text="Exposure %", row=3, col=1)
+        exposure_fig = self.pf.plot_net_exposure(trace_kwargs=dict(name="Strategy",line=dict(color='blue')))
+        self.benchmark_pf.plot_net_exposure(trace_kwargs=dict(name="Benchmark", line=dict(color='orange')), fig=exposure_fig)
+        exposure_fig.update_layout(yaxis=dict(title="Exposure %",range=[0.0, 1.0]))
 
         gauge = vbt.plotting.Gauge(
             value=2,
@@ -119,4 +111,4 @@ class BackTesting:
             label='My Gauge'
         ).fig
 
-        return sim_fig
+        return trades_fig, value_fig, exposure_fig
