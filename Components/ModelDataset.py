@@ -34,7 +34,7 @@ class DataModule:
     
     def setup(self):
         # Create sequences from the raw data
-        self.X, self.y = self.create_sequences(self.data, self.seq_length)
+        self.X, self.y = self.create_sequences(self.data, self.seq_length
 
         # Apply MinMaxScaler to self.X
         n_samples, seq_length, n_features = self.X.shape # reshape X from (n_samples, seq_length, n_features) to (-1, n_features)
@@ -87,7 +87,7 @@ class DataModule:
         
         def __getitem__(self, index):
             return self.data[index], self.labels[index]
-
+            
 # Example usage:
 # Assume `merged_df` is a pandas DataFrame containing your data.
 # data_module = DataModule(merged_df, seq_length=10, batch_size=32)
