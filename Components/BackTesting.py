@@ -45,7 +45,8 @@ class BackTesting:
             slippage=self.slippage,
             allow_partial=self.use_fractional_shares,
             size=size,
-            size_type=SizeType.Percent
+            size_type=SizeType.Percent,
+            accumulate=True
         )
 
         return portfolio
