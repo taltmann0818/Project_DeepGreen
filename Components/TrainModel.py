@@ -221,4 +221,3 @@ class TunableLSTMClassifier(nn.Module):
         out = self.fc2(out)
 
         return out
-
