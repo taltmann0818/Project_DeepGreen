@@ -5,18 +5,9 @@ from sklearn.metrics import classification_report, confusion_matrix, f1_score, a
 from tqdm.auto import tqdm
 import numpy as np
 
+
 class LSTMClassifierModel(nn.Module):
     def __init__(self, input_size, hidden_size, num_layers, num_classes, dropout=0.3):
-        """
-        Initializes the LSTM classifier with an attention mechanism.
-        
-        Args:
-            input_size (int): Number of input features.
-            hidden_size (int): Hidden layer size for LSTM.
-            num_layers (int): Number of LSTM layers.
-            num_classes (int): Number of output classes.
-            dropout (float): Dropout rate for regularization.
-        """
         super(LSTMClassifierModel, self).__init__()
         self.hidden_size = hidden_size
         self.num_layers = num_layers
@@ -178,4 +169,56 @@ class LSTMClassifierModel(nn.Module):
     def feature_importance(self, predictions, test_data):
         explainer = shap.KernelExplainer(predictions, test_data)
         return explainer.shap_values(test_data)
-        
+
+# %%
+# Create a tunable version of the LSTM model
+class TunableLSTMClassifier(nn.Module):
+    def __init__(self, config):
+        super(TunableLSTMClassifier, self).__init__()
+        self.input_size = config["input_size"]
+        self.hidden_size = config["hidden_size"]
+        self.num_layers = config["num_layers"]
+        self.num_classes = config["num_classes"]
+        self.dropout_rate = config["dropout_rate"]
+
+        # LSTM layers
+        self.lstm = nn.LSTM(
+            input_size=self.input_size,
+            hidden_size=self.hidden_size,
+            num_layers=self.num_layers,
+            batch_first=True,
+            dropout=self.dropout_rate if self.num_layers > 1 else 0,
+            bidirectional=False
+        )
+
+        # Self-attention mechanism
+        self.attention = nn.Sequential(
+            nn.Linear(self.hidden_size, self.hidden_size),
+            nn.Tanh(),
+            nn.Linear(self.hidden_size, 1)
+        )
+
+        # Fully connected layers
+        self.fc1 = nn.Linear(self.hidden_size, self.hidden_size)
+        self.fc2 = nn.Linear(self.hidden_size, self.num_classes)
+
+        # Dropout layer
+        self.dropout = nn.Dropout(self.dropout_rate)
+
+    def forward(self, x):
+        # LSTM forward pass
+        lstm_out, _ = self.lstm(x)
+
+        # Apply attention
+        attention_weights = self.attention(lstm_out)
+        attention_weights = torch.softmax(attention_weights, dim=1)
+        context_vector = torch.sum(attention_weights * lstm_out, dim=1)
+
+        # Fully connected layers with dropout
+        out = self.fc1(context_vector)
+        out = nn.functional.relu(out)
+        out = self.dropout(out)
+        out = self.fc2(out)
+
+        return out
+
