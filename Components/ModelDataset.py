@@ -1,12 +1,12 @@
 from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import MinMaxScaler
+from sklearn.preprocessing import StandardScaler
 import numpy as np
 import torch
 import pandas as pd
 
 class DataModule:
-    def __init__(self, data, seq_length=10, batch_size=32, eval_size=0.2, random_state=42,volatility_window=20):
+    def __init__(self, data, window_size=20, batch_size=32, eval_size=0.2, random_state=42):
         """
         data: pandas DataFrame or similar data structure with .iloc
         seq_length: length of the sequence window
@@ -24,96 +24,63 @@ class DataModule:
         else:
             self.data = data
 
-        self.seq_length = seq_length
+        self.window_size = window_size
         self.batch_size = batch_size
         self.eval_size = eval_size
         self.random_state = random_state
-        self.volatility_window = volatility_window
-
+        
         self.setup()
-
-    def calculate_volatility(self, close_prices):
-        # Calculate returns
-        returns = np.log(close_prices).diff().fillna(0)
-
-        # Calculate rolling standard deviation
-        volatility = returns.rolling(window=self.volatility_window).std().fillna(method='bfill')
-        # Normalize volatility to [0, 1] range for easier training
-        min_vol = volatility.min()
-        max_vol = volatility.max()
-        normalized_volatility = (volatility - min_vol) / (max_vol - min_vol)
-
-        return normalized_volatility
 
     def setup(self):
         # Create sequences from the raw data
-        self.data['Volatility'] = self.calculate_volatility(self.data['Close'])
-        X, y, vol = self.create_sequences(self.data, self.seq_length)
+        X, y = self.create_sequences()
 
-        # Split into train, validation, and test sets
-        total_samples = len(X)
-        eval_samples = int(total_samples * self.eval_size)
-        train_samples = total_samples - eval_samples
+        # Instead of a random split, use a sequential split.
+        train_size = int((1 - self.eval_size) * len(X)) # Calculate the index where the evaluation set should begin.
+        X_train, X_test = X[:train_size], X[train_size:]
+        y_train, y_test = y[:train_size], y[train_size:]
 
-        # Set random seed for reproducibility
-        np.random.seed(self.random_state)
-        indices = np.random.permutation(total_samples)
+        # Fit the scaler on just the training features to prevent leakage
+        n_samples, seq_length, n_features = X.shape
+        scaler = StandardScaler()
+        X_train = X[:train_size].reshape(-1, n_features)
+        scaler.fit(X_train)
+        X_train = scaler.transform(X_train).reshape(train_size, seq_length, n_features)
+        X_test = scaler.transform(X[train_size:].reshape(-1, n_features)).reshape(len(X)-train_size, seq_length, n_features)
+                    
+        # Create datasets and data loaders
+        self.train_dataset = ModelDataset(X_train, y_train)
+        self.train_loader = DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True)
+        self.test_dataset = ModelDataset(X_test, y_test)
+        self.test_loader = DataLoader(self.test_dataset, batch_size=self.batch_size, shuffle=False)
 
-        train_indices = indices[:train_samples]
-        eval_indices = indices[train_samples:train_samples + eval_samples]
-        test_indices = indices[train_samples + eval_samples:]
-
-        # Split data
-        X_train, y_train, vol_train = X[train_indices], y[train_indices], vol[train_indices]
-        X_eval, y_eval, vol_eval = X[eval_indices], y[eval_indices], vol[eval_indices]
-
-        # Create datasets
-        self.train_dataset = ModelDataset(X_train, y_train, vol_train)
-        self.eval_dataset = ModelDataset(X_eval, y_eval, vol_eval)
-
-        # Create data loaders
-        self.train_loader = DataLoader(
-            self.train_dataset,
-            batch_size=self.batch_size,
-            shuffle=True
-        )
-
-        self.eval_loader = DataLoader(
-            self.eval_dataset,
-            batch_size=self.batch_size,
-            shuffle=False
-        )
-
-
-    def create_sequences(self, data, seq_length):
+    def create_sequences(self):
         """
-        Create overlapping sequences from the data.
-        Assumes 'data' supports .iloc (e.g. a pandas DataFrame).
+        Split time-series into training sequence X and outcome value Y
+        Args:
+            data - dataset
+            N - window size, e.g., 50 for 50 days of historical stock prices
+            offset - position to start the split
         """
-        xs, ys, vols = [], [], []
+        X, y = [], []
 
-        for i in range(len(data) - seq_length):
-            x = data.iloc[i:(i + seq_length)]
-            y = data.iloc[i + seq_length]['Target']
-            vol = data.iloc[i + seq_length]['Volatility']
-            xs.append(x)
-            ys.append(y)
-            vols.append(vol)
-        return np.array(xs), np.array(ys), np.array(vols)
+        for i in range(self.window_size, len(self.data)):
+            X.append(self.data.iloc[i - self.window_size : i])
+            y.append(self.data.iloc[i]['shifted_prices'])
+    
+        return np.array(X), np.array(y)
 
 class ModelDataset(Dataset):
-    """Dataset that provides both direction and volatility targets"""
+    """Dataset that provides direction targets"""
 
-    def __init__(self, data, labels, volatility):
+    def __init__(self, data, shifted_prices):
         """
         Args:
             data: Feature sequences
-            labels: Direction labels
-            volatility: Volatility targets
+            target: shifted equity prices
         """
         self.data = torch.FloatTensor(data)
-        self.labels = torch.LongTensor(labels)
-        self.volatility = torch.FloatTensor(volatility)
+        self.shifted_prices = torch.FloatTensor(shifted_prices)
 
     def __len__(self):
         """Return the number of samples in the dataset"""
@@ -122,20 +89,9 @@ class ModelDataset(Dataset):
     def __getitem__(self, idx):
         """Get a sample from the dataset"""
         features = self.data[idx]
-        direction_target = self.labels[idx]
-        volatility_target = self.volatility[idx]
-
-        # Return features and a dictionary of targets
         targets = {
-            'direction': direction_target,
-            'volatility': volatility_target
+            'shifted_prices': self.shifted_prices[idx],
         }
-
+        
+        # Return features and a dictionary of targets
         return features, targets
-
-# Example usage:
-# Assume `merged_df` is a pandas DataFrame containing your data.
-# data_module = DataModule(merged_df, seq_length=10, batch_size=32)
-# train_loader = data_module.train_loader
-# eval_loader = data_module.eval_loader
-# test_loader = data_module.test_loader
