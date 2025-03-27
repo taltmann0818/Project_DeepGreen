@@ -34,7 +34,7 @@ class DataModule:
     
     def setup(self):
         # Create sequences from the raw data
-        self.X, self.y = self.create_sequences(self.data, self.seq_length
+        self.X, self.y = self.create_sequences(self.data, self.seq_length)
 
         # Apply MinMaxScaler to self.X
         n_samples, seq_length, n_features = self.X.shape # reshape X from (n_samples, seq_length, n_features) to (-1, n_features)
