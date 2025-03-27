@@ -494,7 +494,7 @@ class EnhancedLSTMClassifierModel(nn.Module):
             })
 
             # Store best eval loss
-            if val_f1 < best_val_f1:
+            if val_f1 > best_val_f1:
                 best_val_f1 = val_f1
                 best_model_state = self.state_dict()
 
