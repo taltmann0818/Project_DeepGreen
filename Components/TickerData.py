@@ -4,14 +4,12 @@ import pandas as pd
 from datetime import datetime, timedelta
 
 class TickerData:
-    def __init__(self, ticker, days=730):
+    def __init__(self, ticker, years=1):
         """
         Initialize the StockAnalyzer with a ticker symbol and number of past days to fetch.
         """
         self.ticker = ticker
-        self.days = days
-        self.current_date = datetime.today() - timedelta(days=1)
-        self.past_date = self.current_date - timedelta(days=days)
+        self.days = years * 365
         self.stock_data = None
         self.q_income_stmt = None
         self.y_income_stmt = None
@@ -27,8 +25,10 @@ class TickerData:
         """
         try:
             ticker_obj = yf.Ticker(self.ticker)
-            self.stock_data = ticker_obj.history(start=self.past_date.strftime("%Y-%m-%d"),
-                                                   end=self.current_date.strftime("%Y-%m-%d"),
+            current_date = datetime.today() - timedelta(days=1)
+            past_date = current_date - timedelta(days=self.days)
+            self.stock_data = ticker_obj.history(start=past_date.strftime("%Y-%m-%d"),
+                                                   end=current_date.strftime("%Y-%m-%d"),
                                                    interval="1d")
 
             y_income_stmt = ticker_obj.get_income_stmt(freq='yearly').T
@@ -75,34 +75,12 @@ class TickerData:
             self.dataset_ex_df = pd.merge_asof(self.dataset_ex_df, self.y_income_stmt[['Date', 'ttm_eps']], on='Date', direction='backward')
             self.dataset_ex_df['ttm_pe'] = self.dataset_ex_df['Close'] / self.dataset_ex_df['ttm_eps']
 
-            # TODO: move this to a new method called 'TradeStrategy' with params for defining the strat
-            # List of different trading patterns seen in stock movements: CDLHANGINGMAN CDLSHOOTINGSTAR CDLEVENINGSTAR CDL3BLACKCROWS
-            ## Need to know difference of bearish versus bullish in these patterns to understand what/why we are modelling
-            ## These can be different for entry (BUY) versus exit (SELL)
-            # We need to lag these in order to give the model some value its predictive ability
-            # Crossing of EMA may be another trading pattern for singals
-            self.dataset_ex_df['price_change'] = self.dataset_ex_df['Close'].diff().shift(-1)
-            self.dataset_ex_df['rise'] = self.dataset_ex_df['price_change'] > 0
-            self.dataset_ex_df['drop'] = self.dataset_ex_df['price_change'] < 0
-
-            # Initialize Target as 0 (Hold)
-            self.dataset_ex_df['Target'] = 0
-
-            for i in range(len(self.dataset_ex_df) - 3):
-                # Check for 2 consecutive rising days
-                if (self.dataset_ex_df['rise'].iloc[i + 1] and
-                        #self.dataset_ex_df['rise'].iloc[i + 2] and
-                        self.dataset_ex_df['rise'].iloc[i + 2]):
-                    self.dataset_ex_df.loc[self.dataset_ex_df.index[i], 'Target'] = 2  # Buy signal
-
-                # Check for 2 consecutive dropping days
-                elif (self.dataset_ex_df['drop'].iloc[i + 1] and
-                      #self.dataset_ex_df['drop'].iloc[i + 2] and
-                      self.dataset_ex_df['drop'].iloc[i + 2]):
-                    self.dataset_ex_df.loc[self.dataset_ex_df.index[i], 'Target'] = 1  # Sell signal
+            self.dataset_ex_df['shifted_prices'] = self.dataset_ex_df['Close'].shift(-5)
 
             return self.stock_data, self.dataset_ex_df
+            
         except Exception:
+            print(f"Error while processing the data for {self.ticker}")
             pass
 
     @staticmethod
@@ -313,7 +291,7 @@ class TickerData:
             technical_indicators_df = self.dataset_ex_df[['Date','Ticker','ema_20', 'ema_50', 'ema_100', 'stoch_rsi', 'macd', 'obv', 'aroon_up', 'aroon_down',
                                                           'tenkan_sen', 'kijun_sen', 'senkou_span_a', 'senkou_span_b', 'chikou_span', 'rvi', 'kvo', 'supertrend',
                                                           'b_percent', 'bull_power', 'bear_power', 'mfi', 'keltner_upper', 'keltner_lower', 'trix',
-                                                          'vortex_plus', 'vortex_minus', 'gri','ttm_pe','ttm_eps','eps','eps_estimate','eps_surprise','Close', 'Target']]
+                                                          'vortex_plus', 'vortex_minus', 'gri','ttm_pe','ttm_eps','eps','eps_estimate','eps_surprise','Close', 'shifted_prices']]
             self.final_df = technical_indicators_df.dropna()
             self.final_df.set_index('Date', inplace=True)
             return self.final_df
