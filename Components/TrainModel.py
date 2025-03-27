@@ -4,17 +4,37 @@ import shap
 from sklearn.metrics import classification_report, confusion_matrix, f1_score, accuracy_score
 from tqdm.auto import tqdm
 import numpy as np
+import pandas as pd
+
+import plotly.graph_objects as go
+import plotly.express as px
+from plotly.subplots import make_subplots
 
 
 class LSTMClassifierModel(nn.Module):
     def __init__(self, input_size, hidden_size, num_layers, num_classes, dropout=0.3):
+        # Define device
+        self.history = None
+        self.device = "mps" if torch.backends.mps.is_available() else "cpu"
+
         super(LSTMClassifierModel, self).__init__()
         self.hidden_size = hidden_size
         self.num_layers = num_layers
+        self.input_size = input_size
+        self.dropout_rate = dropout
 
         # Bidirectional LSTM
         self.lstm = nn.LSTM(input_size, hidden_size, num_layers, 
                             batch_first=True, bidirectional=True)
+        # Bidirectional LSTM layers
+        self.lstm = nn.LSTM(
+            input_size=self.input_size,
+            hidden_size=self.hidden_size,
+            num_layers=self.num_layers,
+            batch_first=True,
+            dropout=self.dropout_rate if self.num_layers > 1 else 0,
+            bidirectional=False
+        )
 
         # Attention mechanism: maps LSTM output to a single attention score per time step
         self.attention = nn.Linear(hidden_size * 2, 1)
@@ -71,20 +91,24 @@ class LSTMClassifierModel(nn.Module):
         Returns:
             tuple: Average loss and accuracy.
         """
+
+        self.to(self.device)
+
         self.eval()
         val_loss = 0
         all_preds = []
         all_targets = []
 
         with torch.no_grad():
-            for data, targets in data_loader:
-                outputs = self(data)
-                loss = criterion(outputs, targets)
+            for inputs, labels in data_loader:
+                inputs, labels = inputs.to(self.device), labels.to(self.device)
+                outputs = self(inputs)
+                loss = criterion(outputs, labels)
                 val_loss += loss.item()
 
                 _, preds = torch.max(outputs, 1)
                 all_preds.extend(preds.cpu().numpy())
-                all_targets.extend(targets.cpu().numpy())
+                all_targets.extend(labels.cpu().numpy())
 
         # Calculate metrics
         f1 = f1_score(all_targets, all_preds, average='weighted')
@@ -105,6 +129,8 @@ class LSTMClassifierModel(nn.Module):
             'eval_f1': [], 'test_f1': []
         }
 
+        self.to(self.device)
+
         epoch_progress = tqdm(range(epochs), desc="Training Epochs")
 
         for epoch in epoch_progress:
@@ -114,6 +140,7 @@ class LSTMClassifierModel(nn.Module):
             total = 0
 
             for inputs, labels in train_loader:
+                inputs, labels = inputs.to(self.device), labels.to(self.device)
                 optimizer.zero_grad()
                 outputs = self(inputs)
                 loss = criterion(outputs, labels)
@@ -163,12 +190,88 @@ class LSTMClassifierModel(nn.Module):
         test_loss, test_accuracy, _ = self.evaluate(test_loader, criterion)
         print(f"\nTest Loss: {test_loss:.4f}, Test Accuracy: {test_accuracy*100:.2f}%")
 
+        self.history = history
+
         return history
 
-    @staticmethod
-    def feature_importance(self, predictions, test_data):
-        explainer = shap.KernelExplainer(predictions, test_data)
-        return explainer.shap_values(test_data)
+    def get_predictions(self, training_df, seq_length=10):
+        predictions = []
+        dates = []
+        actuals = []
+        tickers = []
+        confidences = []
+
+        for i in range(seq_length, len(training_df)):
+            # Get sequence
+            sequence = training_df.iloc[i - seq_length:i].drop(columns=['Ticker']).values.astype(np.float32)
+            sequence_tensor = torch.tensor(sequence, dtype=torch.float32).unsqueeze(0)
+            sequence_tensor = sequence_tensor.to(self.device)
+
+            # Get date, actual value, and ticker for the current index
+            date = training_df.index[i]
+            actual = training_df['Target'].iloc[i]
+            ticker = training_df['Ticker'].iloc[i]
+
+            # Make prediction
+            self.eval()
+            with torch.no_grad():
+                output = self(sequence_tensor)
+                probabilities = torch.softmax(output, dim=1)  # Convert outputs to probabilities
+                confidence, pred = torch.max(probabilities, 1)  # Get confidence and predicted class
+
+            predictions.append(pred.item())
+            confidences.append(confidence.item())  # Store the confidence score
+            dates.append(date)
+            actuals.append(actual)
+            tickers.append(ticker)
+
+        # Create DataFrame with predictions
+        preds_df = pd.DataFrame({
+            'Date': dates,
+            'Ticker': tickers,
+            'Actual': actuals,
+            'Predicted': predictions,
+            'Confidence': confidences  # Add confidence scores to the DataFrame
+        })
+        preds_df['entry_signal'] = preds_df['Predicted'] == 2  # Buy signal
+        preds_df['exit_signal'] = preds_df['Predicted'] == 1  # Sell signal
+
+        return preds_df
+
+    def plot_training_history(self):
+        if self.history is not None:
+            # Create subplots for loss and accuracy
+            fig = make_subplots(rows=1, cols=2, subplot_titles=('Loss', 'F1 Score'))
+
+            # Plot losses
+            fig.add_trace(go.Scatter(y=self.history['train_loss'], name='Train Loss', line=dict(color='blue')), row=1, col=1)
+            fig.add_trace(go.Scatter(y=self.history['eval_loss'], name='Eval Loss', line=dict(color='orange')), row=1, col=1)
+            fig.add_trace(go.Scatter(y=self.history['test_loss'], name='Test Loss', line=dict(color='green')), row=1, col=1)
+
+            # Plot f1
+            fig.add_trace(go.Scatter(y=self.history['eval_f1'], name='Eval F1 Score', line=dict(color='orange')), row=1,
+                          col=2)
+            fig.add_trace(go.Scatter(y=self.history['test_f1'], name='Test F1 Score', line=dict(color='green')), row=1,
+                          col=2)
+
+            fig.update_layout(
+                title='Training Metrics',
+                xaxis_title='Epochs',
+                height=700,
+                template='plotly_white',
+                legend=dict(orientation="h", yanchor="bottom", y=1.02)
+            )
+
+            fig.update_yaxes(title_text="Loss", row=1, col=1)
+            fig.update_yaxes(title_text="F1", row=1, col=2)
+
+            return fig
+
+        else:
+            print("Training history not available. Please run train_model() first.")
+            return
+
+
 
 # %%
 # Create a tunable version of the LSTM model
