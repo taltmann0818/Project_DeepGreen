@@ -266,19 +266,19 @@ class TickerData:
         self.dataset_ex_df['stoch_rsi'] = self.stochastic_rsi(self.dataset_ex_df["Close"])
         self.dataset_ex_df['macd'] = self.macd(self.dataset_ex_df["Close"])
 
-        self.dataset_ex_df['obv'] = self.obv(self.dataset_ex_df["Close"], self.stock_data["Volume"])
-        self.dataset_ex_df['aroon_up'], self.dataset_ex_df['aroon_down'] = self.aroon(self.dataset_ex_df["Close"], period=25)
-        self.dataset_ex_df['tenkan_sen'], self.dataset_ex_df['kijun_sen'], self.dataset_ex_df['senkou_span_a'], self.dataset_ex_df['senkou_span_b'], self.dataset_ex_df['chikou_span'] = self.ichimoku_cloud(self.dataset_ex_df["High"],self.dataset_ex_df["Low"],self.dataset_ex_df["Close"])
-        self.dataset_ex_df['rvi'] = self.relative_vigor_index(self.dataset_ex_df["High"],self.dataset_ex_df["Low"],self.dataset_ex_df["Close"],self.dataset_ex_df["Open"])
-        self.dataset_ex_df['kvo'] = self.klinger_oscillator(self.dataset_ex_df["High"],self.dataset_ex_df["Low"],self.dataset_ex_df["Close"],self.dataset_ex_df["Volume"])
-        self.dataset_ex_df['supertrend'] = self.supertrend(self.dataset_ex_df["High"],self.dataset_ex_df["Low"],self.dataset_ex_df["Close"])
-        self.dataset_ex_df['b_percent'] = self.bollinger_percent_b(self.dataset_ex_df["Close"])
-        self.dataset_ex_df['bull_power'], self.dataset_ex_df['bear_power']  = self.elder_ray(self.dataset_ex_df["High"],self.dataset_ex_df["Low"],self.dataset_ex_df["Close"]) 
-        self.dataset_ex_df['mfi'] = self.market_facilitation_index(self.dataset_ex_df["High"],self.dataset_ex_df["Low"],self.dataset_ex_df["Volume"])
-        self.dataset_ex_df['keltner_upper'], self.dataset_ex_df['keltner_lower']  = self.keltner_channel(self.dataset_ex_df["High"],self.dataset_ex_df["Low"],self.dataset_ex_df["Close"])
-        self.dataset_ex_df['trix'] = self.trix(self.dataset_ex_df["Close"])
-        self.dataset_ex_df['vortex_plus'], self.dataset_ex_df['vortex_minus']  = self.vortex(self.dataset_ex_df["High"],self.dataset_ex_df["Low"])
-        self.dataset_ex_df['gri'] = self.gri(self.dataset_ex_df["High"],self.dataset_ex_df["Low"],self.dataset_ex_df["Close"],self.dataset_ex_df["Open"])
+        #self.dataset_ex_df['obv'] = self.obv(self.dataset_ex_df["Close"], self.stock_data["Volume"])
+        #self.dataset_ex_df['aroon_up'], self.dataset_ex_df['aroon_down'] = self.aroon(self.dataset_ex_df["Close"], period=25)
+        #self.dataset_ex_df['tenkan_sen'], self.dataset_ex_df['kijun_sen'], self.dataset_ex_df['senkou_span_a'], self.dataset_ex_df['senkou_span_b'], self.dataset_ex_df['chikou_span'] = self.ichimoku_cloud(self.dataset_ex_df["High"],self.dataset_ex_df["Low"],self.dataset_ex_df["Close"])
+        #self.dataset_ex_df['rvi'] = self.relative_vigor_index(self.dataset_ex_df["High"],self.dataset_ex_df["Low"],self.dataset_ex_df["Close"],self.dataset_ex_df["Open"])
+        #self.dataset_ex_df['kvo'] = self.klinger_oscillator(self.dataset_ex_df["High"],self.dataset_ex_df["Low"],self.dataset_ex_df["Close"],self.dataset_ex_df["Volume"])
+        #self.dataset_ex_df['supertrend'] = self.supertrend(self.dataset_ex_df["High"],self.dataset_ex_df["Low"],self.dataset_ex_df["Close"])
+        #self.dataset_ex_df['b_percent'] = self.bollinger_percent_b(self.dataset_ex_df["Close"])
+        #self.dataset_ex_df['bull_power'], self.dataset_ex_df['bear_power']  = self.elder_ray(self.dataset_ex_df["High"],self.dataset_ex_df["Low"],self.dataset_ex_df["Close"])
+        #self.dataset_ex_df['mfi'] = self.market_facilitation_index(self.dataset_ex_df["High"],self.dataset_ex_df["Low"],self.dataset_ex_df["Volume"])
+        #self.dataset_ex_df['keltner_upper'], self.dataset_ex_df['keltner_lower']  = self.keltner_channel(self.dataset_ex_df["High"],self.dataset_ex_df["Low"],self.dataset_ex_df["Close"])
+        #self.dataset_ex_df['trix'] = self.trix(self.dataset_ex_df["Close"])
+        #self.dataset_ex_df['vortex_plus'], self.dataset_ex_df['vortex_minus']  = self.vortex(self.dataset_ex_df["High"],self.dataset_ex_df["Low"])
+        #self.dataset_ex_df['gri'] = self.gri(self.dataset_ex_df["High"],self.dataset_ex_df["Low"],self.dataset_ex_df["Close"],self.dataset_ex_df["Open"])
         
         return self.dataset_ex_df
 
@@ -288,10 +288,7 @@ class TickerData:
         """
         try:
 
-            technical_indicators_df = self.dataset_ex_df[['Date','Ticker','ema_20', 'ema_50', 'ema_100', 'stoch_rsi', 'macd', 'obv', 'aroon_up', 'aroon_down',
-                                                          'tenkan_sen', 'kijun_sen', 'senkou_span_a', 'senkou_span_b', 'chikou_span', 'rvi', 'kvo', 'supertrend',
-                                                          'b_percent', 'bull_power', 'bear_power', 'mfi', 'keltner_upper', 'keltner_lower', 'trix',
-                                                          'vortex_plus', 'vortex_minus', 'gri','ttm_pe','ttm_eps','eps','eps_estimate','eps_surprise','Close', 'shifted_prices']]
+            technical_indicators_df = self.dataset_ex_df[['Date','Ticker','ema_20', 'ema_50', 'ema_100', 'stoch_rsi', 'macd','Close', 'shifted_prices']]
             self.final_df = technical_indicators_df.dropna()
             self.final_df.set_index('Date', inplace=True)
             return self.final_df
