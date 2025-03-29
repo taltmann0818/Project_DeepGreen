@@ -1,8 +1,5 @@
-import contextlib
-
 import torch
 import torch.nn as nn
-import shap
 from sklearn.metrics import classification_report, confusion_matrix, f1_score, accuracy_score
 import torch.nn.functional as F
 from tqdm.auto import tqdm
@@ -13,8 +10,14 @@ import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
 
+import shap
+
+from torch.utils.data import Dataset, DataLoader
+from sklearn.preprocessing import StandardScaler
+
+
 class TEMPUS(nn.Module):
-    def __init__(self, input_size, hidden_size, num_layers, dropout=0.0,
+    def __init__(self, input_size, hidden_size, num_layers, dropout=0.0, tuning_config=None,
                  tcn_kernel_sizes=[3, 5, 7]):
         # Define device
         self.history = None
@@ -22,10 +25,16 @@ class TEMPUS(nn.Module):
         self.device = "cpu"
 
         super(TEMPUS, self).__init__()
-        self.hidden_size = hidden_size
-        self.num_layers = num_layers
-        self.input_size = input_size
-        self.dropout_rate = dropout
+        if tuning_config is not None:
+            self.input_size = tuning_config["input_size"]
+            self.hidden_size = tuning_config["hidden_size"]
+            self.num_layers = tuning_config["num_layers"]
+            self.dropout_rate = tuning_config["dropout_rate"]
+        else:
+            self.hidden_size = hidden_size
+            self.num_layers = num_layers
+            self.input_size = input_size
+            self.dropout_rate = dropout
 
         # Multiple Temporal Resolutions
         self.lstm_short = nn.LSTM(input_size=self.input_size,hidden_size=self.hidden_size,num_layers=self.num_layers,batch_first=True, dropout=self.dropout_rate if self.num_layers > 1 else 0,bidirectional=True)
@@ -132,9 +141,10 @@ class TEMPUS(nn.Module):
         x = self.dropout(x)
         
         # Use the regression head directly without softmax.
-        output = self.regression_head(x).squeeze(-1)
+        self.outputs = self.regression_head(x).squeeze(-1).to(self.device)
+        self.attention_weights =  attention_weights.to(self.device)
         
-        return {'regression': output, 'attention': attention_weights}
+        return self.outputs, self.attention_weights
 
     def train_model(self, train_loader, test_loader, criterion, optimizer, num_epochs=10, clip_value=1.0, lambda_att=0.1):
         """
@@ -142,7 +152,7 @@ class TEMPUS(nn.Module):
         """
         self.to(self.device)
 
-        best_test_rmse = float('inf')
+        best_test_mape = float('inf')
         best_model_state = None
 
         history = {
@@ -154,19 +164,20 @@ class TEMPUS(nn.Module):
         for epoch in epoch_progress:
             self.train()
             running_loss = 0.0
+
             for inputs, targets in train_loader:
                 inputs = inputs.to(self.device)
-                target_values = targets['shifted_prices'].to(self.device).unsqueeze(1)
-                
-                optimizer.zero_grad()
+                #target_values = targets['shifted_prices'].to(self.device).unsqueeze(1)
+
                 outputs = self(inputs)
-                predictions = outputs['regression']
-                loss = criterion(predictions, target_values)
+                loss = criterion(outputs, targets)
+
+                optimizer.zero_grad()
 
                 # Optionally add attention regularization
                 attention_entropy = 0
                 if lambda_att > 0:
-                    attn = outputs['attention']
+                    attn = self.attention_weights
                     attention_entropy = -torch.sum(attn * torch.log(attn + 1e-8), dim=1).mean()
                     combined_loss = loss + lambda_att * attention_entropy # Combine losses (adjust lambda_att as needed)
                 else:
@@ -181,14 +192,14 @@ class TEMPUS(nn.Module):
             train_loss = running_loss / len(train_loader)
             
             # Evaluate on validation set
-            test_loss, test_rmse, test_mape = self.evaluate(test_loader, criterion)
+            test_loss, test_rmse, test_mape, _ = self.evaluate(test_loader, criterion)
             epoch_progress.set_postfix({
                 'Train Loss': f'{train_loss:.4f}',
                 'Test Loss': f'{test_loss:.4f}',
                 'RMSE': f'{test_rmse:.4f}',
                 'MAPE': f'{test_mape:.2f}%'
             })
-            print(f"Epoch {epoch}/{num_epochs}; Train Loss: {train_loss:.4f}, Test Loss: {test_loss:.4f}, RMSE: {test_rmse:.2f}%")
+            #print(f"Epoch {epoch}/{num_epochs}; Train Loss: {train_loss:.4f}, Test Loss: {test_loss:.4f}, RMSE: {test_rmse:.2f}%")
 
             # Store history
             history['train_loss'].append(train_loss)
@@ -196,9 +207,9 @@ class TEMPUS(nn.Module):
             history['rmse'].append(test_rmse)
             history['mape'].append(test_mape)
 
-            # Store model state with best val rmse
-            if test_mape > best_test_rmse:
-                best_test_rmse = test_rmse
+            # Store model state with best val mape
+            if test_mape > best_test_mape:
+                best_test_mape = test_mape
                 best_model_state = self.state_dict()
 
         # Load the best model state before returning
@@ -206,7 +217,7 @@ class TEMPUS(nn.Module):
             self.load_state_dict(best_model_state)
 
         # Final evaluation with best model state
-        test_loss, test_rmse, test_mape = self.evaluate(test_loader, criterion)
+        test_loss, test_rmse, test_mape, self.feature_importance = self.evaluate(test_loader, criterion)
         print(f"\nBest Loss: {test_loss:.4f}, Best RMSE: {test_rmse:.4f}, Best MAPE: {test_mape:.2f}%")
 
         self.history = history
@@ -226,12 +237,11 @@ class TEMPUS(nn.Module):
                 target_values = targets['shifted_prices'].to(self.device).unsqueeze(1)  # shape: (batch, 1)
                 
                 outputs = self(inputs)
-                predictions = outputs['regression']  # use the regression key
-                
-                loss = criterion(predictions, target_values)
+
+                loss = criterion(outputs, target_values)
                 total_loss += loss.item() * inputs.size(0)
                 
-                all_predictions.append(predictions.cpu().numpy())
+                all_predictions.append(outputs.cpu().numpy())
                 all_targets.append(target_values.cpu().numpy())
         
         all_predictions = np.concatenate(all_predictions, axis=0)
@@ -242,35 +252,142 @@ class TEMPUS(nn.Module):
         rmse = np.sqrt(mse)
         # Avoid division by zero by adding a small epsilon
         mape = np.mean(np.abs((all_targets - all_predictions) / (all_targets + 1e-8))) * 100
-        
         avg_loss = total_loss / len(data_loader.dataset)
-        return avg_loss, rmse, mape
 
-    def plot_training_history(self):
+        # Calculate SHAP values
+        batch_x, batch_y = next(iter(data_loader))
+        batch_x = batch_x.to(self.device)
+        explainer = shap.DeepExplainer(self, batch_x)
+        feature_importance = np.mean(np.abs(explainer.shap_values(batch_x)), axis=0)
+
+        return avg_loss, rmse, mape, feature_importance
+
+
+    def get_predictions(self, training_data, model_outputs=None, seq_length=10):
+        """
+        Generate predictions using the TEMPUS model and merge with the training data.
+
+        Args:
+            training_data (pd.DataFrame): The training data with the time index
+            model_outputs (dict, optional): Pre-computed model outputs. If None, will run predictions
+            seq_length (int): The sequence length used for predictions
+
+        Returns:
+            pd.DataFrame: DataFrame with original data and predictions merged based on index
+        """
+        if model_outputs is None:
+            # Initialize lists for storing results
+            predictions = []
+            dates = []
+            actuals = []
+            tickers = []
+            feature_importances = []
+
+            self.to(self.device)
+            self.eval()
+
+            # Loop through the data to make predictions
+            for i in range(seq_length, len(training_data)):
+                # Get sequence
+                sequence = training_data.iloc[i - seq_length:i].drop(
+                    columns=['Ticker'] if 'Ticker' in training_data.columns else []
+                ).values.astype(np.float32)
+                sequence_tensor = torch.tensor(sequence, dtype=torch.float32).unsqueeze(0)
+                sequence_tensor = sequence_tensor.to(self.device)
+
+                # Get date, actual value, and ticker for the current index
+                date = training_data.index[i]
+                actual = training_data['Target'].iloc[i] if 'Target' in training_data.columns else None
+                ticker = training_data['Ticker'].iloc[i] if 'Ticker' in training_data.columns else None
+
+                # Make prediction
+                with torch.no_grad():
+                    outputs = self(sequence_tensor)
+                    prediction = self.outputs.item()  # Use regression output from TEMPUS
+
+                predictions.append(prediction)
+                dates.append(date)
+                if actual is not None:
+                    actuals.append(actual)
+                if ticker is not None:
+                    tickers.append(ticker)
+
+            # Create prediction DataFrame
+            pred_data = {'Date': dates, 'Predicted': predictions}
+
+            if actual is not None:
+                pred_data['Actual'] = actuals
+            if ticker is not None:
+                pred_data['Ticker'] = tickers
+
+            preds_df = pd.DataFrame(pred_data)
+            preds_df.set_index('Date', inplace=True)
+
+            # Merge predictions with original data
+            preds_df = training_data.iloc[seq_length:].copy()
+            self.preds_df = preds_df.join(preds_df[['Predicted']])
+
+            return self.preds_df
+        else:
+            # If model outputs are provided, merge them with the training data
+            # Assuming model_outputs has the same index as training_data
+            self.preds_df = training_data.copy()
+            self.preds_df['Predicted'] = model_outputs
+
+            return self.preds_df
+
+    def plot_training_history(self, training_data=None):
         if self.history is not None:
             # Create subplots for loss and accuracy
-            fig = make_subplots(rows=1, cols=2, subplot_titles=('Loss Over Epochs', 'MAPE Over Epochs'))
+            if training_data is not None:
+                fig = make_subplots(rows=2, cols=2, subplot_titles=('Loss Over Epochs',
+                                                                    'MAPE Over Epochs',
+                                                                    'SHAP Values',
+                                                                    'Predicted vs Actual (Shifted) Prices'))
+            else:
+                fig = make_subplots(rows=1, cols=2, subplot_titles=('Loss Over Epochs',
+                                                                    'MAPE Over Epochs'))
 
             # Plot losses
-            fig.add_trace(go.Scatter(y=self.history['train_loss'], name='Train Loss', line=dict(color='blue')), row=1,
-                          col=1)
-            fig.add_trace(go.Scatter(y=self.history['test_loss'], name='Test Loss', line=dict(color='orange')), row=1,
-                          col=1)
+            fig.add_trace(go.Scatter(y=self.history['train_loss'], name='Train Loss', line=dict(color='blue')),
+                          row=1, col=1)
+            fig.add_trace(go.Scatter(y=self.history['test_loss'], name='Test Loss', line=dict(color='orange')),
+                          row=1, col=1)
+            fig.update_xaxes(title_text="Epochs", row=1, col=1)
+            fig.update_yaxes(title_text="Loss", row=1, col=1)
 
             # Plot MAPE
-            fig.add_trace(go.Scatter(y=self.history['mape'], name='Test MAPE', line=dict(color='orange')), row=1,
-                          col=2)
+            fig.add_trace(go.Scatter(y=self.history['mape'], name='Test MAPE', line=dict(color='orange')),
+                          row=1, col=2)
+            fig.update_xaxes(title_text="Epochs", row=1, col=2)
+            fig.update_yaxes(title_text="MAPE %", row=1, col=2)
+
+            # Plot SHAP values
+            if training_data is not None:
+                sorted_idx = np.argsort(self.feature_importance)
+                feature_names = [f"Feature {i}" for i in range(training_data.columns.shape[1])]
+                fig.add_trace(go.Bar(y=[feature_names[i] for i in sorted_idx], x=self.feature_importance[sorted_idx],
+                                     orientation='h'), row=2,col=1)
+                fig.update_xaxes(title_text="mean( | SHAP value |)", row=2, col=1)
+                fig.update_yaxes(title_text="Feature", row=2, col=1)
+
+            # Plot predicted vs actual (shifted) prices
+            if training_data is not None:
+                if self.preds_df is None:
+                    preds_df = self.get_predictions(training_data)
+                fig.add_trace(go.Scatter(y=preds_df['shifted_prices'], x=preds_df['Date'], name='Actual', line=dict(color='blue')),
+                              row=2,col=2)
+                fig.add_trace(go.Scatter(y=preds_df['Predicted'], x=preds_df['Date'], name='Prediction', line=dict(color='orange')),
+                              row=2,col=2)
+                fig.update_xaxes(title_text="Date", row=2, col=2)
+                fig.update_yaxes(title_text="Stock Price", row=2, col=2)
 
             fig.update_layout(
                 title='Model Training Metrics',
-                xaxis_title='Epochs',
                 height=700,
-                template='plotly_white',
+                #template='plotly_white',
                 legend=dict(orientation="h", yanchor="bottom", y=1.02)
             )
-
-            fig.update_yaxes(title_text="Loss", row=1, col=1)
-            fig.update_yaxes(title_text="MAPE", row=1, col=2)
 
             return fig
 
@@ -295,74 +412,16 @@ class TemporalAttention(nn.Module):
 
         # Compute base attention scores from features
         feature_scores = self.feature_attn(lstm_output)  # [batch, seq_len, 1]
-
         # Compute time-based attention
         time_weights = self.time_attn(time_features)  # [batch, seq_len, 1]
-
         # Combine feature and time attention
         combined_scores = feature_scores + time_weights
-
         # Apply softmax to get attention weights
         attention_weights = torch.softmax(combined_scores, dim=1)
-
         # Apply attention to get context vector
         context = torch.bmm(attention_weights.transpose(1, 2), lstm_output)  # [batch, 1, hidden]
 
         return context, attention_weights
-
-
-
-# %%
-# Create a tunable version of the LSTM model
-class TunableLSTMClassifier(nn.Module):
-    def __init__(self, config):
-        super(TunableLSTMClassifier, self).__init__()
-        self.input_size = config["input_size"]
-        self.hidden_size = config["hidden_size"]
-        self.num_layers = config["num_layers"]
-        self.num_classes = config["num_classes"]
-        self.dropout_rate = config["dropout_rate"]
-
-        # LSTM layers
-        self.lstm = nn.LSTM(
-            input_size=self.input_size,
-            hidden_size=self.hidden_size,
-            num_layers=self.num_layers,
-            batch_first=True,
-            dropout=self.dropout_rate if self.num_layers > 1 else 0,
-            bidirectional=False
-        )
-
-        # Self-attention mechanism
-        self.attention = nn.Sequential(
-            nn.Linear(self.hidden_size, self.hidden_size),
-            nn.Tanh(),
-            nn.Linear(self.hidden_size, 1)
-        )
-
-        # Fully connected layers
-        self.fc1 = nn.Linear(self.hidden_size, self.hidden_size)
-        self.fc2 = nn.Linear(self.hidden_size, self.num_classes)
-
-        # Dropout layer
-        self.dropout = nn.Dropout(self.dropout_rate)
-
-    def forward(self, x):
-        # LSTM forward pass
-        lstm_out, _ = self.lstm(x)
-
-        # Apply attention
-        attention_weights = self.attention(lstm_out)
-        attention_weights = torch.softmax(attention_weights, dim=1)
-        context_vector = torch.sum(attention_weights * lstm_out, dim=1)
-
-        # Fully connected layers with dropout
-        out = self.fc1(context_vector)
-        out = nn.functional.relu(out)
-        out = self.dropout(out)
-        out = self.fc2(out)
-
-        return out
 
 
 class BaseLSTM(nn.Module):
@@ -544,7 +603,7 @@ class BaseLSTM(nn.Module):
             self.load_state_dict(best_model_state)
 
         # Final evaluation on test set
-        test_loss, test_accuracy, _ = self.evaluate(test_loader, criterion)
+        test_loss, test_accuracy = self.evaluate(test_loader, criterion)
         print(f"\nTest Loss: {test_loss:.4f}, Test Accuracy: {test_accuracy*100:.2f}%")
 
         self.history = history
@@ -627,3 +686,91 @@ class BaseLSTM(nn.Module):
         else:
             print("Training history not available. Please run train_model() first.")
             return
+
+from torch.utils.data import Dataset, DataLoader
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+import numpy as np
+import torch
+import pandas as pd
+
+class DataModule:
+    def __init__(self, data, window_size=20, batch_size=32, eval_size=0.2, random_state=42):
+        """
+        data: pandas DataFrame or similar data structure with .iloc
+        seq_length: length of the sequence window
+        batch_size: batch size for DataLoaders
+        test_size: proportion of the data to hold out in the first split
+        eval_size: proportion of the holdout to be used as evaluation set (the rest becomes test)
+        random_state: seed for reproducibility
+        """
+        # IF ticker columns exists in data then drop it
+        if 'Ticker' in data.columns:
+            self.data = data.drop(columns=['Ticker'])
+        elif data.columns[0] == 'Ticker':
+            # Drop the first column by index
+            self.data = data.iloc[:, 1:]
+        else:
+            self.data = data
+
+        self.window_size = window_size
+        self.batch_size = batch_size
+        self.eval_size = eval_size
+        self.random_state = random_state
+
+        self.setup()
+
+    def setup(self):
+        # Instead of a random split, use a sequential split.
+        train_end = int((1 - self.eval_size) * len(self.data))
+        self.df_train = self.data.iloc[:train_end].copy()
+        self.df_test = self.data.iloc[train_end:].copy()
+
+        # Create datasets and data loaders
+        target_col = 'shifted_prices'
+        feature_cols = [col for col in self.data.columns if col != target_col]
+        self.num_features = len(feature_cols)
+
+        # Data Scaling
+        self.scaler = StandardScaler()
+        train_features = self.df_train[feature_cols]
+        test_features = self.df_test[feature_cols]
+
+        self.scaler.fit(train_features)
+        train_scaled = self.scaler.transform(train_features)
+        test_scaled = self.scaler.transform(test_features)
+
+        # Convert back to DataFrame with proper column names
+        self.df_train_scaled = pd.DataFrame(train_scaled, columns=feature_cols)
+        self.df_test_scaled = pd.DataFrame(test_scaled, columns=feature_cols)
+
+        # Add target column back
+        self.df_train_scaled[target_col] = self.df_train[target_col].values
+        self.df_test_scaled[target_col] = self.df_test[target_col].values
+
+        self.train_dataset = SequenceDataset(self.df_train_scaled,target=target_col,features=feature_cols,window_size=self.window_size)
+        self.train_loader = DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True)
+        self.test_dataset = SequenceDataset(self.df_test_scaled,target=target_col,features=feature_cols,window_size=self.window_size)
+        self.test_loader = DataLoader(self.test_dataset, batch_size=self.batch_size, shuffle=False)
+
+class SequenceDataset(Dataset):
+    def __init__(self, dataframe, target, features, window_size):
+        self.features = features
+        self.target = target
+        self.window_size = window_size
+        self.y = torch.tensor(dataframe[target].values).float()
+        self.X = torch.tensor(dataframe[features].values).float()
+
+    def __len__(self):
+        return self.X.shape[0]
+
+    def __getitem__(self, i):
+        if i >= self.window_size - 1:
+            i_start = i - self.window_size + 1
+            x = self.X[i_start:(i + 1), :]
+        else:
+            padding = self.X[0].repeat(self.window_size - i - 1, 1)
+            x = self.X[0:(i + 1), :]
+            x = torch.cat((padding, x), 0)
+
+        return x, self.y[i]
