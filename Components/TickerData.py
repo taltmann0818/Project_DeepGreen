@@ -4,7 +4,7 @@ import pandas as pd
 from datetime import datetime, timedelta
 
 class TickerData:
-    def __init__(self, ticker, years=1):
+    def __init__(self, ticker, years=1, prediction_window=5):
         """
         Initialize the StockAnalyzer with a ticker symbol and number of past days to fetch.
         """
@@ -18,6 +18,7 @@ class TickerData:
         self.fft_df_real = None
         self.fft_df_imag = None
         self.merged_df = None
+        self.prediction_window = -abs(prediction_window)
 
     def fetch_stock_data(self):
         """
@@ -75,7 +76,7 @@ class TickerData:
             self.dataset_ex_df = pd.merge_asof(self.dataset_ex_df, self.y_income_stmt[['Date', 'ttm_eps']], on='Date', direction='backward')
             self.dataset_ex_df['ttm_pe'] = self.dataset_ex_df['Close'] / self.dataset_ex_df['ttm_eps']
 
-            self.dataset_ex_df['shifted_prices'] = self.dataset_ex_df['Close'].shift(-5)
+            self.dataset_ex_df['shifted_prices'] = self.dataset_ex_df['Close'].shift(self.prediction_window)
 
             return self.stock_data, self.dataset_ex_df
             

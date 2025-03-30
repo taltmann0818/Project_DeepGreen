@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 from sklearn.metrics import classification_report, confusion_matrix, f1_score, accuracy_score
 import torch.nn.functional as F
+from torch.nn.functional import dropout
+from torch.optim import AdamW
 from tqdm.auto import tqdm
 import numpy as np
 import pandas as pd
@@ -15,61 +17,62 @@ import shap
 from torch.utils.data import Dataset, DataLoader
 from sklearn.preprocessing import StandardScaler
 
-
 class TEMPUS(nn.Module):
-    def __init__(self, input_size, hidden_size, num_layers, dropout=0.0, tuning_config=None,
-                 tcn_kernel_sizes=[3, 5, 7]):
-        # Define device
-        self.history = None
-        #self.device = "mps" if torch.backends.mps.is_available() else "cpu"
-        self.device = "cpu"
+    """
+    The TEMPUS model for time-series data processing and prediction tasks.
 
+    TEMPUS implements a hybrid deep learning architecture
+    that combines LSTM at multiple temporal resolutions, Temporal Convolution Networks (TCN), feature fusion, Temporal Attention (TA), and fully connected layers for regression tasks. It is designed
+    to handle sequential data effectively by capturing temporal
+    relationships and high-level data representations.
+
+    """
+    #def __init__(self, input_size, hidden_size=64, num_layers=2, dropout=0.2,tcn_kernel_sizes=[3, 5, 7], attention_heads=4, device="cpu"):
+    def __init__(self, config):
         super(TEMPUS, self).__init__()
-        if tuning_config is not None:
-            self.input_size = tuning_config["input_size"]
-            self.hidden_size = tuning_config["hidden_size"]
-            self.num_layers = tuning_config["num_layers"]
-            self.dropout_rate = tuning_config["dropout_rate"]
-        else:
-            self.hidden_size = hidden_size
-            self.num_layers = num_layers
-            self.input_size = input_size
-            self.dropout_rate = dropout
+        self.device = config["device"] #device
+        self.hidden_size = config["hidden_size"]
+        self.num_layers = config["num_layers"] #num_layers
+        self.input_size = config["input_size"]
+        self.dropout = config["dropout"] #dropout
+        self.clip_size = config["clip_size"] #tcn_kernel_sizes
+        self.tcn_kernel_sizes = [3, 5, 7] #tcn_kernel_sizes
 
-        # Multiple Temporal Resolutions
-        self.lstm_short = nn.LSTM(input_size=self.input_size,hidden_size=self.hidden_size,num_layers=self.num_layers,batch_first=True, dropout=self.dropout_rate if self.num_layers > 1 else 0,bidirectional=True)
-
-        self.lstm_medium = nn.LSTM(input_size=self.input_size,hidden_size=self.hidden_size,num_layers=self.num_layers,batch_first=True,dropout=self.dropout_rate if self.num_layers > 1 else 0,bidirectional=True)
-        self.temporal_fusion = nn.Linear(hidden_size * 4, hidden_size * 2) # Fusion layer for temporal resolutions
+        # Multiple Temporal Resolutions of LSTM
+        self.lstm_short = nn.LSTM(input_size=self.input_size,hidden_size=self.hidden_size,num_layers=self.num_layers,batch_first=True, dropout=self.dropout if self.num_layers > 1 else 0, bidirectional=True)
+        self.lstm_medium = nn.LSTM(input_size=self.input_size,hidden_size=self.hidden_size,num_layers=self.num_layers,batch_first=True,dropout=self.dropout if self.num_layers > 1 else 0, bidirectional=True)
+        self.temporal_fusion = nn.Linear(self.hidden_size * 4, self.hidden_size * 2) # Fusion layer for temporal resolutions
 
         # Temporal Convolutional Network (TCN)
         self.tcn_modules = nn.ModuleList()
-        for k_size in tcn_kernel_sizes:
+        for k_size in self.tcn_kernel_sizes:
             padding = (k_size - 1) // 2  # Same padding
             self.tcn_modules.append(nn.Sequential(
-                nn.Conv1d(input_size, hidden_size, kernel_size=k_size, padding=padding),
-                nn.BatchNorm1d(hidden_size),
+                nn.Conv1d(self.input_size, self.hidden_size, kernel_size=k_size, padding=padding),
+                nn.BatchNorm1d(self.hidden_size),
                 nn.ReLU(),
-                nn.Conv1d(hidden_size, hidden_size, kernel_size=k_size, padding=padding),
-                nn.BatchNorm1d(hidden_size),
+                nn.Conv1d(self.hidden_size, self.hidden_size, kernel_size=k_size, padding=padding),
+                nn.BatchNorm1d(self.hidden_size),
                 nn.ReLU()
             ))
-        self.tcn_fusion = nn.Linear(hidden_size * len(tcn_kernel_sizes), hidden_size * 2)
+        self.tcn_fusion = nn.Linear(self.hidden_size * len(self.tcn_kernel_sizes), self.hidden_size * 2)
 
         # Combine TCN and LSTM features
-        self.feature_fusion = nn.Linear(hidden_size * 4, hidden_size * 2)
+        self.feature_fusion = nn.Linear(self.hidden_size * 4, self.hidden_size * 2)
 
-        # Enhanced Temporal Attention
-        self.temporal_attention = TemporalAttention(hidden_size * 2)
+        # Temporal attention
+        #self.temporal_attention = TemporalAttention(
+        #    d_model=self.hidden_size * 2,
+        #    nhead=4,
+        #    dropout=self.dropout
+        #)
+        self.temporal_attention = TemporalAttention(self.hidden_size * 2)
 
-        # Fully connected layers with residual connections
-        self.fc1 = nn.Linear(hidden_size * 2, hidden_size)
-        self.fc2 = nn.Linear(hidden_size, hidden_size // 2)
-
-        self.regression_head = nn.Linear(hidden_size // 2, 1)
-
-        # Dropout for regularization
-        self.dropout = nn.Dropout(self.dropout_rate)
+        # Fully connected layers
+        self.fc1 = nn.Linear(self.hidden_size * 2, self.hidden_size)
+        self.fc2 = nn.Linear(self.hidden_size, self.hidden_size // 2)
+        self.regression_head = nn.Linear(self.hidden_size // 2, 1)
+        self.dropout = nn.Dropout(self.dropout)
 
     def downsample_sequence(self, x, factor):
         """Downsample time sequence by average pooling"""
@@ -88,8 +91,7 @@ class TEMPUS(nn.Module):
 
     def forward(self, x):
         batch_size, seq_len, features = x.size()
-
-        # Create time features (day of sequence percentage)
+        batch_size, seq_len, features = x.size()
         time_features = torch.linspace(0, 1, seq_len).unsqueeze(0).unsqueeze(2).repeat(batch_size, 1, 1).to(x.device)
 
         # Process with TCN
@@ -104,7 +106,7 @@ class TEMPUS(nn.Module):
         tcn_combined = tcn_combined.transpose(1, 2)  # Back to (batch, seq, features)
         tcn_features = self.tcn_fusion(tcn_combined)
 
-        # 1. Multiple Temporal Resolutions
+        # Multiple Temporal Resolutions
         # Original sequence for short-term patterns
         lstm_short_out, _ = self.lstm_short(x)
 
@@ -131,24 +133,26 @@ class TEMPUS(nn.Module):
         combined_features = torch.cat([lstm_features, tcn_features], dim=2)
         fused_features = self.feature_fusion(combined_features)
 
-        # 8. Apply temporal attention with time features
-        attended_features, attention_weights = self.temporal_attention(fused_features, time_features)
+        # Apply temporal attention
+        #attended_features = self.temporal_attention(fused_features)
+        attended_features, _ = self.temporal_attention(fused_features, time_features)
 
-        # Fully connected layers with dropout
-        x = F.gelu(self.fc1(attended_features))
-        x = self.dropout(x)
-        x = F.gelu(self.fc2(x))
-        x = self.dropout(x)
-        
-        # Use the regression head directly without softmax.
-        self.outputs = self.regression_head(x).squeeze(-1).to(self.device)
-        self.attention_weights =  attention_weights.to(self.device)
-        
-        return self.outputs, self.attention_weights
+        # Global pooling (average) across time dimension to get single feature vector per sequence
+        #pooled_features = torch.mean(attended_features, dim=1)
 
-    def train_model(self, train_loader, test_loader, criterion, optimizer, num_epochs=10, clip_value=1.0, lambda_att=0.1):
+        # Final output layers
+        #x = F.relu(self.fc1(pooled_features))
+        x = F.relu(self.fc1(attended_features))
+        x = self.dropout(x)
+        x = F.relu(self.fc2(x))
+        x = self.dropout(x)
+        outputs = self.regression_head(x)
+
+        return outputs
+
+    def train_model(self, train_loader, test_loader, criterion, optimizer, num_epochs=10):
         """
-        Train the model with regression task
+        Train the model with a regression task
         """
         self.to(self.device)
 
@@ -166,33 +170,21 @@ class TEMPUS(nn.Module):
             running_loss = 0.0
 
             for inputs, targets in train_loader:
-                inputs = inputs.to(self.device)
-                #target_values = targets['shifted_prices'].to(self.device).unsqueeze(1)
-
-                outputs = self(inputs)
+                inputs, targets = inputs.to(self.device), targets.to(self.device)
+                outputs = self(inputs).to(self.device).squeeze()
                 loss = criterion(outputs, targets)
 
                 optimizer.zero_grad()
-
-                # Optionally add attention regularization
-                attention_entropy = 0
-                if lambda_att > 0:
-                    attn = self.attention_weights
-                    attention_entropy = -torch.sum(attn * torch.log(attn + 1e-8), dim=1).mean()
-                    combined_loss = loss + lambda_att * attention_entropy # Combine losses (adjust lambda_att as needed)
-                else:
-                    combined_loss = loss
-                
-                combined_loss.backward()
-                nn.utils.clip_grad_norm_(self.parameters(), max_norm=1.0)
+                loss.backward()
+                nn.utils.clip_grad_norm_(self.parameters(), max_norm=self.clip_size)
                 optimizer.step()
-                
-                running_loss += combined_loss.item()
-            
+
+                running_loss += loss.item()
+
             train_loss = running_loss / len(train_loader)
-            
+
             # Evaluate on validation set
-            test_loss, test_rmse, test_mape, _ = self.evaluate(test_loader, criterion)
+            test_loss, test_rmse, test_mape = self.evaluate(test_loader, criterion)
             epoch_progress.set_postfix({
                 'Train Loss': f'{train_loss:.4f}',
                 'Test Loss': f'{test_loss:.4f}',
@@ -208,7 +200,7 @@ class TEMPUS(nn.Module):
             history['mape'].append(test_mape)
 
             # Store model state with best val mape
-            if test_mape > best_test_mape:
+            if test_mape < best_test_mape:
                 best_test_mape = test_mape
                 best_model_state = self.state_dict()
 
@@ -217,8 +209,7 @@ class TEMPUS(nn.Module):
             self.load_state_dict(best_model_state)
 
         # Final evaluation with best model state
-        test_loss, test_rmse, test_mape, self.feature_importance = self.evaluate(test_loader, criterion)
-        print(f"\nBest Loss: {test_loss:.4f}, Best RMSE: {test_rmse:.4f}, Best MAPE: {test_mape:.2f}%")
+        print(f"\nBest MAPE: {best_test_mape:.2f}%")
 
         self.history = history
 
@@ -230,23 +221,21 @@ class TEMPUS(nn.Module):
         total_loss = 0
         all_predictions = []
         all_targets = []
-        
+
         with torch.no_grad():
             for inputs, targets in data_loader:
-                inputs = inputs.to(self.device)
-                target_values = targets['shifted_prices'].to(self.device).unsqueeze(1)  # shape: (batch, 1)
-                
-                outputs = self(inputs)
+                inputs, targets = inputs.to(self.device), targets.to(self.device)
+                outputs = self(inputs).to(self.device).squeeze()
+                loss = criterion(outputs, targets)
 
-                loss = criterion(outputs, target_values)
                 total_loss += loss.item() * inputs.size(0)
-                
+
                 all_predictions.append(outputs.cpu().numpy())
-                all_targets.append(target_values.cpu().numpy())
-        
+                all_targets.append(targets.cpu().numpy())
+
         all_predictions = np.concatenate(all_predictions, axis=0)
         all_targets = np.concatenate(all_targets, axis=0)
-        
+
         # Calculate RMSE and MAPE
         mse = np.mean((all_predictions - all_targets) ** 2)
         rmse = np.sqrt(mse)
@@ -254,13 +243,7 @@ class TEMPUS(nn.Module):
         mape = np.mean(np.abs((all_targets - all_predictions) / (all_targets + 1e-8))) * 100
         avg_loss = total_loss / len(data_loader.dataset)
 
-        # Calculate SHAP values
-        batch_x, batch_y = next(iter(data_loader))
-        batch_x = batch_x.to(self.device)
-        explainer = shap.DeepExplainer(self, batch_x)
-        feature_importance = np.mean(np.abs(explainer.shap_values(batch_x)), axis=0)
-
-        return avg_loss, rmse, mape, feature_importance
+        return avg_loss, rmse, mape
 
 
     def get_predictions(self, training_data, model_outputs=None, seq_length=10):
@@ -395,7 +378,7 @@ class TEMPUS(nn.Module):
             print("Training history not available. Please run train_model() first.")
             return
 
-# Implementation of Temporal Attention
+# Implementation of custom Temporal Attention
 class TemporalAttention(nn.Module):
     def __init__(self, hidden_dim):
         super().__init__()
@@ -405,6 +388,7 @@ class TemporalAttention(nn.Module):
             nn.Linear(16, 1)
         )
         self.feature_attn = nn.Linear(hidden_dim, 1)
+        #self.norm = nn.LayerNorm(hidden_dim)
 
     def forward(self, lstm_output, time_features):
         # lstm_output: [batch, seq_len, hidden]
@@ -423,6 +407,18 @@ class TemporalAttention(nn.Module):
 
         return context, attention_weights
 
+class DONTUSETemporalAttentionv2(nn.Module):
+    def __init__(self, d_model, nhead=4, dropout=0.1):
+        super(DONTUSETemporalAttentionv2, self).__init__()
+        self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
+        self.norm = nn.LayerNorm(d_model)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        # x shape: [batch_size, seq_len, d_model]
+        attn_output, _ = self.self_attn(x, x, x)
+        out = self.norm(x + self.dropout(attn_output))
+        return out
 
 class BaseLSTM(nn.Module):
     def __init__(self, input_size, hidden_size, num_layers, num_classes, dropout=0.0):
