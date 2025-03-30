@@ -2,11 +2,11 @@
 
 ## Overview
 
-Project DeepGreen is built using Python 3.8.8 and incorporates a variety of data science and web development libraries. The primary purpose of this application is to provide price prediction capabilities through machine learning models, with a streamlined web interface for user access and model training.
+Project DeepGreen is built using Python 3.8.8 and incorporates a variety of data science and web development libraries. The primary purpose of this application is to provide stock price prediction capabilities through machine learning models, with a web interface for user access and model training.
 
 ## Features
 
-- **Machine Learning**: Leverages custom ML model, TEMPUS, for United States equities price prediction 
+- **Machine Learning**: Leverages a custom ML model, TEMPUS, for United States equities price prediction. Model architecture is built on a hybrid of LSTMs at multiple temporal resolutions, Temporal Convolutional Network, and a Temporal Attention mechanism.
 - **Backtesting**: Tools to evaluate model performance on historical market data and generate portfolio performance and tearsheets
 - **Interactive Web Interface**: Built with Streamlit for easy navigation and use
 
@@ -47,6 +47,7 @@ pip install -r requirements.txt
 Below are the major libraries used in this project:
 
 - **Core Libraries**: `numpy`, `pandas`
-- **Machine Learning/AI**: `scikit-learn`, `pytorch`
+- **Financial Data**: `yfinance`
+- **Machine Learning/AI**: `scikit-learn`, `pytorch`, `ray`
 - **Web Development**: `streamlit`, `streamlit_authenticator`
 - **Visualization**: `plotly`
