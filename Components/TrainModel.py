@@ -11,6 +11,7 @@ import plotly.express as px
 from plotly.subplots import make_subplots
 
 import shap
+import onnx
 
 from torch.utils.data import Dataset, DataLoader
 from sklearn.preprocessing import StandardScaler
@@ -394,6 +395,19 @@ class TEMPUS(nn.Module):
         else:
             print("Training history not available. Please run train_model() first.")
             return
+
+    def export_model(self, save_name, data_loader):
+        for inputs, targets in data_loader:
+            example_inputs = inputs.to(self.device)
+            break
+
+        onnx_program = torch.onnx.export(self, example_inputs, dynamo=True)
+        onnx_program.optimize()
+        onnx_program.save(f"Models/{save_name}.onnx")
+
+        onnx_model = onnx.load(f"Models/{save_name}.onnx")
+        onnx.checker.check_model(onnx_model)
+
 
 # Implementation of Temporal Attention
 class TemporalAttention(nn.Module):
