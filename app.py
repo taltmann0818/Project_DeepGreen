@@ -2,7 +2,7 @@ import streamlit as st
 import streamlit_authenticator as stauth
 
 authenticator = stauth.Authenticate(
-    credentials=st.secrets['credentials'],
+    dict(st.secrets['credentials']),
     cookie_name=st.secrets['cookie']['name'],
     key=st.secrets['cookie']['key'],
     cookie_expiry_days=st.secrets['cookie'].get('expiry_days', 30)  # Default to 30 days if not specified
