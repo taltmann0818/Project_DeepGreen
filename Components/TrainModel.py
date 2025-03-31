@@ -12,8 +12,6 @@ import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
 
-import shap
-
 from torch.utils.data import Dataset, DataLoader
 from sklearn.preprocessing import StandardScaler
 
