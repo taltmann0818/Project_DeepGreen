@@ -6,7 +6,6 @@ pyyaml~=5.4.1
 yfinance~=0.2.54
 numpy~=1.22.4
 torch~=2.2.2
-sklearn~=0.0.post1
 scikit-learn~=1.2.1
 tqdm~=4.59.0
 vectorbt~=0.27.2
