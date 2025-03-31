@@ -15,7 +15,7 @@ with open(credentials_path) as file:
     config = yaml.load(file, Loader=SafeLoader)
 
 # Pre-hashing all plain text passwords once
-stauth.Hasher.hash_passwords(config['credentials'])
+#stauth.Hasher.hash_passwords(config['credentials'])
 
 # Save the Hashed Credentials to our config file
 with open(credentials_path, 'w') as file:
@@ -69,3 +69,4 @@ else:
     pg = st.navigation([login_page])
 
 pg.run()
+
