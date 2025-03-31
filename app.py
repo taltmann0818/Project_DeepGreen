@@ -1,31 +1,11 @@
 import streamlit as st
 import streamlit_authenticator as stauth
-import yaml
-from yaml.loader import SafeLoader
-import os
-
-# Get the directory of the script
-script_dir = os.path.dirname(os.path.abspath(__file__))
-
-# Construct the path to credentials.yml
-credentials_path = os.path.join(script_dir, "credentials.yml")
-
-# Load the config
-with open(credentials_path) as file:
-    config = yaml.load(file, Loader=SafeLoader)
-
-# Pre-hashing all plain text passwords once
-#stauth.Hasher.hash_passwords(config['credentials'])
-
-# Save the Hashed Credentials to our config file
-with open(credentials_path, 'w') as file:
-    yaml.dump(config, file, default_flow_style=False)
 
 authenticator = stauth.Authenticate(
-    config['credentials'],
-    config['cookie']['name'],
-    config['cookie']['key'],
-    config['cookie']['expiry_days']
+    dict(st.secrets['credentials']),
+    st.secrets['cookie']['name'],
+    st.secrets['cookie']['key'],
+    st.secrets['cookie']['expiry_days']
 )
 
 def login():
