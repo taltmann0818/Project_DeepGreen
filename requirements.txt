@@ -2,7 +2,6 @@ streamlit~=1.40.1
 streamlit_authenticator~=0.1.4
 pandas~=2.0.3
 plotly~=5.2.1
-yaml~=0.2.4
 pyyaml~=5.4.1
 yfinance~=0.2.54
 numpy~=1.22.4
