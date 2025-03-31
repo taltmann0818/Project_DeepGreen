@@ -731,10 +731,12 @@ class DataModule:
         self.scaler = StandardScaler()
         train_features = self.df_train[feature_cols]
         test_features = self.df_test[feature_cols]
-
         self.scaler.fit(train_features)
         train_scaled = self.scaler.transform(train_features)
-        test_scaled = self.scaler.transform(test_features)
+        if self.eval_size != 0.0:
+            test_scaled = self.scaler.transform(test_features)
+        else:
+            test_scaled = train_scaled
 
         # Convert back to DataFrame with proper column names
         self.df_train_scaled = pd.DataFrame(train_scaled, columns=feature_cols)

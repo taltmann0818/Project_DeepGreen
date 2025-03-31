@@ -2,6 +2,7 @@ import yfinance as yf
 import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
+from Components.MarketRegimes import MarketRegimes
 
 class TickerData:
     def __init__(self, ticker, years=1, prediction_window=5):
@@ -77,6 +78,9 @@ class TickerData:
             self.dataset_ex_df['ttm_pe'] = self.dataset_ex_df['Close'] / self.dataset_ex_df['ttm_eps']
 
             self.dataset_ex_df['shifted_prices'] = self.dataset_ex_df['Close'].shift(self.prediction_window)
+
+            # Get market regimes
+            self.dataset_ex_df = MarketRegimes(self.dataset_ex_df, "hmm_model.pkl").run_regime_detection()
 
             return self.stock_data, self.dataset_ex_df
             
@@ -285,16 +289,17 @@ class TickerData:
 
     def merge_data(self):
         """
-        Merge Fourier transform and technical indicator data into one DataFrame.
+        Merge all data sources into one DataFrame.
         """
         try:
 
-            technical_indicators_df = self.dataset_ex_df[['Date','Ticker','ema_20', 'ema_50', 'ema_100', 'stoch_rsi', 'macd','Close', 'shifted_prices']]
-            self.final_df = technical_indicators_df.dropna()
+            self.dataset_ex_df = self.dataset_ex_df[['Date','Ticker','ema_20', 'ema_50', 'ema_100', 'stoch_rsi', 'macd', 'State', 'Close', 'shifted_prices']]
+            self.final_df = self.dataset_ex_df.dropna()
             self.final_df.set_index('Date', inplace=True)
             return self.final_df
-        except Exception:
+        except Exception as e:
             self.final_df = pd.DataFrame()
+            print(f"Error while merging data for {self.ticker}; error: {e}")
 
     def process_all(self):
         """

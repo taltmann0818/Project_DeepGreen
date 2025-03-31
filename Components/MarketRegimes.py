@@ -6,8 +6,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 class MarketRegimes:
-    def __init__(self, data, ticker, model_pickle=None, regime_number=3, **kwargs):
-        self.ticker = ticker
+    def __init__(self, data, model_pickle=None, regime_number=3, **kwargs):
         self.model_pickle = model_pickle
         self.regime_number = regime_number
         self.data = data
@@ -69,29 +68,30 @@ class MarketRegimes:
 
     def visualize_regime_detection(self, data, ticker):
         #ticker = np.random.choice(stock_data['Ticker'].unique()) # Randomly sample a ticker
-        fig_data = self.data[data['Ticker'] == ticker]
+        if ticker is not None:
+            fig_data = self.data[data['Ticker'] == ticker]
 
-        # Define colors for each regime
-        fig = make_subplots(rows=3, cols=1,
-                            subplot_titles=('Bearish Hidden State', 'Neutral Hidden State', 'Bullish Hidden State'))
+            # Define colors for each regime
+            fig = make_subplots(rows=3, cols=1,
+                                subplot_titles=('Bearish Hidden State', 'Neutral Hidden State', 'Bullish Hidden State'))
 
-        bearish_mask = fig_data['Regime'] == "Bearish"
-        fig.add_trace(go.Scatter(x=fig_data.index[bearish_mask], y=fig_data['Close'][bearish_mask], mode="markers",
-                                 name="Bearish", line=dict(color="red")), row=1, col=1)
-        neutral_mask = fig_data['Regime'] == "Neutral"
-        fig.add_trace(go.Scatter(x=fig_data.index[neutral_mask], y=fig_data['Close'][neutral_mask], mode="markers",
-                                 name="Neutral", line=dict(color="orange")), row=2, col=1)
-        bullish_mask = fig_data['Regime'] == "Bullish"
-        fig.add_trace(go.Scatter(x=fig_data.index[bullish_mask], y=fig_data['Close'][bullish_mask], mode="markers",
-                                 name="Bullish", line=dict(color="green")), row=3, col=1)
+            bearish_mask = fig_data['Regime'] == "Bearish"
+            fig.add_trace(go.Scatter(x=fig_data.index[bearish_mask], y=fig_data['Close'][bearish_mask], mode="markers",
+                                     name="Bearish", line=dict(color="red")), row=1, col=1)
+            neutral_mask = fig_data['Regime'] == "Neutral"
+            fig.add_trace(go.Scatter(x=fig_data.index[neutral_mask], y=fig_data['Close'][neutral_mask], mode="markers",
+                                     name="Neutral", line=dict(color="orange")), row=2, col=1)
+            bullish_mask = fig_data['Regime'] == "Bullish"
+            fig.add_trace(go.Scatter(x=fig_data.index[bullish_mask], y=fig_data['Close'][bullish_mask], mode="markers",
+                                     name="Bullish", line=dict(color="green")), row=3, col=1)
 
-        fig.update_layout(
-            title=f'Market Regimes Identified by HMM for {ticker}',
-            xaxis_title="Date",
-            height=800,
-            yaxis_title="Stock Price (USD)",
-            template='plotly_white',
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-        )
+            fig.update_layout(
+                title=f'Market Regimes Identified by HMM for {ticker}',
+                xaxis_title="Date",
+                height=800,
+                yaxis_title="Stock Price (USD)",
+                template='plotly_white',
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+            )
 
-        return fig
+            return fig
