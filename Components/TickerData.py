@@ -5,12 +5,11 @@ from datetime import datetime, timedelta
 from Components.MarketRegimes import MarketRegimes
 
 class TickerData:
-    def __init__(self, ticker, years=1, prediction_window=5):
+    def __init__(self, ticker, years=1, prediction_window=5,**kwargs):
         """
         Initialize the StockAnalyzer with a ticker symbol and number of past days to fetch.
         """
         self.ticker = ticker
-        self.days = years * 365
         self.stock_data = None
         self.q_income_stmt = None
         self.y_income_stmt = None
@@ -19,7 +18,15 @@ class TickerData:
         self.fft_df_real = None
         self.fft_df_imag = None
         self.merged_df = None
-        self.prediction_window = -abs(prediction_window)
+        self.prediction_window = -abs(prediction_window
+        self.days = years * 365
+        
+        self.start_date = kwargs.get('start_date', None)
+        self.end_date = kwargs.get('end_date', None)
+        if self.start_date and self.end_date is not None:
+            self.start_date = datetime.combine(self.start_date, datetime.min.time())
+            self.end_date = datetime.combine(self.end_date, datetime.min.time())
+            self.days = 0
 
     def fetch_stock_data(self):
         """
@@ -27,11 +34,19 @@ class TickerData:
         """
         try:
             ticker_obj = yf.Ticker(self.ticker)
-            current_date = datetime.today() - timedelta(days=1)
-            past_date = current_date - timedelta(days=self.days)
-            self.stock_data = ticker_obj.history(start=past_date.strftime("%Y-%m-%d"),
-                                                   end=current_date.strftime("%Y-%m-%d"),
-                                                   interval="1d")
+            if self.days != 0:
+                current_date = datetime.today() - timedelta(days=1)
+                past_date = current_date - timedelta(days=self.days)
+                self.stock_data = ticker_obj.history(start=past_date.strftime("%Y-%m-%d"),
+                                                       end=current_date.strftime("%Y-%m-%d"),
+                                                       interval="1d")
+                
+            elif self.start_date and self.end_date is not None:
+                self.stock_data = ticker_obj.history(start=self.start_date.strftime("%Y-%m-%d"),
+                                       end=self.end_date.strftime("%Y-%m-%d"),
+                                       interval="1d")
+            else:
+                raise ValueError("Days must be non-zero or a start_date and end_date provided.")
 
             y_income_stmt = ticker_obj.get_income_stmt(freq='yearly').T
             self.y_income_stmt = y_income_stmt.reset_index().rename(columns={"index": "Date"}).sort_values('Date')
@@ -314,4 +329,3 @@ class TickerData:
         self.preprocess_data()
         self.add_technical_indicators()
         return self.merge_data(), self.stock_data
-
