@@ -8,30 +8,39 @@ from plotly.subplots import make_subplots
 from matplotlib.pyplot import xlabel
 from sympy.physics.units import volume
 from vectorbt.portfolio.enums import SizeType, Direction, NoOrder, OrderStatus, OrderSide
+import quantstats as qs
 
 class BackTesting:
-    def __init__(self, data, ticker, initial_capital, slippage=0.001, transaction_fees=0.000, use_confidence=True, use_fractional_shares=True):
+    def __init__(self,data,ticker,initial_capital,pct_change_entry=0.05,pct_change_exit=0.05,**kwargs):
 
-        #Intialize arguments
+        #Intialize required and default arguments
         self.ticker = ticker
         self.initial_cash = initial_capital
-        self.slippage = slippage
-        self.transaction_fees = transaction_fees
-        self.use_fractional_shares = use_fractional_shares
+        self.pct_change_entry = pct_change_entry
+        self.pct_change_exit = -abs(pct_change_exit)
+
+        #Kwargs
+        self.use_fractional_shares = kwargs.get('use_fractional_shares', True)
+        self.slippage = kwargs.get('slippage', 0.001)
+        self.transaction_fees = kwargs.get('transaction_fees', 0.000)
+        self.use_confidence = kwargs.get('use_confidence', False)
 
         if type(ticker) == str:
             # Prepare data
             self.data = data[data['Ticker'] == ticker]
-            self.data['Date'] = pd.to_datetime(self.data['Date'])
-            self.data = self.data.set_index('Date')
+
+            # Ensure the signals are correctly set
+            self.data['entry_signal'] = (self.data['Predicted'] - self.data['Close']) / self.data['Close'] >= self.pct_change_entry
+            self.data['exit_signal'] = (self.data['Predicted'] - self.data['Close']) / self.data['Close'] <= self.pct_change_exit
+        
         else:
             raise ValueError("Invalid Ticker. Please provide a string.")
 
-        if use_confidence:
+        if self.use_confidence:
             self.position_size = self.data['Confidence']
         else:
             self.position_size = 1.0
-            
+
     @staticmethod
     def VectorBTBackTestSignals(self, bt_data, initial_cash, size):
         
@@ -69,19 +78,16 @@ class BackTesting:
         # Run the backtest using vectorbt's Portfolio
         self.pf = self.VectorBTBackTestSignals(self, self.data, self.initial_cash, self.position_size)
         # Run the backtest with a benchmark of a simple moving average and RSI strategy
-        self.benchmark_pf = self.VectorBTBackTestSignals(self, self.BenchMarkSignals(self.data.copy()),
-                                                         self.initial_cash, 1.0)
+        #self.benchmark_pf = self.VectorBTBackTestSignals(self, self.BenchMarkSignals(self.data.copy()), self.initial_cash, 1.0)
         
         # Create simplified results df
-        benchmark_return = self.pf.stats(metrics=['end_value'])[0]
+        #benchmark_return = self.benchmark_pf.stats(metrics=['end_value'])[0]
         end_value, total_return, sharpe_ratio   = self.pf.stats(metrics=['end_value'])[0], self.pf.stats(metrics=['total_return'])[0], self.pf.stats(metrics=['sharpe_ratio'])[0]
-        benchmark_improvement = ((end_value / benchmark_return) / benchmark_return) * 100
+        #benchmark_improvement = ((end_value / benchmark_return) / benchmark_return) * 100
         
         results = pd.DataFrame({'Total Portfolio Value': end_value,
                                 'Return %': total_return,
-                                'Sharpe Ratio': sharpe_ratio,
-                                'Benchmark Portfolio Value': benchmark_return,
-                                'Improvement Over Benchmark': benchmark_improvement}
+                                'Sharpe Ratio': sharpe_ratio}
                                 ,index=[0])
         full_results = self.pf.stats()
 
