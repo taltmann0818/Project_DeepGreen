@@ -26,7 +26,7 @@ class TEMPUS(nn.Module):
 
     """
     #def __init__(self, input_size, hidden_size=64, num_layers=2, dropout=0.2,tcn_kernel_sizes=[3, 5, 7], attention_heads=4, device="cpu"):
-    def __init__(self, config):
+    def __init__(self, config, scaler=None):
         super(TEMPUS, self).__init__()
         self.device = config["device"] #device
         self.hidden_size = config["hidden_size"]
@@ -35,6 +35,11 @@ class TEMPUS(nn.Module):
         self.dropout = config["dropout"] #dropout
         self.clip_size = config["clip_size"] #tcn_kernel_sizes
         self.tcn_kernel_sizes = [3, 5, 7] #tcn_kernel_sizes
+
+        if scaler is not None:
+            self.scaler = scaler
+            self.register_buffer("mean", torch.tensor(scaler.mean_, dtype=torch.float32))
+            self.register_buffer("scale", torch.tensor(scaler.scale_, dtype=torch.float32))
 
         # Multiple Temporal Resolutions of LSTM
         self.lstm_short = nn.LSTM(input_size=self.input_size,hidden_size=self.hidden_size,num_layers=self.num_layers,batch_first=True, dropout=self.dropout if self.num_layers > 1 else 0, bidirectional=True)
@@ -88,7 +93,9 @@ class TEMPUS(nn.Module):
         return x
 
     def forward(self, x):
-        batch_size, seq_len, features = x.size()
+        if self.scaler is not None:
+            x = (x - self.mean) / self.scale
+
         batch_size, seq_len, features = x.size()
         time_features = torch.linspace(0, 1, seq_len).unsqueeze(0).unsqueeze(2).repeat(batch_size, 1, 1).to(x.device)
 
@@ -725,26 +732,14 @@ class DataModule:
         feature_cols = [col for col in self.data.columns if col != target_col]
         self.num_features = len(feature_cols)
 
-        # Data Scaling
+        # Data Scaler
         self.scaler = StandardScaler()
         train_features = self.df_train[feature_cols]
-        test_features = self.df_test[feature_cols]
         self.scaler.fit(train_features)
-        train_scaled = self.scaler.transform(train_features)
-        test_scaled = self.scaler.transform(test_features)
-        test_scaled = train_scaled
 
-        # Convert back to DataFrame with proper column names
-        self.df_train_scaled = pd.DataFrame(train_scaled, columns=feature_cols)
-        self.df_test_scaled = pd.DataFrame(test_scaled, columns=feature_cols)
-
-        # Add target column back
-        self.df_train_scaled[target_col] = self.df_train[target_col].values
-        self.df_test_scaled[target_col] = self.df_test[target_col].values
-
-        self.train_dataset = SequenceDataset(self.df_train_scaled,target=target_col,features=feature_cols,window_size=self.window_size)
+        self.train_dataset = SequenceDataset(self.df_train,target=target_col,features=feature_cols,window_size=self.window_size)
         self.train_loader = DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True)
-        self.test_dataset = SequenceDataset(self.df_test_scaled,target=target_col,features=feature_cols,window_size=self.window_size)
+        self.test_dataset = SequenceDataset(self.df_test,target=target_col,features=feature_cols,window_size=self.window_size)
         self.test_loader = DataLoader(self.test_dataset, batch_size=self.batch_size, shuffle=False)
 
 class SequenceDataset(Dataset):
