@@ -1,19 +1,19 @@
 import torch
 import torch.nn as nn
-from sklearn.metrics import classification_report, confusion_matrix, f1_score, accuracy_score
 import torch.nn.functional as F
 from torch.nn.functional import dropout
 from torch.optim import AdamW
+from torch.utils.data import Dataset, DataLoader
+from sklearn.preprocessing import StandardScaler
+
 from tqdm.auto import tqdm
+
 import numpy as np
 import pandas as pd
 
 import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
-
-from torch.utils.data import Dataset, DataLoader
-from sklearn.preprocessing import StandardScaler
 
 class TEMPUS(nn.Module):
     """
@@ -250,91 +250,11 @@ class TEMPUS(nn.Module):
 
         return avg_loss, rmse, mape
 
-
-    def get_predictions(self, training_data, model_outputs=None, seq_length=10):
-        """
-        Generate predictions using the TEMPUS model and merge with the training data.
-
-        Args:
-            training_data (pd.DataFrame): The training data with the time index
-            model_outputs (dict, optional): Pre-computed model outputs. If None, will run predictions
-            seq_length (int): The sequence length used for predictions
-
-        Returns:
-            pd.DataFrame: DataFrame with original data and predictions merged based on index
-        """
-        if model_outputs is None:
-            # Initialize lists for storing results
-            predictions = []
-            dates = []
-            actuals = []
-            tickers = []
-            feature_importances = []
-
-            self.to(self.device)
-            self.eval()
-
-            # Loop through the data to make predictions
-            for i in range(seq_length, len(training_data)):
-                # Get sequence
-                sequence = training_data.iloc[i - seq_length:i].drop(
-                    columns=['Ticker'] if 'Ticker' in training_data.columns else []
-                ).values.astype(np.float32)
-                sequence_tensor = torch.tensor(sequence, dtype=torch.float32).unsqueeze(0)
-                sequence_tensor = sequence_tensor.to(self.device)
-
-                # Get date, actual value, and ticker for the current index
-                date = training_data.index[i]
-                actual = training_data['Target'].iloc[i] if 'Target' in training_data.columns else None
-                ticker = training_data['Ticker'].iloc[i] if 'Ticker' in training_data.columns else None
-
-                # Make prediction
-                with torch.no_grad():
-                    outputs = self(sequence_tensor)
-                    prediction = self.outputs.item()  # Use regression output from TEMPUS
-
-                predictions.append(prediction)
-                dates.append(date)
-                if actual is not None:
-                    actuals.append(actual)
-                if ticker is not None:
-                    tickers.append(ticker)
-
-            # Create prediction DataFrame
-            pred_data = {'Date': dates, 'Predicted': predictions}
-
-            if actual is not None:
-                pred_data['Actual'] = actuals
-            if ticker is not None:
-                pred_data['Ticker'] = tickers
-
-            preds_df = pd.DataFrame(pred_data)
-            preds_df.set_index('Date', inplace=True)
-
-            # Merge predictions with original data
-            preds_df = training_data.iloc[seq_length:].copy()
-            self.preds_df = preds_df.join(preds_df[['Predicted']])
-
-            return self.preds_df
-        else:
-            # If model outputs are provided, merge them with the training data
-            # Assuming model_outputs has the same index as training_data
-            self.preds_df = training_data.copy()
-            self.preds_df['Predicted'] = model_outputs
-
-            return self.preds_df
-
-    def plot_training_history(self, training_data=None):
+    def plot_training_history(self):
         if self.history is not None:
             # Create subplots for loss and accuracy
-            if training_data is not None:
-                fig = make_subplots(rows=2, cols=2, subplot_titles=('Loss Over Epochs',
-                                                                    'MAPE Over Epochs',
-                                                                    'SHAP Values',
-                                                                    'Predicted vs Actual (Shifted) Prices'))
-            else:
-                fig = make_subplots(rows=1, cols=2, subplot_titles=('Loss Over Epochs',
-                                                                    'MAPE Over Epochs'))
+            fig = make_subplots(rows=1, cols=2, subplot_titles=('Loss Over Epochs',
+                                                                'MAPE Over Epochs'))
 
             # Plot losses
             fig.add_trace(go.Scatter(y=self.history['train_loss'], name='Train Loss', line=dict(color='blue')),
@@ -350,26 +270,6 @@ class TEMPUS(nn.Module):
             fig.update_xaxes(title_text="Epochs", row=1, col=2)
             fig.update_yaxes(title_text="MAPE %", row=1, col=2)
 
-            # Plot SHAP values
-            if training_data is not None:
-                sorted_idx = np.argsort(self.feature_importance)
-                feature_names = [f"Feature {i}" for i in range(training_data.columns.shape[1])]
-                fig.add_trace(go.Bar(y=[feature_names[i] for i in sorted_idx], x=self.feature_importance[sorted_idx],
-                                     orientation='h'), row=2,col=1)
-                fig.update_xaxes(title_text="mean( | SHAP value |)", row=2, col=1)
-                fig.update_yaxes(title_text="Feature", row=2, col=1)
-
-            # Plot predicted vs actual (shifted) prices
-            if training_data is not None:
-                if self.preds_df is None:
-                    preds_df = self.get_predictions(training_data)
-                fig.add_trace(go.Scatter(y=preds_df['shifted_prices'], x=preds_df['Date'], name='Actual', line=dict(color='blue')),
-                              row=2,col=2)
-                fig.add_trace(go.Scatter(y=preds_df['Predicted'], x=preds_df['Date'], name='Prediction', line=dict(color='orange')),
-                              row=2,col=2)
-                fig.update_xaxes(title_text="Date", row=2, col=2)
-                fig.update_yaxes(title_text="Stock Price", row=2, col=2)
-
             fig.update_layout(
                 title='Model Training Metrics',
                 height=700,
@@ -382,6 +282,28 @@ class TEMPUS(nn.Module):
         else:
             print("Training history not available. Please run train_model() first.")
             return
+
+    def export_model_to_torchscript(self, save_path, data_loader, device):
+        try:
+            # Set model to evaluation mode
+            self.eval()
+    
+            # Fetch a sample input tensor from DataLoader
+            example_inputs, _ = next(iter(data_loader))
+            example_inputs = example_inputs.to(device)
+    
+            # Export model to TorchScript using tracing
+            scripted_model = torch.jit.trace(self.to(device), example_inputs)
+    
+            # Save the TorchScript model
+            torch.jit.save(scripted_model, save_path)
+    
+            print(f"Model successfully exported and saved to {save_path}")
+            return save_path
+    
+        except Exception as e:
+            print(f"Error exporting model to TorchScript: {str(e)}")
+            return None
 
 # Implementation of custom Temporal Attention
 class TemporalAttention(nn.Module):
@@ -497,203 +419,46 @@ class BaseLSTM(nn.Module):
 
         return out
 
-    def evaluate(self, data_loader, criterion):
-        """
-        Evaluates the model on a given data loader.
+def torchscript_predict(model_path, input_df, device, window_size, target_col):
+    # Load the TorchScript model
+    loaded_model = torch.jit.load(model_path,map_location=device)
+    loaded_model = loaded_model.to(device)
+    loaded_model.eval()
+
+    predictions = []
+    dates = []
+    actuals = []
+    tickers = []
+    uncertainties = []
+
+    for i in range(window_size, len(input_df)):
+        # Get date, actual value, and ticker for the current index
+        date = input_df.index[i]
+        actual = input_df[target_col].iloc[i] if target_col in input_df.columns else None
+        ticker = input_df['Ticker'].iloc[i] if 'Ticker' in input_df.columns else None  
         
-        Args:
-            data_loader (DataLoader): DataLoader for evaluation or testing.
-            criterion: Loss function.
-            
-        Returns:
-            tuple: Average loss and accuracy.
-        """
+        # Get sequence
+        values = input_df.drop(columns=['Ticker',target_col]).values.astype(np.float32)
+        input_window = values[i - window_size:i]
+        input_tensor = torch.tensor(input_window, dtype=torch.float32, device=device).unsqueeze(0)
 
-        self.to(self.device)
+        # Predict the next value based on the previous window
+        pred = loaded_model(input_tensor)
+        pred_value = pred.detach().numpy().flatten()[0]
 
-        self.eval()
-        val_loss = 0
-        all_preds = []
-        all_targets = []
+        predictions.append(pred_value)
+        dates.append(date)
+        actuals.append(actual)
+        tickers.append(ticker)
 
-        with torch.no_grad():
-            for inputs, labels in data_loader:
-                inputs, labels = inputs.to(self.device), labels.to(self.device)
-                outputs = self(inputs)
-                loss = criterion(outputs, labels)
-                val_loss += loss.item()
+    # Create DataFrame with predictions
+    preds_df = pd.DataFrame({
+        'Ticker': tickers,
+        'Actual': actuals,
+        'Predicted': predictions
+    },index=dates)
 
-                _, preds = torch.max(outputs, 1)
-                all_preds.extend(preds.cpu().numpy())
-                all_targets.extend(labels.cpu().numpy())
-
-        # Calculate metrics
-        f1 = f1_score(all_targets, all_preds, average='weighted')
-        accuracy = accuracy_score(all_targets, all_preds)
-        loss = val_loss / len(data_loader)
-
-        return loss, accuracy, f1
-
-    def train_model(self, train_loader, eval_loader, test_loader, criterion, optimizer, epochs=15, patience=10):
-        best_eval_loss = float('inf')
-        patience_counter = 0
-        best_model_state = None
-
-        history = {
-            'train_loss': [], 'train_acc': [],
-            'eval_loss': [], 'eval_acc': [],
-            'test_loss': [], 'test_acc': [],
-            'eval_f1': [], 'test_f1': []
-        }
-
-        self.to(self.device)
-
-        epoch_progress = tqdm(range(epochs), desc="Training Epochs")
-
-        for epoch in epoch_progress:
-            self.train()
-            running_loss = 0.0
-            correct = 0
-            total = 0
-
-            for inputs, labels in train_loader:
-                inputs, labels = inputs.to(self.device), labels.to(self.device)
-                optimizer.zero_grad()
-                outputs = self(inputs)
-                loss = criterion(outputs, labels)
-                loss.backward()
-                nn.utils.clip_grad_norm_(self.parameters(), max_norm=1.0)
-                optimizer.step()
-    
-                # Update metrics
-                running_loss += loss.item()
-                _, preds = torch.max(outputs, dim=1)
-                correct += (preds == labels).sum().item()
-                total += labels.size(0)
-        
-            # Calculate epoch metrics
-            train_loss = running_loss / len(train_loader)
-            train_acc = correct / total
-
-            eval_loss, eval_acc, eval_f1 = self.evaluate(eval_loader, criterion)
-            test_loss, test_acc, test_f1 = self.evaluate(test_loader, criterion)
-
-            history['train_loss'].append(train_loss)
-            history['train_acc'].append(train_acc)
-            history['eval_loss'].append(eval_loss)
-            history['eval_acc'].append(eval_acc)
-            history['test_loss'].append(test_loss)
-            history['test_acc'].append(test_acc)
-            history['eval_f1'].append(eval_f1)
-            history['test_f1'].append(test_f1)
-
-            # Store best eval loss
-            if eval_loss < best_eval_loss:
-                best_eval_loss = eval_loss
-                best_model_state = self.state_dict()
-
-            epoch_progress.set_postfix({
-                'train_loss': f'{train_loss:.4f}',
-                'train_acc': f'{train_acc*100:.2f}%',
-                'val_loss': f'{eval_loss:.4f}',
-                'val_acc': f'{eval_acc*100:.2f}%'
-            })
-
-        # Load the best model state before returning
-        if best_model_state is not None:
-            self.load_state_dict(best_model_state)
-
-        # Final evaluation on test set
-        test_loss, test_accuracy = self.evaluate(test_loader, criterion)
-        print(f"\nTest Loss: {test_loss:.4f}, Test Accuracy: {test_accuracy*100:.2f}%")
-
-        self.history = history
-
-        return history
-
-    def get_predictions(self, training_df, seq_length=10):
-        predictions = []
-        dates = []
-        actuals = []
-        tickers = []
-        confidences = []
-
-        for i in range(seq_length, len(training_df)):
-            # Get sequence
-            sequence = training_df.iloc[i - seq_length:i].drop(columns=['Ticker']).values.astype(np.float32)
-            sequence_tensor = torch.tensor(sequence, dtype=torch.float32).unsqueeze(0)
-            sequence_tensor = sequence_tensor.to(self.device)
-
-            # Get date, actual value, and ticker for the current index
-            date = training_df.index[i]
-            actual = training_df['Target'].iloc[i]
-            ticker = training_df['Ticker'].iloc[i]
-
-            # Make prediction
-            self.eval()
-            with torch.no_grad():
-                output = self(sequence_tensor)
-                probabilities = torch.softmax(output, dim=1)  # Convert outputs to probabilities
-                confidence, pred = torch.max(probabilities, 1)  # Get confidence and predicted class
-
-            predictions.append(pred.item())
-            confidences.append(confidence.item())  # Store the confidence score
-            dates.append(date)
-            actuals.append(actual)
-            tickers.append(ticker)
-
-        # Create DataFrame with predictions
-        preds_df = pd.DataFrame({
-            'Date': dates,
-            'Ticker': tickers,
-            'Actual': actuals,
-            'Predicted': predictions,
-            'Confidence': confidences  # Add confidence scores to the DataFrame
-        })
-        preds_df['entry_signal'] = preds_df['Predicted'] == 2  # Buy signal
-        preds_df['exit_signal'] = preds_df['Predicted'] == 1  # Sell signal
-
-        return preds_df
-
-    def plot_training_history(self):
-        if self.history is not None:
-            # Create subplots for loss and accuracy
-            fig = make_subplots(rows=1, cols=2, subplot_titles=('Loss', 'F1 Score'))
-
-            # Plot losses
-            fig.add_trace(go.Scatter(y=self.history['train_loss'], name='Train Loss', line=dict(color='blue')), row=1, col=1)
-            fig.add_trace(go.Scatter(y=self.history['eval_loss'], name='Eval Loss', line=dict(color='orange')), row=1, col=1)
-            fig.add_trace(go.Scatter(y=self.history['test_loss'], name='Test Loss', line=dict(color='green')), row=1, col=1)
-
-            # Plot f1
-            fig.add_trace(go.Scatter(y=self.history['eval_f1'], name='Eval F1 Score', line=dict(color='orange')), row=1,
-                          col=2)
-            fig.add_trace(go.Scatter(y=self.history['test_f1'], name='Test F1 Score', line=dict(color='green')), row=1,
-                          col=2)
-
-            fig.update_layout(
-                title='Training Metrics',
-                xaxis_title='Epochs',
-                height=700,
-                template='plotly_white',
-                legend=dict(orientation="h", yanchor="bottom", y=1.02)
-            )
-
-            fig.update_yaxes(title_text="Loss", row=1, col=1)
-            fig.update_yaxes(title_text="F1", row=1, col=2)
-
-            return fig
-
-        else:
-            print("Training history not available. Please run train_model() first.")
-            return
-
-from torch.utils.data import Dataset, DataLoader
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
-import numpy as np
-import torch
-import pandas as pd
+    return preds_df
 
 class DataModule:
     def __init__(self, data, window_size=20, batch_size=32, eval_size=0.2, random_state=42):
