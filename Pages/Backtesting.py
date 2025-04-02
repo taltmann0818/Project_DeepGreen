@@ -95,7 +95,7 @@ if st.session_state.get("authentication_status"):
         st.subheader("Backtesting")
         if submit:
             spinner_strings = ["Running the Bulls...","Poking the Bear..."]
-            with st.spinner(np.random.choice(spinner_strings), show_time=True):
+            with st.spinner(np.random.choice(spinner_strings)):
                 predictions_df = make_predictions(model_select, ticker_select, data_range, prediction_window, sequence_window)
                 trades_fig, value_fig, metrics = backtesting(predictions_df, ticker_select, initial_capital, pct_change_entry, pct_change_exit, benchmark_ticker='NDAQ', rfr=risk_free_rate)
             
