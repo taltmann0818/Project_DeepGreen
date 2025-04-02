@@ -124,8 +124,6 @@ if st.session_state.get("authentication_status"):
                 strat_avgdrawdwn, bm_avgdrawdwn = metrics[55][1]*100, metrics[55][0]*100
                 strat_maxdrawdwn, bm_maxdrawdwn = metrics[14][1]*100, metrics[14][0]*100
                 strat_drawdwndays, bm_drawdwndays = metrics[15][1], metrics[15][0]
-                ticker_select = 'IONQ'
-                risk_free_rate = 0.25
                 # Building metrics df 
                 metrics_df = pd.DataFrame({'Metric Name': ['Ann. Return (CAGR) %','Cumulative Return %',
                                               'Ann. Volatility %',f'Sharpe Ratio (Rf= {risk_free_rate}%)','Serenity Ratio','Sortino Ratio',
