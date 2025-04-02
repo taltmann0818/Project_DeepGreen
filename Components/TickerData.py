@@ -23,10 +23,6 @@ class TickerData:
         
         self.start_date = kwargs.get('start_date', None)
         self.end_date = kwargs.get('end_date', None)
-        if self.start_date and self.end_date is not None:
-            self.start_date = datetime.combine(self.start_date, datetime.min.time())
-            self.end_date = datetime.combine(self.end_date, datetime.min.time())
-            self.days = 0
 
     def fetch_stock_data(self):
         """
@@ -41,7 +37,7 @@ class TickerData:
                                                        end=current_date.strftime("%Y-%m-%d"),
                                                        interval="1d")
                 
-            elif self.start_date and self.end_date is not None:
+            elif (self.start_date and self.end_date) is not None:
                 self.stock_data = ticker_obj.history(start=self.start_date.strftime("%Y-%m-%d"),
                                        end=self.end_date.strftime("%Y-%m-%d"),
                                        interval="1d")

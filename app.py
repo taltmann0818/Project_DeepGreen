@@ -1,6 +1,8 @@
 import streamlit as st
 import streamlit_authenticator as stauth
 
+st.set_page_config(layout="wide")
+
 authenticator = stauth.Authenticate(
     dict(st.secrets['credentials']),
     st.secrets['cookie']['name'],
