@@ -152,7 +152,7 @@ if st.session_state.get("authentication_status"):
                     name=f'Strategy ({ticker_select})'
                 ))
                 spider_fig.add_trace(go.Scatterpolar(
-                    r=[strat_sharpe, strat_serenity, bm_sortino]],
+                    r=[strat_sharpe, strat_serenity, bm_sortino],
                     theta=categories,
                     fill='toself',
                     name='Benchmark (NDAQ)'
