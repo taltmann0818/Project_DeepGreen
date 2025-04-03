@@ -143,29 +143,6 @@ if st.session_state.get("authentication_status"):
 
                 st.table(metrics_df)
 
-                spider_fig = go.Figure()
-                categories = ['Sharpe Ratio','Serenity Ratio','Sortino Ratio']
-                spider_fig.add_trace(go.Scatterpolar(
-                    r=[bm_sharpe, bm_serenity, strat_sortino],
-                    theta=categories,
-                    fill='toself',
-                    name=f'Strategy ({ticker_select})'
-                ))
-                spider_fig.add_trace(go.Scatterpolar(
-                    r=[strat_sharpe, strat_serenity, bm_sortino],
-                    theta=categories,
-                    fill='toself',
-                    name='Benchmark (NDAQ)'
-                ))
-                spider_fig.update_layout(
-                polar=dict(
-                    radialaxis=dict(
-                    visible=True
-                    )),
-                showlegend=True
-                )
-                st.plotly_chart(spider_fig)
-
         else:
             with st.container(border=True):
                 st.write("Enter the params and click the button to get results!")
