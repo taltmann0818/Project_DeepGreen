@@ -97,7 +97,7 @@ if st.session_state.get("authentication_status"):
             spinner_strings = ["Running the Bulls...","Poking the Bear..."]
             with st.spinner(np.random.choice(spinner_strings)):
                 predictions_df = make_predictions(model_select, ticker_select, data_range, prediction_window, sequence_window)
-                trades_fig, value_fig, metrics = backtesting(predictions_df, ticker_select, initial_capital, pct_change_entry, pct_change_exit, benchmark_ticker=ticker_select, rfr=risk_free_rate)
+                trades_fig, value_fig, metrics = backtesting(predictions_df, ticker_select, initial_capital, pct_change_entry, pct_change_exit, benchmark_ticker='NDAQ', rfr=risk_free_rate)
             
             with st.container(border=True):
                 st.subheader("Portfolio")
@@ -137,16 +137,26 @@ if st.session_state.get("authentication_status"):
                 cagr_delta = np.round(strat_cagr - bm_cagr,2)
                 sharpe_delta = np.round(strat_sharpe - bm_sharpe, 2)
                 vol_delta = np.round(strat_vol - bm_vol, 2)
-                mcol1.metric("CAGR", strat_cagr, )
+                mcol1.metric("CAGR", "f{strat_cagr} %", cagr_delta)
                 mcol2.metric("Sharpe Ratio", strat_sharpe, strat_sharpe-bm_sharpe)
-                mcol3.metric("Volatility (ann.)", strat_vol, vol_delta, delta_color="inverse")
+                mcol3.metric("Volatility (ann.)", "f{strat_vol} %", vol_delta, delta_color="inverse")
 
                 st.table(metrics_df)
 
         else:
             with st.container(border=True):
                 st.write("Enter the params and click the button to get results!")
-                
+
+with st.container(border=True):
+    expander = st.expander("See metric definitions")
+    expander.write('''
+        CAGR: The compound annual growth rate is the rate of return that an investment would need to have every year in order to grow from its beginning balance to its ending balance, over a given time interval. The CAGR assumes that any profits were reinvested at the end of each period of the investment’s life span. The compound annual growth rate isn’t a true return rate, but rather a representational figure. It is essentially a number that describes the rate at which an investment would have grown if it had grown at the same rate every year and the profits were reinvested at the end of each year. For stock market investors, this can be particularly useful in comparing the performance of different stocks.
+        Sharpe Ratio: The Sharpe ratio compares the return of an investment with its risk. It's a mathematical expression of the insight that excess returns over a period of time may signify more volatility and risk, rather than investing skill. The Sharpe ratio is one of the most widely used methods for measuring risk-adjusted relative returns. It compares a fund's historical or projected returns relative to an investment benchmark with the historical or expected variability of such returns.
+        Serentiy Ratio: The Serenity Ratio is an alternative measure to the Sharpe Ratio that accounts for extreme risk. While the latter only divides return premium by the annualized volatility, the Serenity Ratio uses the Ulcer Index and a Pitfall Indicator (PI) as risk measures to quantify the tendency of a fund to be “stuck” in drawdown.
+        Sortino Ratio: The Sortino ratio is a variation of the Sharpe ratio that differentiates harmful volatility from total overall volatility by using the asset's standard deviation of negative portfolio returns—downside deviation—instead of the total standard deviation of portfolio returns. The Sortino ratio is a useful way for investors, analysts, and portfolio managers to evaluate an investment's return for a given level of bad risk. Since this ratio uses only the downside deviation as its risk measure, it addresses the problem of using total risk, or standard deviation, which is important because upside volatility is beneficial to investors and isn't a factor most investors worry about.
+        Daily Value-at-Risk: Value at Risk (VaR) has been called the "new science of risk management," and is a statistic that is used to predict the greatest possible losses over a specific time frame.
+        Drawdown: A drawdown is the peak-to-trough decline of an investment, trading account, or fund during a specific period. It can be used to measure an investment's historical risk, compare the performance of different funds, or monitor a portfolio's performance.
+    ''')
 # ---------------
 # End of the App
 # ---------------
