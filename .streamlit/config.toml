@@ -6,11 +6,3 @@ base = "dark"
 
 # Primary accent color.
 primaryColor = "#295C90"
-
-# Background color of the app.
-backgroundColor = "#FAFAFA"
-
-# Background color used for most interactive widgets.
-secondaryBackgroundColor = "#262730"
-
-textColor = "#FAFAFA"
