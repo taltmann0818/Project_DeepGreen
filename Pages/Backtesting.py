@@ -97,7 +97,7 @@ if st.session_state.get("authentication_status"):
             spinner_strings = ["Running the Bulls...","Poking the Bear..."]
             with st.spinner(np.random.choice(spinner_strings)):
                 predictions_df = make_predictions(model_select, ticker_select, data_range, prediction_window, sequence_window)
-                trades_fig, value_fig, metrics = backtesting(predictions_df, ticker_select, initial_capital, pct_change_entry, pct_change_exit, benchmark_ticker='NDAQ', rfr=risk_free_rate)
+                trades_fig, value_fig, metrics = backtesting(predictions_df, ticker_select, initial_capital, pct_change_entry, pct_change_exit, benchmark_ticker=ticker_select, rfr=risk_free_rate)
             
             with st.container(border=True):
                 st.subheader("Portfolio")
@@ -134,9 +134,12 @@ if st.session_state.get("authentication_status"):
 
 
                 mcol1, mcol2, mcol3 = st.columns(3)
-                mcol1.metric("CAGR", strat_cagr/100, (strat_cagr/100)-(bm_cagr/100))
+                cagr_delta = np.round(strat_cagr - bm_cagr,2)
+                sharpe_delta = np.round(strat_sharpe - bm_sharpe, 2)
+                vol_delta = np.round(strat_vol - bm_vol, 2)
+                mcol1.metric("CAGR", strat_cagr, )
                 mcol2.metric("Sharpe Ratio", strat_sharpe, strat_sharpe-bm_sharpe)
-                mcol3.metric("Volatility (ann.)", strat_vol, strat_vol-bm_vol,delta_color="inverse")
+                mcol3.metric("Volatility (ann.)", strat_vol, vol_delta, delta_color="inverse")
 
                 st.table(metrics_df)
 
