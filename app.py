@@ -5,7 +5,9 @@ st.set_page_config(layout="wide")
 def login():
     # All the authentication info is stored in the session_state
     if not st.experimental_user.is_logged_in:
-        st.login("microsoft")
+        if st.button("Log in with Microsoft Entra ID"):
+            st.login("microsoft")
+        st.stop()
     else:
         st.write(f"Hello, {st.experimental_user.name}!")
 
