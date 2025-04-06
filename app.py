@@ -36,7 +36,7 @@ login_page = st.Page(login, title="Log in", icon=":material/login:")
 logout_page = st.Page(logout, title="Log out", icon=":material/logout:")
 
 training = st.Page(
-    "Pages/Training.py", title="Model Training", icon=":material/bolt:", default=True
+    "Pages/Forecasting.py", title="Forecasting", icon=":material/bolt:", default=True
 )
 backtesting = st.Page("Pages/Backtesting.py", title="Backtesting", icon=":material/dashboard:")
 

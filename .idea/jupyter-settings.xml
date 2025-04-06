@@ -3,6 +3,19 @@
   <component name="JupyterPersistentConnectionParameters">
     <option name="moduleParameters">
       <map>
+        <entry key="$PROJECT_DIR$/.idea/Project DeepGreen.iml">
+          <value>
+            <JupyterConnectionParameters>
+              <option name="managed" value="true" />
+              <option name="sdkName" value="$USER_HOME$/opt/anaconda3" />
+              <option name="environmentVariables">
+                <map>
+                  <entry name="AZURE_SQL_CONNECTIONSTRING" value="Driver={ODBC Driver 18 for SQL Server};Server=tcp:projectdeepgreen.database.windows.net,1433;Database=us_equities;Uid=taltmann;Pwd=Millie5367!;Encrypt=yes;TrustServerCertificate=no;Connection Timeout=30;" />
+                </map>
+              </option>
+            </JupyterConnectionParameters>
+          </value>
+        </entry>
         <entry key="$PROJECT_DIR$/.idea/PythonProject.iml">
           <value>
             <JupyterConnectionParameters>
