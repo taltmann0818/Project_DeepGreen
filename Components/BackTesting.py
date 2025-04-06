@@ -62,7 +62,7 @@ class BackTesting:
         
 
     def run_simulation(self):
-        print(f"Running vectorbt backtest for {self.ticker}")
+        #print(f"Running vectorbt backtest for {self.ticker}")
         # Run the backtest using vectorbt's Portfolio
         self.pf = self.VectorBTBackTestSignals(self, self.data, self.initial_cash, self.position_size)
         
