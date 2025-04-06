@@ -4,6 +4,11 @@ import pandas as pd
 from datetime import datetime, timedelta
 from Components.MarketRegimes import MarketRegimes
 
+from sqlalchemy import create_engine, MetaData, Table, select
+import pandas as pd
+import urllib.parse
+import os
+
 class TickerData:
     def __init__(self, ticker, years=1, prediction_window=5,**kwargs):
         """
@@ -325,3 +330,87 @@ class TickerData:
         self.preprocess_data()
         self.add_technical_indicators()
         return self.merge_data(), self.stock_data
+
+def upload_data_sql(data_to_upload, table_name):
+    try:
+        # Get connection string from environment variables
+        #connection_string = os.environ["AZURE_SQL_CONNECTIONSTRING"]
+        connection_string = "Driver={ODBC Driver 18 for SQL Server};Server=tcp:projectdeepgreen.database.windows.net,1433;Database=us_equities;Uid=taltmann;Pwd=Millie5367!;Encrypt=yes;TrustServerCertificate=no;Connection Timeout=30;"
+
+        # Create SQLAlchemy engine
+        # Note: For Azure SQL with token authentication, we'll need to use a different approach
+        # than a standard connection string
+
+        # Option 1: If your connection string is ODBC format:
+        engine = create_engine(f"mssql+pyodbc:///?odbc_connect={urllib.parse.quote_plus(connection_string)}")
+
+        # Option 2: If you need to use token authentication:
+        # This would require additional setup similar to your pyodbc approach
+
+        # Reset index to make Date a column instead of the index
+        data_to_upload = data_to_upload.reset_index().rename(columns={'index': 'Date'})
+
+        # Drop columns not in the table schema (Dividends and Stock Splits)
+        data_to_upload = data_to_upload[['Date', 'Ticker', 'Open', 'High', 'Low', 'Close', 'Volume']]
+
+        # Convert Date column to a SQL-compatible format (remove timezone information)
+        if pd.api.types.is_datetime64_any_dtype(data_to_upload['Date']):
+            data_to_upload['Date'] = data_to_upload['Date'].dt.tz_localize(None)
+
+        # Print a small sample of the data for verification
+        print("Sample data to be uploaded:")
+        print(data_to_upload.head())
+
+        # Upload the dataframe to SQL
+        # The to_sql method will handle the insert statements for you
+        data_to_upload.to_sql(
+            name=table_name,
+            con=engine,
+            if_exists='append',  # 'replace' if you want to overwrite, 'append' to add to existing
+            index=False,
+            chunksize=1000  # Process in batches of 1000 rows
+        )
+
+        print(f"Successfully uploaded {len(data_to_upload)} records to {table_name} table")
+
+    except Exception as e:
+        print(f"Error uploading data: {str(e)}")
+
+        # Provide additional debugging information
+        if 'data_to_upload' in locals():
+            print("Data sample at the time of error:")
+            print(data_to_upload.head())
+
+
+def fetch_sql_data(table_name, columns=None, filters=None):
+    try:
+        # Get connection string (using your provided connection string)
+        connection_string = "Driver={ODBC Driver 18 for SQL Server};Server=tcp:projectdeepgreen.database.windows.net,1433;Database=us_equities;Uid=taltmann;Pwd=Millie5367!;Encrypt=yes;TrustServerCertificate=no;Connection Timeout=30;"
+
+        # Create SQLAlchemy engine
+        engine = create_engine(f"mssql+pyodbc:///?odbc_connect={urllib.parse.quote_plus(connection_string)}")
+
+        # Establish connection
+        with engine.connect() as connection:
+            # Prepare base SELECT query
+            metadata = MetaData()
+            table = Table(table_name, metadata, autoload_with=engine)
+
+            if columns:
+                query = select([table.c[col] for col in columns])
+            else:
+                query = select([table])
+
+            # Apply filters if provided
+            if filters:
+                query = query.where(filters)
+
+            # Execute query and fetch results into a pandas DataFrame
+            result = connection.execute(query)
+            data = pd.DataFrame(result.fetchall(), columns=result.keys())
+
+        return data
+
+    except Exception as e:
+        print(f"Error fetching data: {str(e)}")
+        return pd.DataFrame()  # Return an empty DataFrame in case of error
