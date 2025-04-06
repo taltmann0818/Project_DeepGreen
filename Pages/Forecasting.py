@@ -14,7 +14,7 @@ from Components.BackTesting import BackTesting
 ### Page parameters --------------------------------------------------------------------------------
 
 # Retrieve authenticator class with YAML credentials from SL session_state for logout widget on this page
-if st.session_state.get("authentication_status") == None:
+if not st.experimental_user.is_logged_in:
     st.warning("Go to the Dashboard Page to Get Started")
 
 ### Backend functions ------------------------------------------------------------------------------  
@@ -25,9 +25,8 @@ if st.session_state.get("authentication_status") == None:
 # ---------------
 
 ## Frontend ui -----------------------------------------------------------------------------------------------------------------------------
-if st.session_state.get("authentication_status"):
+if st.experimental_user.is_logged_in:
 
-    
     col1, col2 = st.columns([3, 1])
         
     with col2:
