@@ -12,7 +12,6 @@ def login():
             flex-direction: column;
             justify-content: center;
             align-items: center;
-            height: 100vh;
         }
         </style>
         """, unsafe_allow_html=True
@@ -22,9 +21,9 @@ def login():
     st.markdown('<div class="center-container">', unsafe_allow_html=True)
 
     if not st.experimental_user.is_logged_in:
-        with st.container(border=True):
-            if st.button("Log in with Microsoft Entra ID"):
-                st.login("microsoft")
+        st.subheader('Welcome back')
+        if st.button("Continue with Microsoft Account"):
+            st.login("microsoft")
         st.stop()
     
     st.markdown('</div>', unsafe_allow_html=True)
