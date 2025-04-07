@@ -3,30 +3,13 @@ import streamlit as st
 st.set_page_config(layout="wide")
 
 def login():
-    st.markdown(
-        """
-        <style>
-        /* Container to center content */
-        .center-container {
-            display: flex;
-            flex-direction: column;
-            justify-content: center;
-            align-items: center;
-        }
-        </style>
-        """, unsafe_allow_html=True
-    )
-
-    # Wrap the login content in a centered container
-    st.markdown('<div class="center-container">', unsafe_allow_html=True)
-
+    left, middle, right = st.columns(3)
     if not st.experimental_user.is_logged_in:
-        st.subheader('Welcome back')
-        if st.button("Continue with Microsoft Account"):
-            st.login("microsoft")
-        st.stop()
-    
-    st.markdown('</div>', unsafe_allow_html=True)
+        with middle:
+            st.subheader('Welcome back')
+            if st.button("Continue with Microsoft Account", icon=":material/login:"):
+                st.login("microsoft")
+            st.stop()
 
     st.rerun()
 
