@@ -17,3 +17,4 @@ azure-identity~=1.21.0
 quantstats-lumi~=0.1.1
 Authlib~=1.3.2
 numba~=0.56.4
+ipython~=8.12.3
