@@ -3,13 +3,31 @@ import streamlit as st
 st.set_page_config(layout="wide")
 
 def login():
-    # All the authentication info is stored in the session_state
+    st.markdown(
+        """
+        <style>
+        /* Container to center content */
+        .center-container {
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+        }
+        </style>
+        """, unsafe_allow_html=True
+    )
+
+    # Wrap the login content in a centered container
+    st.markdown('<div class="center-container">', unsafe_allow_html=True)
+
     if not st.experimental_user.is_logged_in:
-        if st.button("Log in with Microsoft Entra ID"):
-            st.login("microsoft")
+        with st.container(border=True):
+            if st.button("Log in with Microsoft Entra ID"):
+                st.login("microsoft")
         st.stop()
-    else:
-        st.write(f"Hello, {st.experimental_user.name}!")
+    
+    st.markdown('</div>', unsafe_allow_html=True)
 
     st.rerun()
 
