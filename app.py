@@ -32,7 +32,6 @@ if st.experimental_user.is_logged_in:
     st.sidebar.markdown(f"### Hello, {st.experimental_user.name}")
     pg = st.navigation(
         {
-            "": [welcome],
             "Account": [logout_page],
             "Functions": [training, backtesting]
         }
