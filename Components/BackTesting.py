@@ -8,7 +8,7 @@ from plotly.subplots import make_subplots
 from matplotlib.pyplot import xlabel
 from sympy.physics.units import volume
 from vectorbt.portfolio.enums import SizeType, Direction, NoOrder, OrderStatus, OrderSide
-import quantstats_lumi as qs
+import quantstats as qs
 
 class BackTesting:
     def __init__(self,data,ticker,initial_capital,pct_change_entry=0.05,pct_change_exit=0.05,**kwargs):

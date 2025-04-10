@@ -5,7 +5,7 @@ import plotly.express as px
 from plotly.subplots import make_subplots
 import datetime
 import numpy as np
-import quantstats_lumi as qs
+import quantstats as qs
 from pathlib import Path
 
 # Custom libraries
