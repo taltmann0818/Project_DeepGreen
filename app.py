@@ -31,7 +31,7 @@ backtesting = st.Page(
 if st.experimental_user.is_logged_in:
     pg = st.navigation(
         {
-            "": st.write(f"Hello, {st.experimental_user.name}"),
+            "": [f"Hello, {st.experimental_user.name}"],
             "Account": [logout_page],
             "Functions": [training, backtesting]
         }
