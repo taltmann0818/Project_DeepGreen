@@ -35,7 +35,7 @@ if st.experimental_user.is_logged_in:
             submit = st.button("Forecast")
 
             # Segmented control to toggle showing the ticker input
-            selection = st.segmented_control("Select Mode", options=["val_1", "val_2"], index=0)
+            selection = st.segmented_control("Mode", options=["val_1", "val_2"], selection_mode="single")
 
             # Display ticker input conditionally based on selection
             if selection == "val_1":
