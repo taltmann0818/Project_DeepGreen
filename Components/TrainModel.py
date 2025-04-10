@@ -164,7 +164,7 @@ class TEMPUS(nn.Module):
         best_test_mape = float('inf')
         best_model_state = None
 
-        history = {
+        self.history = {
             'train_loss': [], 'test_loss': [],
             'rmse': [], 'mape': []
         }
@@ -199,10 +199,10 @@ class TEMPUS(nn.Module):
             #print(f"Epoch {epoch}/{num_epochs}; Train Loss: {train_loss:.4f}, Test Loss: {test_loss:.4f}, RMSE: {test_rmse:.2f}%")
 
             # Store history
-            history['train_loss'].append(train_loss)
-            history['test_loss'].append(test_loss)
-            history['rmse'].append(test_rmse)
-            history['mape'].append(test_mape)
+            self.history['train_loss'].append(train_loss)
+            self.history['test_loss'].append(test_loss)
+            self.history['rmse'].append(test_rmse)
+            self.history['mape'].append(test_mape)
 
             # Store model state with best val mape
             if test_mape < best_test_mape:
@@ -216,9 +216,7 @@ class TEMPUS(nn.Module):
         # Final evaluation with best model state
         print(f"\nBest MAPE: {best_test_mape:.2f}%")
 
-        self.history = history
-
-        return history
+        return self.history
 
     def evaluate(self, data_loader, criterion):
         self.to(self.device)

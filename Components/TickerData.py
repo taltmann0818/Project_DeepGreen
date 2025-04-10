@@ -263,7 +263,7 @@ class TickerData:
         Merge all data sources into one DataFrame.
         """
         try:
-            indicators = ['ema_20', 'ema_50', 'ema_200', 'stoch_rsi', 'macd','b_percent', 'State', 'adx','keltner_upper','keltner_lower', 'Close']
+            indicators = ['ema_20', 'ema_50', 'ema_200', 'stoch_rsi', 'macd', 'b_percent', 'keltner_lower', 'keltner_upper','adx', 'Close']
             if self.prediction_mode:
                 self.dataset_ex_df = self.dataset_ex_df[['Date','Ticker']+indicators]
                 self.final_df = self.dataset_ex_df.dropna()
@@ -327,7 +327,7 @@ def upload_data_sql(data_to_upload, table_name,chunksize=100):
             print(data_to_upload.head())
 
 
-def fetch_sql_data(table_name, columns=None, filters=None):
+def fetch_sql_data(table_name):
     try:
         # Get connection string from environment variables
         connection_string = os.environ["AZURE_SQL_CONNECTIONSTRING"]
@@ -339,16 +339,8 @@ def fetch_sql_data(table_name, columns=None, filters=None):
             metadata = MetaData()
             table = Table(table_name, metadata, autoload_with=engine)
 
-            if columns:
-                query = select([table.c[col] for col in columns])
-            else:
-                query = select([table])
-            # Apply filters if provided
-            if filters:
-                query = query.where(filters)
-
             # Execute query and fetch results into a pandas DataFrame
-            result = connection.execute(query)
+            result = connection.execute(select(table))
             data = pd.DataFrame(result.fetchall(), columns=result.keys())
 
         return data
