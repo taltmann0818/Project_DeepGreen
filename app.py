@@ -17,6 +17,7 @@ def logout():
     if st.experimental_user.is_logged_in:
         st.logout()
         st.rerun()
+    st.write(f"Hello, {st.experimental_user.name}")
 
 login_page = st.Page(login, title="Log in", icon=":material/login:")
 logout_page = st.Page(logout, title="Log out", icon=":material/logout:")
@@ -24,7 +25,9 @@ logout_page = st.Page(logout, title="Log out", icon=":material/logout:")
 training = st.Page(
     "Pages/Forecasting.py", title="Forecasting", icon=":material/bolt:", default=True
 )
-backtesting = st.Page("Pages/Backtesting.py", title="Backtesting", icon=":material/dashboard:")
+backtesting = st.Page(
+    "Pages/Backtesting.py", title="Backtesting", icon=":material/dashboard:"
+)
 
 if st.experimental_user.is_logged_in:
     pg = st.navigation(
