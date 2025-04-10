@@ -4,7 +4,14 @@ import pandas as pd
 from datetime import datetime, timedelta
 from Components.MarketRegimes import MarketRegimes
 
-from sqlalchemy import create_engine, MetaData, Table, select
+try:
+    from sqlalchemy import create_engine, MetaData, Table, select
+except ImportError:
+    create_engine = None
+    MetaData = None
+    Table = None
+    select = None
+
 import pandas as pd
 import urllib.parse
 import os

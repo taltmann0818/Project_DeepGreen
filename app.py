@@ -1,35 +1,21 @@
 import streamlit as st
-import streamlit_authenticator as stauth
 
 st.set_page_config(layout="wide")
 
-authenticator = stauth.Authenticate(
-    dict(st.secrets['credentials']),
-    st.secrets['cookie']['name'],
-    st.secrets['cookie']['key'],
-    st.secrets['cookie']['expiry_days']
-)
-
 def login():
-    try:
-        auth = authenticator.login('main')
-    except Exception as e:
-        st.error(e)
-
-    # All the authentication info is stored in the session_state
-    if st.session_state["authentication_status"] == False:
-        st.error('Username/password is incorrect')
-        st.stop()
-    elif st.session_state["authentication_status"] == None:
-        st.warning('Please enter your username and password')
-        st.stop()
+    left, middle, right = st.columns(3)
+    if not st.experimental_user.is_logged_in:
+        with middle:
+            st.subheader('Welcome back')
+            if st.button("Continue with Microsoft Account", icon=":material/login:"):
+                st.login("microsoft")
+            st.stop()
 
     st.rerun()
 
 def logout():
-    if st.session_state.get("authentication_status"):
-        authenticator.logout("Logout", "unrendered")
-        st.session_state["authentication_status"] = None
+    if st.experimental_user.is_logged_in:
+        st.logout()
         st.rerun()
 
 login_page = st.Page(login, title="Log in", icon=":material/login:")
@@ -40,7 +26,7 @@ training = st.Page(
 )
 backtesting = st.Page("Pages/Backtesting.py", title="Backtesting", icon=":material/dashboard:")
 
-if st.session_state["authentication_status"]:
+if st.experimental_user.is_logged_in:
     pg = st.navigation(
         {
             "Account": [logout_page],

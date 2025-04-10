@@ -5,7 +5,7 @@ import plotly.express as px
 from plotly.subplots import make_subplots
 import datetime
 import numpy as np
-import quantstats as qs
+import quantstats_lumi as qs
 from pathlib import Path
 
 # Custom libraries
@@ -16,7 +16,7 @@ from Components.BackTesting import BackTesting
 ### Page parameters --------------------------------------------------------------------------------
 
 # Retrieve authenticator class with YAML credentials from SL session_state for logout widget on this page
-if st.session_state.get("authentication_status") == None:
+if not st.experimental_user.is_logged_in:
     st.warning("Go to the Dashboard Page to Get Started")
 
 ### Backend functions ------------------------------------------------------------------------------  
@@ -61,9 +61,8 @@ def backtesting(input_data, ticker, initial_capital, pct_change_entry, pct_chang
 # ---------------
 
 ## Frontend ui -----------------------------------------------------------------------------------------------------------------------------
-if st.session_state.get("authentication_status"):
+if st.experimental_user.is_logged_in:
 
-    
     col1, col2 = st.columns([3, 1])
         
     with col2:
