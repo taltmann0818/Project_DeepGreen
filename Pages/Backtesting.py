@@ -94,7 +94,8 @@ def multi_backtesting(tickers, initial_capital, model, data_window, prediction_w
         bt_results['ticker'] = ticker
         returns.append(bt_results)
 
-        my_bar.progress(idx / total_tickers, text=f"{idx}/{total_tickers} tickers backtested")
+        per_done = (idx / total_tickers) * 100
+        my_bar.progress(idx / total_tickers, text=f"{per_done}% of tickers backtested")
 
     my_bar.empty()
     #preds_dfs = pd.concat(preds_dfs, ignore_index=False)
