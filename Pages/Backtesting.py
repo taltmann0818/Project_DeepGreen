@@ -23,7 +23,7 @@ if not st.experimental_user.is_logged_in:
 ### Backend functions ------------------------------------------------------------------------------  
 
 
-def get_index_tickers(index, sample_size=50):
+def get_index_tickers(index):
     if index == 'NASDAQ':
         tickers = pd.read_html("https://en.wikipedia.org/wiki/Nasdaq-100")[4]
         tickers = tickers.iloc[:, [1]].to_numpy().flatten() # Clean up the dataframe
@@ -39,9 +39,7 @@ def get_index_tickers(index, sample_size=50):
     else:
         tickers = []
 
-    sampled_tickers = random.sample(list(tickers), sample_size)
-
-    return sampled_tickers
+    return tickers
 
 def make_predictions(model, ticker, data_window, prediction_window, model_window_size):
     # Get stock data
@@ -132,14 +130,11 @@ def multi_backtesting(tickers, initial_capital, model, data_window, prediction_w
             type="date"
         )
     )
-    fig.show()
-
-    last_returns = returns.groupby('ticker')['cumulative_return'].last()
 
     # Count positive and negative returns
+    last_returns = returns.groupby('ticker')['cumulative_return'].last()
     positive_count = sum(last_returns > 0)
     negative_count = sum(last_returns <= 0)
-    total_count = len(last_returns)
 
     # Convert to DataFrame for visualization
     last_returns_df = pd.DataFrame(last_returns).reset_index()
@@ -156,15 +151,8 @@ def multi_backtesting(tickers, initial_capital, model, data_window, prediction_w
     )
 
     fig_pie.update_traces(textinfo='percent+label').update_layout(showlegend=False)
-    fig_pie.show()
 
-    # Calculate the proportion of tickers with positive returns
-    if total_count > 0:
-        positive_proportion = positive_count / total_count
-    else:
-        positive_proportion = 0.0
-
-    return fig, fig_pie, positive_proportion, positive_count, negative_count
+    return fig, fig_pie, np.average(last_returns), np.max(last_returns), np.min(last_returns)
 
 # ---------------
 # Streamlit Layout
@@ -191,7 +179,9 @@ if st.experimental_user.is_logged_in:
                 ticker_select = st.text_input("Ticker")
             elif mode_selection == "Multi":
                 ticker_select = st.selectbox("Index",['NASDAQ','S&P500','RUSSELL1000','DOWJONES'])
-                sample_size = st.slider("Sample Size", 1, 100, 50)
+                if ticker_select is not None:
+                    tickers = get_index_tickers(ticker_select)
+                sample_size = st.slider("Sample Size", 1, len(tickers), np.round(np.median([index for index, _ in enumerate(tickers)]))+1)
             else:
                 ticker_select = None
 
@@ -240,8 +230,8 @@ if st.experimental_user.is_logged_in:
 
             else:
                 if mode_selection == "Multi":
-                    tickers = get_index_tickers(ticker_select, sample_size)
-                    fig, fig_pie, positive_proportion, positive_count, negative_count = multi_backtesting(tickers,
+                    sampled_tickers = random.sample(list(tickers), sample_size)
+                    fig, fig_pie, avg_cumreturn, max_cumreturn, min_cumreturn = multi_backtesting(sampled_tickers,
                                                                                                           initial_capital,
                                                                                                           model_select,
                                                                                                           data_range,
@@ -272,11 +262,11 @@ if st.experimental_user.is_logged_in:
 
                     if mode_selection == "Multi":
                         mcol1, mcol2, mcol3 = st.columns(3)
-                        mcol1.metric("% Tickers Positive Returns", f"{positive_proportion:.2%}", positive_proportion)
-                        mcol2.metric("Positive Tickers", positive_count)
-                        mcol3.metric("Negative Tickers", negative_count)
+                        mcol1.metric("Average Return", avg_cumreturn)
+                        mcol2.metric("Max Return", max_cumreturn)
+                        mcol3.metric("Min Return ", min_cumreturn)
 
-                        st.write(f"Total Tickers: {len(tickers)}")
+                        st.write("Metrics are for returns at the last day in the data range.")
 
                     elif mode_selection == "Single":
 
