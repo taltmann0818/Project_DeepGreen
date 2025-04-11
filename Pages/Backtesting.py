@@ -181,7 +181,8 @@ if st.experimental_user.is_logged_in:
                 ticker_select = st.selectbox("Index",['NASDAQ','S&P500','RUSSELL1000','DOWJONES'])
                 if ticker_select is not None:
                     tickers = get_index_tickers(ticker_select)
-                sample_size = st.slider("Sample Size", 1, len(tickers), np.round(np.median([index for index, _ in enumerate(tickers)]))+1)
+                median_ticker = int(np.round(np.median([index for index, _ in enumerate(tickers)]))+1)
+                sample_size = st.slider("Sample Size", 1, len(tickers), median_ticker)
             else:
                 ticker_select = None
 
