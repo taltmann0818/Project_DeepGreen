@@ -36,7 +36,7 @@ if st.experimental_user.is_logged_in:
             submit = st.button("Forecast")
 
             # Segmented control to toggle showing the ticker input
-            modes = ["Scan", "Single", "Multi"]
+            modes = ["Scan", "Single"]
             mode_selection = st.segmented_control(
                 "Mode", modes, selection_mode="single", help="This is the mode used for price forecasting."
             )
@@ -69,6 +69,8 @@ if st.experimental_user.is_logged_in:
         st.subheader("Forecasting")
         if submit:
             missing_fields = []
+            if not mode_selection:
+                missing_fields.append("Mode")
             if (mode_selection == "Scan" or mode_selection == "Single") and not ticker_select:
                 missing_fields.append("Ticker")
             if not model_select:
@@ -87,9 +89,6 @@ if st.experimental_user.is_logged_in:
                 st.error(f"Please fill out the following fields: {', '.join(missing_fields)}")
 
             else:
-                # Place your backtesting function call or logic here
-                st.success("Running backtest with the provided inputs...")
-
                 with st.container(border=True):
                     st.subheader("Train History")
 
@@ -107,6 +106,10 @@ if st.experimental_user.is_logged_in:
                     mcol1.metric("Loss", "70")
                     mcol2.metric("MSE", "9")
                     mcol3.metric("MAPE", "5%")
+
+        else:
+            with st.container(border=True):
+                st.write("Enter the params and click the button to get results!")
 
        
 # Sidebar: Settings

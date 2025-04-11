@@ -7,6 +7,7 @@ import datetime
 import numpy as np
 import quantstats as qs
 from pathlib import Path
+import random
 
 # Custom libraries
 from Components.TrainModel import torchscript_predict
@@ -22,9 +23,28 @@ if not st.experimental_user.is_logged_in:
 ### Backend functions ------------------------------------------------------------------------------  
 
 
+def get_index_tickers(index, sample_size=50):
+    if index == 'NASDAQ':
+        tickers = pd.read_html("https://en.wikipedia.org/wiki/Nasdaq-100")[4]
+        tickers = tickers.iloc[:, [1]].to_numpy().flatten() # Clean up the dataframe
+    elif index == 'S&P500':
+        tickers = pd.read_html("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")[0]
+        tickers = tickers.iloc[:, [0]].to_numpy().flatten() # Clean up the dataframe
+    elif index == 'RUSSELL1000':
+        tickers = pd.read_html("https://en.wikipedia.org/wiki/Russell_1000_Index")[3]
+        tickers = tickers.iloc[:, [1]].to_numpy().flatten() # Clean up the dataframe
+    elif index == 'DOWJONES':
+        tickers = pd.read_html("https://en.wikipedia.org/wiki/Dow_Jones_Industrial_Average")[2]
+        tickers = tickers.iloc[:, [2]].to_numpy().flatten() # Clean up the dataframe
+    else:
+        tickers = []
+
+    sampled_tickers = random.sample(list(tickers), sample_size)
+
+    return sampled_tickers
+
 def make_predictions(model, ticker, data_window, prediction_window, model_window_size):
     # Get stock data
-    
     out_of_sample_data, raw_stock_data = TickerData(ticker, years=1, prediction_window=prediction_window,
                                                     start_date=data_window[0],
                                                     end_date=data_window[1]).process_all()
@@ -45,7 +65,6 @@ def make_predictions(model, ticker, data_window, prediction_window, model_window
     return preds_df
 
 
-
 def backtesting(input_data, ticker, initial_capital, pct_change_entry, pct_change_exit, benchmark_ticker='NDAQ', rfr=0.25):
     
     backtester = BackTesting(input_data, ticker, initial_capital, pct_change_entry=pct_change_entry,pct_change_exit=pct_change_exit)
@@ -55,6 +74,100 @@ def backtesting(input_data, ticker, initial_capital, pct_change_entry, pct_chang
     metrics = np.array(qs.reports.metrics(backtester.pf.returns(), benchmark_ticker ,mode='full', rf=rfr/100, display=False))
 
     return trades_fig, value_fig, metrics
+
+def multi_backtesting(tickers, initial_capital, model, data_window, prediction_window, model_window_size, pct_change_entry, pct_change_exit):
+
+    #preds_dfs = []
+    returns = []
+
+    progress_text = "Backtesting in progress. Please wait."
+    my_bar = st.progress(0, text=progress_text)
+
+    total_tickers = len(tickers)
+    for idx, ticker in enumerate(tickers, start=1):
+        preds_df = make_predictions(model, ticker, data_window, prediction_window, model_window_size)
+        # preds_dfs.append(preds_df)
+
+        backtester = BackTesting(preds_df, ticker, initial_capital, pct_change_entry=pct_change_entry,
+                                 pct_change_exit=pct_change_exit)
+        backtester.run_simulation()
+        bt_results = pd.DataFrame(backtester.pf.returns())
+        bt_results['cumulative_return'] = np.array(((1 + bt_results[0]).cumprod() - 1) * 100)
+        bt_results['ticker'] = ticker
+        returns.append(bt_results)
+
+        my_bar.progress(idx / total_tickers, text=f"{idx}/{total_tickers} tickers backtested")
+
+    my_bar.empty()
+    #preds_dfs = pd.concat(preds_dfs, ignore_index=False)
+    returns = pd.concat(returns, ignore_index=False)
+
+    # Create an interactive plot using Plotly
+    fig = px.line(
+        returns.reset_index(),
+        x='index',
+        y='cumulative_return',
+        color='ticker',
+        title='Cumulative Returns by Ticker',
+        labels={'index': 'Date', 'cumulative_return': 'Cumulative Return'}
+    )
+
+    fig.update_layout(
+        xaxis_title='Date',
+        yaxis_title='Cumulative Return (%)',
+        showlegend=False,
+        height=600,
+        template='ggplot2',
+        xaxis=dict(
+            rangeselector=dict(
+                buttons=list([
+                    dict(count=1, label="1m", step="month", stepmode="backward"),
+                    dict(count=6, label="6m", step="month", stepmode="backward"),
+                    dict(count=1, label="YTD", step="year", stepmode="todate"),
+                    dict(count=1, label="1y", step="year", stepmode="backward"),
+                    dict(step="all")
+                ])
+            ),
+            rangeslider=dict(visible=False),
+            type="date"
+        )
+    )
+    fig.show()
+
+    last_returns = returns.groupby('ticker')['cumulative_return'].last()
+
+    # Count positive and negative returns
+    positive_count = sum(last_returns > 0)
+    negative_count = sum(last_returns <= 0)
+    total_count = len(last_returns)
+
+    # Convert to DataFrame for visualization
+    last_returns_df = pd.DataFrame(last_returns).reset_index()
+    last_returns_df.columns = ['Ticker', 'Final Return']
+    last_returns_df.sort_values('Final Return', ascending=False, inplace=True)
+
+    # Create a simple pie chart showing the proportion
+    fig_pie = px.pie(
+        values=[positive_count, negative_count],
+        names=['Positive', 'Negative'],
+        title='Proportion of Tickers with Positive vs Negative Returns',
+        color_discrete_sequence=['green', 'red'],
+        template='ggplot2',
+    )
+
+    fig_pie.update_traces(textinfo='percent+label').update_layout(showlegend=False)
+    fig_pie.show()
+
+    # Calculate the proportion of tickers with positive returns
+    if total_count > 0:
+        positive_proportion = positive_count / total_count
+        print(f"Proportion of tickers with positive cumulative returns: {positive_proportion:.2%}")
+        print(f"Positive tickers: {positive_count} out of {total_count}")
+        print(f"Negative tickers: {negative_count} out of {total_count}")
+    else:
+        print("No ticker data available for analysis")
+
+    return fig, fig_pie, positive_proportion, positive_count, negative_count
 
 # ---------------
 # Streamlit Layout
@@ -67,9 +180,25 @@ if st.experimental_user.is_logged_in:
         
     with col2:
         st.link_button("View Github", 'https://github.com/taltmann0818/Project_DeepGreen')
-        with st.form('backtest_form'):
+        with st.container(border=True):
+            submit = st.button("Backtest")
+
+            # Segmented control to toggle showing the ticker input
+            modes = ["Single", "Multi"]
+            mode_selection = st.segmented_control(
+                "Mode", modes, selection_mode="single", help="This is the mode used for backtesting."
+            )
+
+            # Display ticker input conditionally based on selection
+            if mode_selection == "Single":
+                ticker_select = st.text_input("Ticker")
+            if mode_selection == "Multi":
+                ticker_select = st.selectbox("Index",['NASDAQ','S&P500','RUSSELL1000','DOWJONES'])
+                sample_size = st.slider("Sample Size", 1, 100, 50)
+            else:
+                ticker_select = None
+
             st.subheader("Settings")
-            ticker_select = st.text_input("Ticker")
             today = datetime.datetime.now() 
             data_range = st.slider("Data Range",value=(datetime.date(2000, 1, 1), datetime.date(today.year, today.month, today.day)),format="MM/DD/YYYY") 
             
@@ -84,63 +213,110 @@ if st.experimental_user.is_logged_in:
             pct_change_entry = st.number_input("% Change for BUY",help="This measures the relative gain between an equity's actual price and the predicted price for a BUY to be signalled.",value=5.00)
             pct_change_exit = st.number_input("% Change for SELL",help="This measures the relative decrease between an equity's actual price and the predicted price for a SELL to be signalled.",value=2.00)
             risk_free_rate = st.number_input("Risk Free Rate (%)",value=0.25)
-    
+
             #cuda_toggle = st.toggle("Use CUDA cores?")
-    
-            # Submit ST form button and run model training
-            submit = st.form_submit_button("Backtest")
     
     with col1:
         st.subheader("Backtesting")
         if submit:
-            spinner_strings = ["Running the Bulls...","Poking the Bear..."]
-            with st.spinner(np.random.choice(spinner_strings)):
-                predictions_df = make_predictions(model_select, ticker_select, data_range, prediction_window, sequence_window)
-                trades_fig, value_fig, metrics = backtesting(predictions_df, ticker_select, initial_capital, pct_change_entry, pct_change_exit, benchmark_ticker='NDAQ', rfr=risk_free_rate)
-            
-            with st.container(border=True):
-                st.subheader("Portfolio")
-                
-                st.plotly_chart(trades_fig)
-                st.plotly_chart(value_fig)
-            
-            with st.container(border=True):
-                st.subheader("Metrics")
+            missing_fields = []
+            if not mode_selection:
+                missing_fields.append("Mode")
+            if (mode_selection == "Scan" or mode_selection == "Single") and not ticker_select:
+                missing_fields.append("Ticker")
+            if not model_select:
+                missing_fields.append("Model")
+            if not prediction_window:
+                missing_fields.append("Prediction Window")
+            if not sequence_window:
+                missing_fields.append("LTSM Sequence Window")
+            if not initial_capital:
+                missing_fields.append("Initial Capital")
+            if not pct_change_entry:
+                missing_fields.append("% Change for BUY")
+            if not pct_change_exit:
+                missing_fields.append("% Change for SELL")
 
-                strat_cagr, bm_cagr = metrics[5][1], metrics[5][0]*100
-                strat_return, bm_return = metrics[5][1]*100, metrics[5][0]*100
-                
-                #Risk metrics
-                strat_sharpe, bm_sharpe = metrics[6][1], metrics[6][0]
-                strat_vol, bm_vol = metrics[16][1]*100, metrics[16][0]*100
-                strat_serenity, bm_serenity = metrics[59][1], metrics[59][0]
-                strat_sortino, bm_sortino = metrics[10][1], metrics[10][0]
-                
-                #VaR
-                strat_dVaR, bm_dVaR= metrics[27][1]*100, metrics[27][0]*100
-                
-                #Extreme Risk Metrics
-                strat_avgdrawdwn, bm_avgdrawdwn = metrics[55][1]*100, metrics[55][0]*100
-                strat_maxdrawdwn, bm_maxdrawdwn = metrics[14][1]*100, metrics[14][0]*100
-                strat_drawdwndays, bm_drawdwndays = metrics[15][1], metrics[15][0]
-                # Building metrics df 
-                metrics_df = pd.DataFrame({'Metric Name': ['Ann. Return (CAGR) %','Cumulative Return %',
-                                              'Ann. Volatility %',f'Sharpe Ratio (Rf= {risk_free_rate}%)','Serenity Ratio','Sortino Ratio',
-                                             'Daily Value-at-Risk %',
-                                             'Avg Drawdown %','Max Drawdown %','Max Time-under-water (days)'], 
-                              f'Strategy ({ticker_select})': [strat_cagr, strat_return, strat_vol,strat_sharpe,strat_serenity,strat_sortino,strat_dVaR,strat_avgdrawdwn,strat_maxdrawdwn,strat_drawdwndays], 
-                              'Benchmark (NDAQ)': [bm_cagr, bm_return, bm_vol, bm_sharpe, bm_serenity,bm_sortino,bm_dVaR,bm_avgdrawdwn,bm_maxdrawdwn,bm_drawdwndays]}).set_index('Metric Name')
+            # Check if any fields are missing
+            if missing_fields:
+                st.error(f"Please fill out the following fields: {', '.join(missing_fields)}")
+
+            else:
+                if mode_selection == "Multi":
+                    tickers = get_index_tickers(ticker_select, sample_size)
+                    fig, fig_pie, positive_proportion, positive_count, negative_count = multi_backtesting(tickers,
+                                                                                                          initial_capital,
+                                                                                                          model_select,
+                                                                                                          data_range,
+                                                                                                          prediction_window,
+                                                                                                          sequence_window,
+                                                                                                          pct_change_entry,
+                                                                                                          pct_change_exit)
+
+                elif mode_selection == "Single":
+                    spinner_strings = ["Running the Bulls...","Poking the Bear..."]
+                    with st.spinner(np.random.choice(spinner_strings)):
+                        predictions_df = make_predictions(model_select, ticker_select, data_range, prediction_window, sequence_window)
+                        trades_fig, value_fig, metrics = backtesting(predictions_df, ticker_select, initial_capital, pct_change_entry, pct_change_exit, benchmark_ticker='NDAQ', rfr=risk_free_rate)
+
+                with st.container(border=True):
+                    st.subheader("Portfolio")
+
+                    if mode_selection == "Multi":
+                        st.plotly_chart(fig)
+                        st.plotly_chart(fig_pie)
+
+                    elif mode_selection == "Single":
+                        st.plotly_chart(trades_fig)
+                        st.plotly_chart(value_fig)
+
+                with st.container(border=True):
+                    st.subheader("Metrics")
+
+                    if mode_selection == "Multi":
+                        mcol1, mcol2, mcol3 = st.columns(3)
+                        mcol1.metric("% Tickers Positive Returns", f"{positive_proportion:.2%}", positive_proportion)
+                        mcol2.metric("Positive Tickers", positive_count)
+                        mcol3.metric("Negative Tickers", negative_count)
+
+                        st.write(f"Total Tickers: {len(tickers)}")
+
+                    elif mode_selection == "Single":
+
+                        strat_cagr, bm_cagr = metrics[5][1], metrics[5][0]*100
+                        strat_return, bm_return = metrics[5][1]*100, metrics[5][0]*100
+
+                        #Risk metrics
+                        strat_sharpe, bm_sharpe = metrics[6][1], metrics[6][0]
+                        strat_vol, bm_vol = metrics[16][1]*100, metrics[16][0]*100
+                        strat_serenity, bm_serenity = metrics[59][1], metrics[59][0]
+                        strat_sortino, bm_sortino = metrics[10][1], metrics[10][0]
+
+                        #VaR
+                        strat_dVaR, bm_dVaR= metrics[27][1]*100, metrics[27][0]*100
+
+                        #Extreme Risk Metrics
+                        strat_avgdrawdwn, bm_avgdrawdwn = metrics[55][1]*100, metrics[55][0]*100
+                        strat_maxdrawdwn, bm_maxdrawdwn = metrics[14][1]*100, metrics[14][0]*100
+                        strat_drawdwndays, bm_drawdwndays = metrics[15][1], metrics[15][0]
+                        # Building metrics df
+                        metrics_df = pd.DataFrame({'Metric Name': ['Ann. Return (CAGR) %','Cumulative Return %',
+                                                      'Ann. Volatility %',f'Sharpe Ratio (Rf= {risk_free_rate}%)','Serenity Ratio','Sortino Ratio',
+                                                     'Daily Value-at-Risk %',
+                                                     'Avg Drawdown %','Max Drawdown %','Max Time-under-water (days)'],
+                                      f'Strategy ({ticker_select})': [strat_cagr, strat_return, strat_vol,strat_sharpe,strat_serenity,strat_sortino,strat_dVaR,strat_avgdrawdwn,strat_maxdrawdwn,strat_drawdwndays],
+                                      'Benchmark (NDAQ)': [bm_cagr, bm_return, bm_vol, bm_sharpe, bm_serenity,bm_sortino,bm_dVaR,bm_avgdrawdwn,bm_maxdrawdwn,bm_drawdwndays]}).set_index('Metric Name')
 
 
-                mcol1, mcol2, mcol3 = st.columns(3)
-                cagr_delta = np.round(strat_cagr - bm_cagr,2)
-                sharpe_delta = np.round(strat_sharpe - bm_sharpe, 2)
-                vol_delta = np.round(strat_vol - bm_vol, 2)
-                mcol1.metric("CAGR", f"{np.round(strat_cagr,2)} %", cagr_delta)
-                mcol2.metric("Sharpe Ratio", strat_sharpe, strat_sharpe-bm_sharpe)
-                mcol3.metric("Volatility (ann.)", f"{np.round(strat_vol,2)} %", vol_delta, delta_color="inverse")
+                        mcol1, mcol2, mcol3 = st.columns(3)
+                        cagr_delta = np.round(strat_cagr - bm_cagr,2)
+                        sharpe_delta = np.round(strat_sharpe - bm_sharpe, 2)
+                        vol_delta = np.round(strat_vol - bm_vol, 2)
+                        mcol1.metric("CAGR", f"{np.round(strat_cagr,2)} %", cagr_delta)
+                        mcol2.metric("Sharpe Ratio", strat_sharpe, strat_sharpe-bm_sharpe)
+                        mcol3.metric("Volatility (ann.)", f"{np.round(strat_vol,2)} %", vol_delta, delta_color="inverse")
 
-                st.table(metrics_df)
+                        st.table(metrics_df)
 
         else:
             with st.container(border=True):
