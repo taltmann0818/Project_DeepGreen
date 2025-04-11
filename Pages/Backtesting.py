@@ -79,8 +79,8 @@ def multi_backtesting(tickers, initial_capital, model, data_window, prediction_w
 
     #preds_dfs = []
     returns = []
-
-    progress_text = "Backtesting in progress. Please wait."
+    spinner_strings = ["Running the Bulls...", "Poking the Bear..."]
+    progress_text = f"{np.random.choice(spinner_strings)} Please wait."
     my_bar = st.progress(0, text=progress_text)
 
     total_tickers = len(tickers)
@@ -161,11 +161,8 @@ def multi_backtesting(tickers, initial_capital, model, data_window, prediction_w
     # Calculate the proportion of tickers with positive returns
     if total_count > 0:
         positive_proportion = positive_count / total_count
-        print(f"Proportion of tickers with positive cumulative returns: {positive_proportion:.2%}")
-        print(f"Positive tickers: {positive_count} out of {total_count}")
-        print(f"Negative tickers: {negative_count} out of {total_count}")
     else:
-        print("No ticker data available for analysis")
+        positive_proportion = 0.0
 
     return fig, fig_pie, positive_proportion, positive_count, negative_count
 
@@ -192,7 +189,7 @@ if st.experimental_user.is_logged_in:
             # Display ticker input conditionally based on selection
             if mode_selection == "Single":
                 ticker_select = st.text_input("Ticker")
-            if mode_selection == "Multi":
+            elif mode_selection == "Multi":
                 ticker_select = st.selectbox("Index",['NASDAQ','S&P500','RUSSELL1000','DOWJONES'])
                 sample_size = st.slider("Sample Size", 1, 100, 50)
             else:
@@ -220,21 +217,21 @@ if st.experimental_user.is_logged_in:
         st.subheader("Backtesting")
         if submit:
             missing_fields = []
-            if not mode_selection:
+            if mode_selection is None:
                 missing_fields.append("Mode")
-            if (mode_selection == "Scan" or mode_selection == "Single") and not ticker_select:
+            if (mode_selection == "Scan" or mode_selection == "Single") and ticker_select is None:
                 missing_fields.append("Ticker")
-            if not model_select:
+            if model_select is None:
                 missing_fields.append("Model")
-            if not prediction_window:
+            if prediction_window is None:
                 missing_fields.append("Prediction Window")
-            if not sequence_window:
+            if sequence_window is None:
                 missing_fields.append("LTSM Sequence Window")
-            if not initial_capital:
+            if initial_capital is None:
                 missing_fields.append("Initial Capital")
-            if not pct_change_entry:
+            if pct_change_entry is None:
                 missing_fields.append("% Change for BUY")
-            if not pct_change_exit:
+            if pct_change_exit is None:
                 missing_fields.append("% Change for SELL")
 
             # Check if any fields are missing

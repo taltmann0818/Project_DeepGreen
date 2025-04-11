@@ -18,3 +18,4 @@ quantstats==0.0.64
 Authlib~=1.3.2
 numba~=0.56.4
 ipython~=8.12.3
+lxml~=4.6.3
