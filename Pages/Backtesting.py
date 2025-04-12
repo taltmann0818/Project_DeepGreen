@@ -257,9 +257,9 @@ if st.experimental_user.is_logged_in:
                 if mode_selection == "Multi":
                     sampled_tickers = random.sample(list(tickers), sample_size)
                     fig, fig_pie, metrics_df = multi_backtesting(sampled_tickers,initial_capital,model_select,data_range,prediction_window,sequence_window,pct_change_entry,pct_change_exit)
-                    avg_cumreturn = np.round(np.array(metrics_df)[1][0],2)
+                    avg_cumreturn = np.round(np.array(metrics_df)[0][1],2)
                     avg_sharpe = np.round(np.array(metrics_df)[1][1],2)
-                    avg_VaR = np.round(np.array(metrics_df)[1][2],2)
+                    avg_VaR = np.round(np.array(metrics_df)[2][1],2)
 
                 elif mode_selection == "Single":
                     spinner_strings = ["Running the Bulls...","Poking the Bear..."]
@@ -289,7 +289,7 @@ if st.experimental_user.is_logged_in:
 
                         st.table(metrics_df)
 
-                        st.write("Metrics are for returns at the last day in the data range.")
+                        st.write("Note: Cumulative returns are calculated at the last day in the data range.")
 
                     elif mode_selection == "Single":
 
