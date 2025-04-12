@@ -1,14 +1,5 @@
-from datetime import datetime, timedelta
 import vectorbt as vbt
-import numpy as np
-import pandas as pd
-from datetime import datetime as dt
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-from matplotlib.pyplot import xlabel
-from sympy.physics.units import volume
 from vectorbt.portfolio.enums import SizeType, Direction, NoOrder, OrderStatus, OrderSide
-import quantstats as qs
 
 class BackTesting:
     def __init__(self,data,ticker,initial_capital,pct_change_entry=0.05,pct_change_exit=0.05,**kwargs):
@@ -19,7 +10,7 @@ class BackTesting:
         self.pct_change_entry = pct_change_entry
         self.pct_change_exit = -abs(pct_change_exit)
 
-        #Kwargs
+        #kwargs
         self.use_fractional_shares = kwargs.get('use_fractional_shares', True)
         self.slippage = kwargs.get('slippage', 0.001)
         self.transaction_fees = kwargs.get('transaction_fees', 0.000)

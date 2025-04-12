@@ -22,7 +22,6 @@ if not st.experimental_user.is_logged_in:
 
 ### Backend functions ------------------------------------------------------------------------------  
 
-
 def get_index_tickers(index):
     if index == 'NASDAQ':
         tickers = pd.read_html("https://en.wikipedia.org/wiki/Nasdaq-100")[4]
@@ -75,30 +74,44 @@ def backtesting(input_data, ticker, initial_capital, pct_change_entry, pct_chang
 
 def multi_backtesting(tickers, initial_capital, model, data_window, prediction_window, model_window_size, pct_change_entry, pct_change_exit):
 
-    #preds_dfs = []
     returns = []
+    sharpe_ratios = []
+    VaRs = []
     spinner_strings = ["Running the Bulls...", "Poking the Bear..."]
     progress_text = f"{np.random.choice(spinner_strings)} Please wait."
     my_bar = st.progress(0, text=progress_text)
-
     total_tickers = len(tickers)
+
     for idx, ticker in enumerate(tickers, start=1):
-        preds_df = make_predictions(model, ticker, data_window, prediction_window, model_window_size)
-        # preds_dfs.append(preds_df)
+        try:
+            preds_df = make_predictions(model, ticker, data_window, prediction_window, model_window_size)
 
-        backtester = BackTesting(preds_df, ticker, initial_capital, pct_change_entry=pct_change_entry,
-                                 pct_change_exit=pct_change_exit)
-        backtester.run_simulation()
-        bt_results = pd.DataFrame(backtester.pf.returns())
-        bt_results['cumulative_return'] = np.array(((1 + bt_results[0]).cumprod() - 1) * 100)
-        bt_results['ticker'] = ticker
-        returns.append(bt_results)
+            backtester = BackTesting(preds_df, ticker, initial_capital, pct_change_entry=pct_change_entry,
+                                     pct_change_exit=pct_change_exit)
+            backtester.run_simulation()
+            bt_results = pd.DataFrame(backtester.pf.returns())
+            bt_results['cumulative_return'] = np.array(((1 + bt_results[0]).cumprod() - 1) * 100)
+            bt_results['ticker'] = ticker
+            returns.append(bt_results)
 
-        per_done = (idx / total_tickers) * 100
+            # Other portfolio metrics
+            sharpe_ratios.append(backtester.pf.sharpe_ratio())
+            VaRs.append(backtester.pf.value_at_risk())
+
+        except ValueError as e:
+            if str(e) == "No data retrieved!":
+                # Skip this ticker and continue with the next one
+                continue
+            else:
+                # Re-raise other ValueError exceptions
+                raise
+
+        per_done = np.round((idx / total_tickers) * 100, 2)
         my_bar.progress(idx / total_tickers, text=f"{per_done}% of tickers backtested")
 
     my_bar.empty()
-    #preds_dfs = pd.concat(preds_dfs, ignore_index=False)
+    if not returns:
+        raise ValueError("No valid data retrieved for any of the tickers!")
     returns = pd.concat(returns, ignore_index=False)
 
     # Create an interactive plot using Plotly
@@ -153,7 +166,15 @@ def multi_backtesting(tickers, initial_capital, model, data_window, prediction_w
 
     fig_pie.update_traces(textinfo='percent+label').update_layout(showlegend=False)
 
-    return fig, fig_pie, np.average(last_returns), np.max(last_returns), np.min(last_returns)
+    # Build a  metrics df
+    metrics_df = pd.DataFrame({'Metric Name': ['Cumulative Return (%)','Sharpe Ratio','Value-at-Risk (%)'],
+                               'Average': [np.average(last_returns),np.average(sharpe_ratios),np.average(VaRs)],
+                               'Minimum': [np.min(last_returns),np.min(sharpe_ratios),np.min(VaRs)],
+                               'Maximum': [np.max(last_returns),np.max(sharpe_ratios),np.max(VaRs)],
+                               'Std. Dev': [np.std(last_returns),np.std(sharpe_ratios),np.std(VaRs)],
+                               }).set_index('Metric Name')
+
+    return fig, fig_pie, metrics_df
 
 # ---------------
 # Streamlit Layout
@@ -233,14 +254,10 @@ if st.experimental_user.is_logged_in:
             else:
                 if mode_selection == "Multi":
                     sampled_tickers = random.sample(list(tickers), sample_size)
-                    fig, fig_pie, avg_cumreturn, max_cumreturn, min_cumreturn = multi_backtesting(sampled_tickers,
-                                                                                                          initial_capital,
-                                                                                                          model_select,
-                                                                                                          data_range,
-                                                                                                          prediction_window,
-                                                                                                          sequence_window,
-                                                                                                          pct_change_entry,
-                                                                                                          pct_change_exit)
+                    fig, fig_pie, metrics_df = multi_backtesting(sampled_tickers,initial_capital,model_select,data_range,prediction_window,sequence_window,pct_change_entry,pct_change_exit)
+                    avg_cumreturn = np.round(metrics_df[1][0],2)
+                    avg_sharpe = np.round(metrics_df[1][1],2)
+                    avg_VaR = np.round(metrics_df[1][2],2)
 
                 elif mode_selection == "Single":
                     spinner_strings = ["Running the Bulls...","Poking the Bear..."]
@@ -264,9 +281,11 @@ if st.experimental_user.is_logged_in:
 
                     if mode_selection == "Multi":
                         mcol1, mcol2, mcol3 = st.columns(3)
-                        mcol1.metric("Average Return", avg_cumreturn)
-                        mcol2.metric("Max Return", max_cumreturn)
-                        mcol3.metric("Min Return ", min_cumreturn)
+                        mcol1.metric("Avg. Return (%)", avg_cumreturn)
+                        mcol2.metric("Avg. Sharpe Ratio", avg_sharpe)
+                        mcol3.metric("Avg. Value-at-Risk (%)", avg_VaR)
+
+                        st.table(metrics_df)
 
                         st.write("Metrics are for returns at the last day in the data range.")
 
