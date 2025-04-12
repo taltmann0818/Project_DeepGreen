@@ -8,6 +8,7 @@ import numpy as np
 import quantstats as qs
 from pathlib import Path
 import random
+import time
 
 # Custom libraries
 from Components.TrainModel import torchscript_predict
@@ -100,11 +101,13 @@ def multi_backtesting(tickers, initial_capital, model, data_window, prediction_w
 
         except ValueError as e:
             if str(e) == "No data retrieved!":
-                # Skip this ticker and continue with the next one
+                warning_placeholder = st.empty()
+                warning_placeholder.warning(f"Unable to backtest {ticker}") # Display the warning message in the placeholder
+                time.sleep(2) # Wait for 2 seconds
+                warning_placeholder.empty() # Clear the container
                 continue
             else:
-                # Re-raise other ValueError exceptions
-                raise
+                raise # Re-raise other ValueError exceptions
 
         per_done = np.round((idx / total_tickers) * 100, 2)
         my_bar.progress(idx / total_tickers, text=f"{per_done}% of tickers backtested")
@@ -186,9 +189,8 @@ if st.experimental_user.is_logged_in:
     col1, col2 = st.columns([3, 1])
         
     with col2:
-        st.link_button("View Github", 'https://github.com/taltmann0818/Project_DeepGreen')
         with st.container(border=True):
-            submit = st.button("Backtest")
+            submit = st.button("Backtest",icon=":material/query_stats:")
 
             # Segmented control to toggle showing the ticker input
             modes = ["Single", "Multi"]
@@ -255,9 +257,9 @@ if st.experimental_user.is_logged_in:
                 if mode_selection == "Multi":
                     sampled_tickers = random.sample(list(tickers), sample_size)
                     fig, fig_pie, metrics_df = multi_backtesting(sampled_tickers,initial_capital,model_select,data_range,prediction_window,sequence_window,pct_change_entry,pct_change_exit)
-                    avg_cumreturn = np.round(metrics_df[1][0],2)
-                    avg_sharpe = np.round(metrics_df[1][1],2)
-                    avg_VaR = np.round(metrics_df[1][2],2)
+                    avg_cumreturn = np.round(np.array(metrics_df)[1][0],2)
+                    avg_sharpe = np.round(np.array(metrics_df)[1][1],2)
+                    avg_VaR = np.round(np.array(metrics_df)[1][2],2)
 
                 elif mode_selection == "Single":
                     spinner_strings = ["Running the Bulls...","Poking the Bear..."]
