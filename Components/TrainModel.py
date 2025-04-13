@@ -176,7 +176,7 @@ class TEMPUS(nn.Module):
 
             for inputs, targets in train_loader:
                 inputs, targets = inputs.to(self.device), targets.to(self.device)
-                outputs = self(inputs).to(self.device).squeeze()
+                outputs = self(inputs).to(self.device).view(targets.size())
                 loss = criterion(outputs, targets)
 
                 optimizer.zero_grad()
@@ -228,7 +228,7 @@ class TEMPUS(nn.Module):
         with torch.no_grad():
             for inputs, targets in data_loader:
                 inputs, targets = inputs.to(self.device), targets.to(self.device)
-                outputs = self(inputs).to(self.device).squeeze()
+                outputs = self(inputs).to(self.device).view(targets.size())
                 loss = criterion(outputs, targets)
 
                 total_loss += loss.item() * inputs.size(0)

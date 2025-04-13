@@ -271,7 +271,7 @@ class TickerData:
         Merge all data sources into one DataFrame.
         """
         try:
-            indicators = ['ema_20', 'ema_50', 'ema_200', 'stoch_rsi', 'macd', 'b_percent', 'keltner_lower', 'keltner_upper','adx', 'Close']
+            indicators = ['ema_20', 'ema_50', 'ema_200', 'stoch_rsi', 'macd', 'b_percent', 'keltner_lower', 'keltner_upper','adx']
             if self.prediction_mode:
                 self.dataset_ex_df = self.dataset_ex_df[['Date','Ticker']+indicators]
                 self.final_df = self.dataset_ex_df.dropna()
