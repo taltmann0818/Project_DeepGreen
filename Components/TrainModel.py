@@ -417,7 +417,7 @@ class BaseLSTM(nn.Module):
 
         return out
 
-def torchscript_predict(model_path, input_df, device, window_size, target_col):
+def torchscript_predict(model_path, input_df, device, window_size, target_col='shifted_prices', prediction_mode=False):
     # Load the TorchScript model
     loaded_model = torch.jit.load(model_path,map_location=device)
     loaded_model = loaded_model.to(device)
@@ -425,18 +425,23 @@ def torchscript_predict(model_path, input_df, device, window_size, target_col):
 
     predictions = []
     dates = []
-    actuals = []
     tickers = []
-    uncertainties = []
+    if not prediction_mode:
+        actuals = []
 
     for i in range(window_size, len(input_df)):
         # Get date, actual value, and ticker for the current index
         date = input_df.index[i]
-        actual = input_df[target_col].iloc[i] if target_col in input_df.columns else None
-        ticker = input_df['Ticker'].iloc[i] if 'Ticker' in input_df.columns else None  
+        ticker = input_df['Ticker'].iloc[i] if 'Ticker' in input_df.columns else None
+
+        if not prediction_mode:
+            actual = input_df[target_col].iloc[i] if target_col in input_df.columns else None
         
         # Get sequence
-        values = input_df.drop(columns=['Ticker',target_col]).values.astype(np.float32)
+        if prediction_mode:
+            values = input_df.drop(columns=['Ticker']).values.astype(np.float32)
+        elif not prediction_mode:
+            values = input_df.drop(columns=['Ticker',target_col]).values.astype(np.float32)
         input_window = values[i - window_size:i]
         input_tensor = torch.tensor(input_window, dtype=torch.float32, device=device).unsqueeze(0)
 
@@ -446,20 +451,27 @@ def torchscript_predict(model_path, input_df, device, window_size, target_col):
 
         predictions.append(pred_value)
         dates.append(date)
-        actuals.append(actual)
         tickers.append(ticker)
+        if not prediction_mode:
+            actuals.append(actual)
 
     # Create DataFrame with predictions
-    preds_df = pd.DataFrame({
-        'Ticker': tickers,
-        'Actual': actuals,
-        'Predicted': predictions
-    },index=dates)
+    if not prediction_mode:
+        preds_df = pd.DataFrame({
+            'Ticker': tickers,
+            'Actual': actuals,
+            'Predicted': predictions
+        },index=dates)
+    else:
+        preds_df = pd.DataFrame({
+            'Ticker': tickers,
+            'Predicted': predictions
+        },index=dates)
 
     return preds_df
 
 class DataModule:
-    def __init__(self, data, window_size=20, batch_size=32, eval_size=0.2, random_state=42):
+    def __init__(self, data, window_size=20, batch_size=32, eval_size=0.2, random_state=42, target_col='shifted_prices'):
         """
         data: pandas DataFrame or similar data structure with .iloc
         seq_length: length of the sequence window
@@ -481,6 +493,7 @@ class DataModule:
         self.batch_size = batch_size
         self.eval_size = eval_size
         self.random_state = random_state
+        self.target_col = target_col
 
         self.setup()
 
@@ -491,8 +504,7 @@ class DataModule:
         self.df_test = self.data.iloc[train_end:].copy()
 
         # Create datasets and data loaders
-        target_col = 'shifted_prices'
-        feature_cols = [col for col in self.data.columns if col != target_col]
+        feature_cols = [col for col in self.data.columns if col != self.target_col]
         self.num_features = len(feature_cols)
 
         # Data Scaler
@@ -500,9 +512,9 @@ class DataModule:
         train_features = self.df_train[feature_cols]
         self.scaler.fit(train_features)
 
-        self.train_dataset = SequenceDataset(self.df_train,target=target_col,features=feature_cols,window_size=self.window_size)
+        self.train_dataset = SequenceDataset(self.df_train,target=self.target_col,features=feature_cols,window_size=self.window_size)
         self.train_loader = DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True)
-        self.test_dataset = SequenceDataset(self.df_test,target=target_col,features=feature_cols,window_size=self.window_size)
+        self.test_dataset = SequenceDataset(self.df_test,target=self.target_col,features=feature_cols,window_size=self.window_size)
         self.test_loader = DataLoader(self.test_dataset, batch_size=self.batch_size, shuffle=False)
 
 class SequenceDataset(Dataset):

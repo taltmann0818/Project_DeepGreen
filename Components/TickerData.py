@@ -58,20 +58,20 @@ class TickerData:
             else:
                 raise ValueError("Days must be non-zero or a start_date and end_date provided.")
 
-            y_income_stmt = ticker_obj.get_income_stmt(freq='yearly').T
-            self.y_income_stmt = y_income_stmt.reset_index().rename(columns={"index": "Date"}).sort_values('Date')
-            earnings_data = ticker_obj.get_earnings_dates()
-            self.earnings_data = earnings_data.reset_index().rename(
-                columns={"Earnings Date": "Date", "EPS Estimate": "eps_estimate", "Reported EPS": "eps",
-                         "Surprise(%)": "eps_surprise"}).sort_values('Date')
+            #y_income_stmt = ticker_obj.get_income_stmt(freq='yearly').T
+            #self.y_income_stmt = y_income_stmt.reset_index().rename(columns={"index": "Date"}).sort_values('Date')
+            #earnings_data = ticker_obj.get_earnings_dates()
+            #self.earnings_data = earnings_data.reset_index().rename(
+            #    columns={"Earnings Date": "Date", "EPS Estimate": "eps_estimate", "Reported EPS": "eps",
+            #             "Surprise(%)": "eps_surprise"}).sort_values('Date')
 
-            return self.stock_data, self.q_income_stmt, self.y_income_stmt, self.earnings_data
+            return self.stock_data #, self.q_income_stmt, self.y_income_stmt, self.earnings_data
         # Handling of delisted stocks
         except AttributeError:
             self.stock_data = pd.DataFrame(columns=['Open', 'High', 'Low', 'Close', 'Volume'])
-            self.q_income_stmt = pd.DataFrame()
-            self.y_income_stmt = pd.DataFrame()
-            self.earnings_data = pd.DataFrame(index=[0])
+            #self.q_income_stmt = pd.DataFrame()
+            #self.y_income_stmt = pd.DataFrame()
+            #self.earnings_data = pd.DataFrame(index=[0])
 
             # Log this error
             print(f"AttributeError: Could not fetch data for ticker {self.ticker}, returning empty dataframes")
@@ -106,7 +106,8 @@ class TickerData:
             self.dataset_ex_df = MarketRegimes(self.dataset_ex_df, "hmm_model.pkl").run_regime_detection()
 
             # Target or outcome variable
-            self.dataset_ex_df['shifted_prices'] = self.dataset_ex_df['Close'].shift(self.prediction_window)
+            if not self.prediction_mode:
+                self.dataset_ex_df['shifted_prices'] = self.dataset_ex_df['Close'].shift(self.prediction_window)
 
             return self.stock_data, self.dataset_ex_df
             

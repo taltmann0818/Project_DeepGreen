@@ -43,9 +43,7 @@ def get_index_tickers(index):
 
 def make_predictions(model, ticker, data_window, prediction_window, model_window_size):
     # Get stock data
-    out_of_sample_data, raw_stock_data = TickerData(ticker, years=1, prediction_window=prediction_window,
-                                                    start_date=data_window[0],
-                                                    end_date=data_window[1]).process_all()
+    out_of_sample_data, raw_stock_data = TickerData(ticker, years=1, prediction_window=prediction_window,start_date=data_window[0],end_date=data_window[1], prediction_mode=True).process_all()
     if out_of_sample_data is None:
         raise ValueError("No data retrieved!")
     
@@ -55,7 +53,7 @@ def make_predictions(model, ticker, data_window, prediction_window, model_window
         input_df=out_of_sample_data,
         device="cpu",
         window_size=model_window_size,
-        target_col="shifted_prices"
+        prediction_mode=True
     )
     
     preds_df = pd.merge(preds_df, raw_stock_data[['Open', 'High', 'Low', 'Volume','Close']], left_index=True, right_index=True, how='left')
@@ -69,7 +67,8 @@ def backtesting(input_data, ticker, initial_capital, pct_change_entry, pct_chang
     backtester.run_simulation()
     trades_fig, value_fig, _ = backtester.plot_performance()
 
-    metrics = np.array(qs.reports.metrics(backtester.pf.returns(), benchmark_ticker ,mode='full', rf=rfr/100, display=False))
+    #metrics = np.array(qs.reports.metrics(backtester.pf.returns(), benchmark_ticker ,mode='full', rf=rfr/100, display=False))
+    metrics = np.array(qs.reports.metrics(backtester.pf.returns(), ticker, mode='full', rf=rfr / 100, display=False))
 
     return trades_fig, value_fig, metrics
 
@@ -87,8 +86,7 @@ def multi_backtesting(tickers, initial_capital, model, data_window, prediction_w
         try:
             preds_df = make_predictions(model, ticker, data_window, prediction_window, model_window_size)
 
-            backtester = BackTesting(preds_df, ticker, initial_capital, pct_change_entry=pct_change_entry,
-                                     pct_change_exit=pct_change_exit)
+            backtester = BackTesting(preds_df, ticker, initial_capital, pct_change_entry=pct_change_entry,pct_change_exit=pct_change_exit)
             backtester.run_simulation()
             bt_results = pd.DataFrame(backtester.pf.returns())
             bt_results['cumulative_return'] = np.array(((1 + bt_results[0]).cumprod() - 1) * 100)
@@ -189,6 +187,7 @@ if st.experimental_user.is_logged_in:
     col1, col2 = st.columns([3, 1])
         
     with col2:
+        st.write("")
         with st.container(border=True):
             submit = st.button("Backtest",icon=":material/query_stats:")
 
@@ -257,9 +256,9 @@ if st.experimental_user.is_logged_in:
                 if mode_selection == "Multi":
                     sampled_tickers = random.sample(list(tickers), sample_size)
                     fig, fig_pie, metrics_df = multi_backtesting(sampled_tickers,initial_capital,model_select,data_range,prediction_window,sequence_window,pct_change_entry,pct_change_exit)
-                    avg_cumreturn = np.round(np.array(metrics_df)[0][1],2)
-                    avg_sharpe = np.round(np.array(metrics_df)[1][1],2)
-                    avg_VaR = np.round(np.array(metrics_df)[2][1],2)
+                    avg_cumreturn = np.round(np.array(metrics_df)[0][0],2)
+                    avg_sharpe = np.round(np.array(metrics_df)[1][0],2)
+                    avg_VaR = np.round(np.array(metrics_df)[2][0],2)
 
                 elif mode_selection == "Single":
                     spinner_strings = ["Running the Bulls...","Poking the Bear..."]
@@ -272,6 +271,10 @@ if st.experimental_user.is_logged_in:
 
                     if mode_selection == "Multi":
                         st.plotly_chart(fig)
+
+                        st.write("Placeholder for chart that shows improvement over baseline (selected index) by ticker")
+                        st.bar_chart(np.random.randn(50, 3))
+
                         st.plotly_chart(fig_pie)
 
                     elif mode_selection == "Single":
