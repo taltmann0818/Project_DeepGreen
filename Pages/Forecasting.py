@@ -5,6 +5,7 @@ import plotly.express as px
 from plotly.subplots import make_subplots
 import datetime
 import numpy as np
+from pathlib import Path
 
 # Custom libraries
 from Components.TrainModel import TEMPUS, DataModule
@@ -31,60 +32,87 @@ if st.experimental_user.is_logged_in:
         
     with col2:
         st.link_button("View Github", 'https://github.com/taltmann0818/Project_DeepGreen')
-        with st.form('train_form'):
+        with st.container(border=True):
+            submit = st.button("Forecast")
+
+            # Segmented control to toggle showing the ticker input
+            modes = ["Scan", "Single"]
+            mode_selection = st.segmented_control(
+                "Mode", modes, selection_mode="single", help="This is the mode used for price forecasting."
+            )
+
+            # Display ticker input conditionally based on selection
+            if mode_selection == "Single":
+                ticker_select = st.text_input("Ticker")
+            if mode_selection == "Scan":
+                ticker_select = st.selectbox("Index",['NASDAQ','S&P500','RUSSELL2000','DOWJONES'])
+            else:
+                ticker_select = None
+
+            options_toggle = st.toggle("Include options?")
+
             st.subheader("Settings")
-            tickers = st.text_input("Ticker(s)",help="To enter multiple tickers, seperate with a comma like ',' You can also enter 'NASDAQ' or 'S&P' for all the stocks in the index.")
-            today = datetime.datetime.now() 
-            data_range = st.slider("Data Range",value=(datetime.date(2000, 1, 1), datetime.date(today.year, today.month, today.day)),
-                    format="MM/DD/YYYY") 
+            models = [file.name for file in Path('Models/').glob('*.pt') if file.is_file()]
+            model_select = st.selectbox('Select Model', models, help="This is the model used for price prediction.")
             prediction_window = st.slider("Prediction Window", 1, 10, 5)
-            
-            
-            feature_list = ['EMA20','EMA50','EMA100','EMA200','RSI','MACD','REGIME']
-            feature_select = st.multiselect('Select Features', feature_list,default=feature_list,help="These are the predictor variables included in the model.")
-            sequence_window = st.slider("Sequence Window", 1, 200, 50)
-            
-            st.write("Model Hyperparameters")
-            learning_rate = st.number_input("Learning Rate")
-            weight_decay = st.number_input("Weight Decay")
-            dropout = st.number_input("Dropout")
-            epochs = st.number_input("Epochs")
-            clip_size = st.number_input("Gradient Clipping Size")
-            layers = st.selectbox("Batch Size", (1, 4, 8, 16, 32, 64))
-            layers = st.selectbox("Hidden Size", (16, 32, 64, 256, 512))
-    
-            cuda_toggle = st.toggle("Use CUDA cores?")
-    
-            # Submit ST form button and run model training
-            submit = st.form_submit_button("Train Model")
+            sequence_window = st.slider("LTSM Sequence Window", 1, 200, 50)
 
-    
+            st.write("Backtesting Parameters")
+            pct_change_entry = st.number_input("% Change for BUY",
+                                               help="This measures the relative gain between an equity's actual price and the predicted price for a BUY to be signalled.",
+                                               value=5.00)
+            pct_change_exit = st.number_input("% Change for SELL",
+                                              help="This measures the relative decrease between an equity's actual price and the predicted price for a SELL to be signalled.",
+                                              value=2.00)
+
     with col1:
-        st.subheader("TEMPUS Training")
+        st.subheader("Forecasting")
         if submit:
+            missing_fields = []
+            if not mode_selection:
+                missing_fields.append("Mode")
+            if (mode_selection == "Scan" or mode_selection == "Single") and not ticker_select:
+                missing_fields.append("Ticker")
+            if not model_select:
+                missing_fields.append("Model")
+            if not prediction_window:
+                missing_fields.append("Prediction Window")
+            if not sequence_window:
+                missing_fields.append("LTSM Sequence Window")
+            if not pct_change_entry:
+                missing_fields.append("% Change for BUY")
+            if not pct_change_exit:
+                missing_fields.append("% Change for SELL")
+
+            # Check if any fields are missing
+            if missing_fields:
+                st.error(f"Please fill out the following fields: {', '.join(missing_fields)}")
+
+            else:
+                with st.container(border=True):
+                    st.subheader("Train History")
+
+                    st.bar_chart(np.random.randn(50, 3))
+
+                with st.container(border=True):
+                    st.subheader("Predictions")
+
+                    st.bar_chart(np.random.randn(50, 3))
+
+                with st.container(border=True):
+                    st.subheader("Metrics")
+
+                    mcol1, mcol2, mcol3 = st.columns(3)
+                    mcol1.metric("Loss", "70")
+                    mcol2.metric("MSE", "9")
+                    mcol3.metric("MAPE", "5%")
+
+        else:
             with st.container(border=True):
-                st.subheader("Train History")
-                
-                st.bar_chart(np.random.randn(50, 3))
+                st.write("Enter the params and click the button to get results!")
 
-            with st.container(border=True):
-                st.subheader("Predictions")
-                
-                st.bar_chart(np.random.randn(50, 3))
-            
-            with st.container(border=True):
-                st.subheader("Metrics")
-                
-                mcol1, mcol2, mcol3 = st.columns(3)
-                mcol1.metric("Loss", "70")
-                mcol2.metric("MSE", "9")
-                mcol3.metric("MAPE", "5%")
-
-
-
-        
+       
 # Sidebar: Settings
-
 
 
 # ---------------
