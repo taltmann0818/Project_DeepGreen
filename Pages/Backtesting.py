@@ -61,14 +61,16 @@ def make_predictions(model, ticker, data_window, prediction_window, model_window
     return preds_df
 
 
-def backtesting(input_data, ticker, initial_capital, pct_change_entry, pct_change_exit, benchmark_ticker='NDAQ', rfr=0.25):
+def backtesting(input_data, ticker, initial_capital, pct_change_entry, pct_change_exit, benchmark_toggle, rfr=0.25):
     
     backtester = BackTesting(input_data, ticker, initial_capital, pct_change_entry=pct_change_entry,pct_change_exit=pct_change_exit)
     backtester.run_simulation()
     trades_fig, value_fig, _ = backtester.plot_performance()
 
-    #metrics = np.array(qs.reports.metrics(backtester.pf.returns(), benchmark_ticker ,mode='full', rf=rfr/100, display=False))
-    metrics = np.array(qs.reports.metrics(backtester.pf.returns(), ticker, mode='full', rf=rfr / 100, display=False))
+    if benchmark_toggle:
+        metrics = np.array(qs.reports.metrics(backtester.pf.returns(), 'NDAQ', mode='full', rf=rfr / 100, display=False))
+    else:
+        metrics = np.array(qs.reports.metrics(backtester.pf.returns(), ticker, mode='full', rf=rfr / 100, display=False))
 
     return trades_fig, value_fig, metrics
 
@@ -187,7 +189,7 @@ if st.experimental_user.is_logged_in:
     col1, col2 = st.columns([3, 1])
         
     with col2:
-        st.write("")
+        st.empty()
         with st.container(border=True):
             submit = st.button("Backtest",icon=":material/query_stats:")
 
@@ -200,6 +202,7 @@ if st.experimental_user.is_logged_in:
             # Display ticker input conditionally based on selection
             if mode_selection == "Single":
                 ticker_select = st.text_input("Ticker")
+                benchmark_toggle = st.toggle("Use index benchmark?")
             elif mode_selection == "Multi":
                 ticker_select = st.selectbox("Index",['NASDAQ','S&P500','RUSSELL1000','DOWJONES'])
                 if ticker_select is not None:
@@ -264,7 +267,7 @@ if st.experimental_user.is_logged_in:
                     spinner_strings = ["Running the Bulls...","Poking the Bear..."]
                     with st.spinner(np.random.choice(spinner_strings)):
                         predictions_df = make_predictions(model_select, ticker_select, data_range, prediction_window, sequence_window)
-                        trades_fig, value_fig, metrics = backtesting(predictions_df, ticker_select, initial_capital, pct_change_entry, pct_change_exit, benchmark_ticker='NDAQ', rfr=risk_free_rate)
+                        trades_fig, value_fig, metrics = backtesting(predictions_df, ticker_select, initial_capital, pct_change_entry, pct_change_exit, benchmark_toggle, rfr=risk_free_rate)
 
                 with st.container(border=True):
                     st.subheader("Portfolio")
@@ -318,7 +321,7 @@ if st.experimental_user.is_logged_in:
                                                      'Daily Value-at-Risk %',
                                                      'Avg Drawdown %','Max Drawdown %','Max Time-under-water (days)'],
                                       f'Strategy ({ticker_select})': [strat_cagr, strat_return, strat_vol,strat_sharpe,strat_serenity,strat_sortino,strat_dVaR,strat_avgdrawdwn,strat_maxdrawdwn,strat_drawdwndays],
-                                      'Benchmark (NDAQ)': [bm_cagr, bm_return, bm_vol, bm_sharpe, bm_serenity,bm_sortino,bm_dVaR,bm_avgdrawdwn,bm_maxdrawdwn,bm_drawdwndays]}).set_index('Metric Name')
+                                      f'Benchmark ({ticker_select})': [bm_cagr, bm_return, bm_vol, bm_sharpe, bm_serenity,bm_sortino,bm_dVaR,bm_avgdrawdwn,bm_maxdrawdwn,bm_drawdwndays]}).set_index('Metric Name')
 
 
                         mcol1, mcol2, mcol3 = st.columns(3)
@@ -326,7 +329,7 @@ if st.experimental_user.is_logged_in:
                         sharpe_delta = np.round(strat_sharpe - bm_sharpe, 2)
                         vol_delta = np.round(strat_vol - bm_vol, 2)
                         mcol1.metric("CAGR", f"{np.round(strat_cagr,2)} %", cagr_delta)
-                        mcol2.metric("Sharpe Ratio", strat_sharpe, strat_sharpe-bm_sharpe)
+                        mcol2.metric("Sharpe Ratio", strat_sharpe, sharpe_delta)
                         mcol3.metric("Volatility (ann.)", f"{np.round(strat_vol,2)} %", vol_delta, delta_color="inverse")
 
                         st.table(metrics_df)
