@@ -207,11 +207,11 @@ class TEMPUS(nn.Module):
             # Store model state with best val mape
             if test_mape < best_test_mape:
                 best_test_mape = test_mape
-                best_model_state = self.state_dict()
+                self.best_model_state = self.state_dict()
 
         # Load the best model state before returning
-        if best_model_state is not None:
-            self.load_state_dict(best_model_state)
+        if self.best_model_state is not None:
+            self.load_state_dict(self.best_model_state)
 
         # Final evaluation with best model state
         print(f"\nBest MAPE: {best_test_mape:.2f}%")
