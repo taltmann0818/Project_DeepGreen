@@ -17,7 +17,7 @@ import urllib.parse
 import os
 
 class TickerData:
-    def __init__(self, ticker, years=1, prediction_window=5,**kwargs):
+    def __init__(self, ticker, indicator_list, years=1, prediction_window=5,**kwargs):
         """
         Initialize the StockAnalyzer with a ticker symbol and number of past days to fetch.
         """
@@ -32,6 +32,7 @@ class TickerData:
         self.merged_df = None
         self.prediction_window = abs(prediction_window)
         self.days = years * 365
+        self.indicator_list = indicator_list
 
         # Kwargs
         self.start_date = kwargs.get('start_date', None)
@@ -271,14 +272,13 @@ class TickerData:
         Merge all data sources into one DataFrame.
         """
         try:
-            indicators = ['ema_20', 'ema_50', 'ema_200', 'stoch_rsi', 'macd', 'b_percent', 'keltner_lower', 'keltner_upper','adx']
             if self.prediction_mode:
-                self.dataset_ex_df = self.dataset_ex_df[['Date','Ticker']+indicators]
+                self.dataset_ex_df = self.dataset_ex_df[['Date','Ticker']+self.indicator_list]
                 self.final_df = self.dataset_ex_df.dropna()
                 self.final_df.set_index('Date', inplace=True)
                 return self.final_df
             else:
-                self.dataset_ex_df = self.dataset_ex_df[['Date','Ticker','shifted_prices']+indicators]
+                self.dataset_ex_df = self.dataset_ex_df[['Date','Ticker','shifted_prices']+self.indicator_list]
                 self.final_df = self.dataset_ex_df.dropna()
                 self.final_df.set_index('Date', inplace=True)
                 return self.final_df
