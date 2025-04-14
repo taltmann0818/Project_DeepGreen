@@ -30,7 +30,7 @@ class TickerData:
         self.fft_df_real = None
         self.fft_df_imag = None
         self.merged_df = None
-        self.prediction_window = -abs(prediction_window)
+        self.prediction_window = abs(prediction_window)
         self.days = years * 365
 
         # Kwargs
