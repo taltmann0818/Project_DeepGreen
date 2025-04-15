@@ -1,6 +1,9 @@
 import streamlit as st
 
-st.set_page_config(layout="wide")
+st.set_page_config(page_title="DeepGreen",
+                   layout="wide",
+                   page_icon=":material/finance_mode:"
+)
 
 def login():
     left, middle, right = st.columns(3)
