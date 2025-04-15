@@ -20,6 +20,23 @@ if not st.experimental_user.is_logged_in:
 
 ### Backend functions ------------------------------------------------------------------------------  
 
+def get_index_tickers(index):
+    if index == 'NASDAQ':
+        tickers = pd.read_html("https://en.wikipedia.org/wiki/Nasdaq-100")[4]
+        tickers = tickers.iloc[:, [1]].to_numpy().flatten() # Clean up the dataframe
+    elif index == 'S&P500':
+        tickers = pd.read_html("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")[0]
+        tickers = tickers.iloc[:, [0]].to_numpy().flatten() # Clean up the dataframe
+    elif index == 'RUSSELL1000':
+        tickers = pd.read_html("https://en.wikipedia.org/wiki/Russell_1000_Index")[3]
+        tickers = tickers.iloc[:, [1]].to_numpy().flatten() # Clean up the dataframe
+    elif index == 'DOWJONES':
+        tickers = pd.read_html("https://en.wikipedia.org/wiki/Dow_Jones_Industrial_Average")[2]
+        tickers = tickers.iloc[:, [2]].to_numpy().flatten() # Clean up the dataframe
+    else:
+        tickers = []
+
+    return tickers
 
 # ---------------
 # Streamlit Layout
@@ -31,9 +48,9 @@ if st.experimental_user.is_logged_in:
     col1, col2 = st.columns([3, 1])
         
     with col2:
-        st.link_button("View Github", 'https://github.com/taltmann0818/Project_DeepGreen')
+        st.write("")
         with st.container(border=True):
-            submit = st.button("Forecast")
+            submit = st.button("Forecast",icon=":material/query_stats:")
 
             # Segmented control to toggle showing the ticker input
             modes = ["Scan", "Single"]
@@ -46,6 +63,10 @@ if st.experimental_user.is_logged_in:
                 ticker_select = st.text_input("Ticker")
             if mode_selection == "Scan":
                 ticker_select = st.selectbox("Index",['NASDAQ','S&P500','RUSSELL2000','DOWJONES'])
+                if ticker_select is not None:
+                    tickers = get_index_tickers(ticker_select)
+                median_ticker = int(np.round(np.median([index for index, _ in enumerate(tickers)])) + 1)
+                scan_size = st.slider("Scan Size", 1, len(tickers), median_ticker)
             else:
                 ticker_select = None
 
@@ -69,19 +90,19 @@ if st.experimental_user.is_logged_in:
         st.subheader("Forecasting")
         if submit:
             missing_fields = []
-            if not mode_selection:
+            if mode_selection is None:
                 missing_fields.append("Mode")
-            if (mode_selection == "Scan" or mode_selection == "Single") and not ticker_select:
+            if (mode_selection == "Scan" or mode_selection == "Single") and ticker_select is None:
                 missing_fields.append("Ticker")
-            if not model_select:
+            if model_select is None:
                 missing_fields.append("Model")
-            if not prediction_window:
+            if prediction_window is None:
                 missing_fields.append("Prediction Window")
-            if not sequence_window:
+            if sequence_window is None:
                 missing_fields.append("LTSM Sequence Window")
-            if not pct_change_entry:
+            if pct_change_entry is None:
                 missing_fields.append("% Change for BUY")
-            if not pct_change_exit:
+            if pct_change_exit is None:
                 missing_fields.append("% Change for SELL")
 
             # Check if any fields are missing
@@ -118,3 +139,4 @@ if st.experimental_user.is_logged_in:
 # ---------------
 # End of the App
 # ---------------
+st.write("No analysis provided on this page or site should constitute any professional investment advice or recommendations to buy, sell, or hold any investments or investment products of any kind, and should be treated as information for educational purposes to learn more about the stock market.")
