@@ -176,6 +176,7 @@ def multi_backtesting(tickers, initial_capital, model, data_window, prediction_w
 
     fig_pie.update_traces(textinfo='percent+label').update_layout(showlegend=False)
 
+    sharpe_ratios = np.nan_to_num(sharpe_ratios, nan=0.0, posinf=1e10, neginf=-1e10) # Handle inf values 
     # Build a  metrics df
     metrics_df = pd.DataFrame({'Metric Name': ['Cumulative Return (%)','Sharpe Ratio','Value-at-Risk (%)'],
                                'Average': [np.average(last_returns),np.average(sharpe_ratios),np.average(VaRs)],
@@ -282,10 +283,6 @@ if st.experimental_user.is_logged_in:
 
                     if mode_selection == "Multi":
                         st.plotly_chart(fig)
-
-                        st.write("Placeholder for chart that shows improvement over baseline (selected index) by ticker")
-                        st.bar_chart(np.random.randn(50, 3))
-
                         st.plotly_chart(fig_pie)
 
                     elif mode_selection == "Single":
