@@ -43,11 +43,11 @@ def get_index_tickers(index):
 
 def make_predictions(model, ticker, data_window, prediction_window, model_window_size):
     # Get stock data
-    if model == 'TEMPUS_v2.1.pt':
+    if model == 'Tempus_v2.1.pt':
         indicators = ['ema_20', 'ema_50', 'ema_200', 'stoch_rsi', 'macd', 'b_percent', 'keltner_lower', 'keltner_upper','adx','Close']
-    elif model == 'TEMPUS_v2.2.pt':
+    elif model == 'Tempus_v2.2.pt':
         indicators = ['ema_20', 'ema_50', 'ema_200', 'stoch_rsi', 'macd', 'b_percent', 'keltner_lower', 'keltner_upper','adx']
-    elif model == 'TEMPUS_v2.pt':
+    else:
         indicators = ['ema_20', 'ema_50', 'ema_100', 'stoch_rsi', 'macd', 'State', 'Close']
 
     out_of_sample_data, raw_stock_data = TickerData(ticker, indicators, years=1, prediction_window=prediction_window,start_date=data_window[0],end_date=data_window[1], prediction_mode=True).process_all()
@@ -196,7 +196,8 @@ if st.experimental_user.is_logged_in:
     col1, col2 = st.columns([3, 1])
         
     with col2:
-        st.empty()
+        with st.container():
+            st.markdown("<br><br>", unsafe_allow_html=True)
         with st.container(border=True):
             submit = st.button("Backtest",icon=":material/query_stats:")
 

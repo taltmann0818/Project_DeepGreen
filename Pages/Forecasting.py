@@ -48,7 +48,8 @@ if st.experimental_user.is_logged_in:
     col1, col2 = st.columns([3, 1])
         
     with col2:
-        st.write("")
+        with st.container():
+            st.markdown("<br><br>", unsafe_allow_html=True)
         with st.container(border=True):
             submit = st.button("Forecast",icon=":material/query_stats:")
 
