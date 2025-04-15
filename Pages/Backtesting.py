@@ -176,7 +176,8 @@ def multi_backtesting(tickers, initial_capital, model, data_window, prediction_w
 
     fig_pie.update_traces(textinfo='percent+label').update_layout(showlegend=False)
 
-    sharpe_ratios = sharpe_ratios[np.isfinite(sharpe_ratios)] # Handle inf values 
+    #sharpe_ratios = sharpe_ratios.values if isinstance(sharpe_ratios, pd.Series) else sharpe_ratios
+    sharpe_ratios = np.isfinite(sharpe_ratios) # Handle inf and NaN values 
     # Build a  metrics df
     metrics_df = pd.DataFrame({'Metric Name': ['Cumulative Return (%)','Sharpe Ratio','Value-at-Risk (%)'],
                                'Average': [np.average(last_returns),np.average(sharpe_ratios),np.average(VaRs)],
