@@ -70,27 +70,25 @@ def make_predictions(model, ticker, data_window, prediction_window, model_window
     return preds_df
 
 
-def backtesting(input_data, ticker, initial_capital, pct_change_entry, pct_change_exit, benchmark_toggle, rfr=0.25):
+def backtesting(input_data, ticker, initial_capital, pct_change_entry, pct_change_exit, benchmark, rfr=0.25):
     
     backtester = BackTesting(input_data, ticker, initial_capital, pct_change_entry=pct_change_entry,pct_change_exit=pct_change_exit)
     backtester.run_simulation()
     trades_fig, value_fig, _ = backtester.plot_performance()
 
-    if benchmark_toggle:
-        metrics = np.array(qs.reports.metrics(backtester.pf.returns(), 'NDAQ', mode='full', rf=rfr / 100, display=False))
+    if benchmark is not None:
+        metrics = np.array(qs.reports.metrics(backtester.pf.returns(), benchmark, mode='full', rf=rfr / 100, display=False))
     else:
         metrics = np.array(qs.reports.metrics(backtester.pf.returns(), ticker, mode='full', rf=rfr / 100, display=False))
 
     return trades_fig, value_fig, metrics
 
-def multi_backtesting(tickers, initial_capital, model, data_window, prediction_window, model_window_size, pct_change_entry, pct_change_exit):
+def multi_backtesting(tickers, initial_capital, model, data_window, prediction_window, model_window_size, pct_change_entry, pct_change_exit,spinner_string):
 
     returns = []
     sharpe_ratios = []
     VaRs = []
-    spinner_strings = ["Running the Bulls...", "Poking the Bear..."]
-    progress_text = f"{np.random.choice(spinner_strings)} Please wait."
-    my_bar = st.progress(0, text=progress_text)
+    my_bar = st.progress(0, text=spinner_string)
     total_tickers = len(tickers)
 
     for idx, ticker in enumerate(tickers, start=1):
@@ -132,7 +130,7 @@ def multi_backtesting(tickers, initial_capital, model, data_window, prediction_w
         x='index',
         y='cumulative_return',
         color='ticker',
-        title='Cumulative Returns by Ticker',
+        title='Cumulative Returns by U.S. Equity',
         labels={'index': 'Date', 'cumulative_return': 'Cumulative Return'}
     )
 
@@ -171,7 +169,7 @@ def multi_backtesting(tickers, initial_capital, model, data_window, prediction_w
     fig_pie = px.pie(
         values=[positive_count, negative_count],
         names=['Positive', 'Negative'],
-        title='Proportion of Tickers with Positive vs Negative Returns',
+        title='Proportion of Equities with Positive vs Negative Returns',
         color_discrete_sequence=['green', 'red'],
         template='ggplot2',
     )
@@ -198,6 +196,8 @@ def multi_backtesting(tickers, initial_capital, model, data_window, prediction_w
 if st.experimental_user.is_logged_in:
 
     col1, col2 = st.columns([3, 1])
+
+    spinner_strings = ["Running the Bulls...","Poking the Bear...","Buying the Dip...","Chasing the Rally...","Playing the Spread...","Hunting the Bubble...","Fighting the Fed..."]
         
     with col2:
         with st.container():
@@ -213,8 +213,12 @@ if st.experimental_user.is_logged_in:
 
             # Display ticker input conditionally based on selection
             if mode_selection == "Single":
-                ticker_select = st.text_input("Ticker")
+                ticker_select = st.text_input("U.S. Equity")
                 benchmark_toggle = st.toggle("Use index benchmark?")
+                if benchmark_toggle:
+                    benchmark_select = st.selectbox("Index",['NDAQ','INX','RUI','DJI'])
+                else:
+                    benchmark_select = None 
             elif mode_selection == "Multi":
                 ticker_select = st.selectbox("Index",['NASDAQ','S&P500','RUSSELL1000','DOWJONES'])
                 if ticker_select is not None:
@@ -228,9 +232,7 @@ if st.experimental_user.is_logged_in:
             today = datetime.datetime.now() 
             data_range = st.slider("Data Range",value=(datetime.date(2000, 1, 1), datetime.date(today.year, today.month, today.day)),format="MM/DD/YYYY") 
             
-            directory_path = 'Models/'
-            models = [file.name for file in Path(directory_path).glob('*.pt') if file.is_file()]
-            model_select = st.selectbox('Select Model', models,help="This is the model used for price prediction.")
+            model_select = st.selectbox('Select Model', [file.name for file in Path('Models/').glob('*.pt') if file.is_file()], help="This is the model used for price prediction.")
             prediction_window = st.slider("Prediction Window", 1, 10, 5)
             sequence_window = st.slider("LTSM Sequence Window", 1, 200, 50)
             
@@ -248,8 +250,8 @@ if st.experimental_user.is_logged_in:
             missing_fields = []
             if mode_selection is None:
                 missing_fields.append("Mode")
-            if (mode_selection == "Scan" or mode_selection == "Single") and ticker_select is None:
-                missing_fields.append("Ticker")
+            if ticker_select is None:
+                missing_fields.append("Equity")
             if model_select is None:
                 missing_fields.append("Model")
             if prediction_window is None:
@@ -270,16 +272,15 @@ if st.experimental_user.is_logged_in:
             else:
                 if mode_selection == "Multi":
                     sampled_tickers = random.sample(list(tickers), sample_size)
-                    fig, fig_pie, metrics_df = multi_backtesting(sampled_tickers,initial_capital,model_select,data_range,prediction_window,sequence_window,pct_change_entry,pct_change_exit)
+                    fig, fig_pie, metrics_df = multi_backtesting(sampled_tickers,initial_capital,model_select,data_range,prediction_window,sequence_window,pct_change_entry,pct_change_exit,f"{np.random.choice(spinner_strings)} Please wait.")
                     avg_cumreturn = np.round(np.array(metrics_df)[0][0],2)
                     avg_sharpe = np.round(np.array(metrics_df)[1][0],2)
                     avg_VaR = np.round(np.array(metrics_df)[2][0],2)
 
                 elif mode_selection == "Single":
-                    spinner_strings = ["Running the Bulls...","Poking the Bear..."]
-                    with st.spinner(np.random.choice(spinner_strings)):
+                    with st.spinner(f"{np.random.choice(spinner_strings)} Please wait."):
                         predictions_df = make_predictions(model_select, ticker_select, data_range, prediction_window, sequence_window)
-                        trades_fig, value_fig, metrics = backtesting(predictions_df, ticker_select, initial_capital, pct_change_entry, pct_change_exit, benchmark_toggle, rfr=risk_free_rate)
+                        trades_fig, value_fig, metrics = backtesting(predictions_df, ticker_select, initial_capital, pct_change_entry, pct_change_exit, benchmark_select, rfr=risk_free_rate)
 
                 with st.container(border=True):
                     st.subheader("Portfolio")
