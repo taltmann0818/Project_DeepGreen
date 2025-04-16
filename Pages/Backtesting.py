@@ -43,11 +43,11 @@ def get_index_tickers(index):
 
 def make_predictions(model, ticker, data_window, prediction_window, model_window_size):
     # Get stock data
-    if model == 'TEMPUS_v2.1.pt':
+    if model == 'Tempus_v2.1.pt':
         indicators = ['ema_20', 'ema_50', 'ema_200', 'stoch_rsi', 'macd', 'b_percent', 'keltner_lower', 'keltner_upper','adx','Close']
-    elif model == 'TEMPUS_v2.2.pt':
+    elif model == 'Tempus_v2.2.pt':
         indicators = ['ema_20', 'ema_50', 'ema_200', 'stoch_rsi', 'macd', 'b_percent', 'keltner_lower', 'keltner_upper','adx']
-    elif model == 'TEMPUS_v2.pt':
+    else:
         indicators = ['ema_20', 'ema_50', 'ema_100', 'stoch_rsi', 'macd', 'State', 'Close']
 
     out_of_sample_data, raw_stock_data = TickerData(ticker, indicators, years=1, prediction_window=prediction_window,start_date=data_window[0],end_date=data_window[1], prediction_mode=True).process_all()
@@ -176,6 +176,8 @@ def multi_backtesting(tickers, initial_capital, model, data_window, prediction_w
 
     fig_pie.update_traces(textinfo='percent+label').update_layout(showlegend=False)
 
+    #sharpe_ratios = sharpe_ratios.values if isinstance(sharpe_ratios, pd.Series) else sharpe_ratios
+    sharpe_ratios = np.isfinite(sharpe_ratios) # Handle inf and NaN values 
     # Build a  metrics df
     metrics_df = pd.DataFrame({'Metric Name': ['Cumulative Return (%)','Sharpe Ratio','Value-at-Risk (%)'],
                                'Average': [np.average(last_returns),np.average(sharpe_ratios),np.average(VaRs)],
@@ -196,7 +198,8 @@ if st.experimental_user.is_logged_in:
     col1, col2 = st.columns([3, 1])
         
     with col2:
-        st.empty()
+        with st.container():
+            st.markdown("<br><br>", unsafe_allow_html=True)
         with st.container(border=True):
             submit = st.button("Backtest",icon=":material/query_stats:")
 
@@ -281,10 +284,6 @@ if st.experimental_user.is_logged_in:
 
                     if mode_selection == "Multi":
                         st.plotly_chart(fig)
-
-                        st.write("Placeholder for chart that shows improvement over baseline (selected index) by ticker")
-                        st.bar_chart(np.random.randn(50, 3))
-
                         st.plotly_chart(fig_pie)
 
                     elif mode_selection == "Single":
