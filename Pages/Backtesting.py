@@ -47,6 +47,8 @@ def make_predictions(model, ticker, data_window, prediction_window, model_window
         indicators = ['ema_20', 'ema_50', 'ema_200', 'stoch_rsi', 'macd', 'b_percent', 'keltner_lower', 'keltner_upper','adx','Close']
     elif model == 'Tempus_v2.2.pt':
         indicators = ['ema_20', 'ema_50', 'ema_200', 'stoch_rsi', 'macd', 'b_percent', 'keltner_lower', 'keltner_upper','adx']
+    elif model == 'Tempus_v2.3.pt':
+        indicators = ['ema_20', 'ema_50', 'ema_200', 'stoch_rsi', 'macd', 'b_percent', 'keltner_lower', 'keltner_upper','adx','Close']
     else:
         indicators = ['ema_20', 'ema_50', 'ema_100', 'stoch_rsi', 'macd', 'State', 'Close']
 
