@@ -1,5 +1,9 @@
 # Project DeepGreen
 
+## Ideas
+https://github.com/mert-kurttutan/torchview
+https://github.com/szagoruyko/pytorchviz
+
 ## Overview
 
 Project DeepGreen is built using Python 3.8.8 and incorporates a variety of data science and web development libraries. The primary purpose of this application is to provide stock price prediction capabilities through machine learning models, with a web interface for user access and model training.
