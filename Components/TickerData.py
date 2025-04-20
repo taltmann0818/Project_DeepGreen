@@ -59,25 +59,37 @@ class TickerData:
             else:
                 raise ValueError("Days must be non-zero or a start_date and end_date provided.")
 
-            #y_income_stmt = ticker_obj.get_income_stmt(freq='yearly').T
-            #self.y_income_stmt = y_income_stmt.reset_index().rename(columns={"index": "Date"}).sort_values('Date')
-            #earnings_data = ticker_obj.get_earnings_dates()
-            #self.earnings_data = earnings_data.reset_index().rename(
-            #    columns={"Earnings Date": "Date", "EPS Estimate": "eps_estimate", "Reported EPS": "eps",
-            #             "Surprise(%)": "eps_surprise"}).sort_values('Date')
+            # Earnings data
+            earnings_data = ticker_obj.get_earnings_dates()
+            self.earnings_data = earnings_data.reset_index().rename(
+                columns={"Earnings Date": "Date", "EPS Estimate": "eps_estimate", "Reported EPS": "eps",
+                         "Surprise(%)": "eps_surprise"}).sort_values('Date')
+            self.earnings_data['eps_surprise'] = self.earnings_data['eps_surprise'] / 100
+            q_income_stmt = ticker_obj.get_income_stmt(freq='quarterly').T
+            # Fundamentals Data
+            q_income_stmt = q_income_stmt.reset_index().rename(columns={"index": "Date"}).sort_values('Date')
+            q_balance_sheet = ticker_obj.get_balance_sheet(freq='quarterly').T
+            q_balance_sheet = q_balance_sheet.reset_index().rename(columns={"index": "Date"}).sort_values('Date')
+            self.fundamentals = pd.DataFrame({
+                'ttm_eps': q_income_stmt['NetIncome'] / q_income_stmt['BasicAverageShares'],
+                'pcf': q_balance_sheet['TotalCapitalization'] / q_income_stmt['OperatingIncome'],
+                'dte': q_balance_sheet['CurrentLiabilities'] / q_balance_sheet['StockholdersEquity'],
+                'roe': q_income_stmt['NetIncome'] / q_balance_sheet['StockholdersEquity'],
+                'roa': q_income_stmt['NetIncome'] / q_balance_sheet['TotalAssets'],
+                'pts': q_balance_sheet['TotalCapitalization'] / q_income_stmt['TotalRevenue'],
+                'evEBITDA': (q_balance_sheet['TotalCapitalization'] + q_balance_sheet['TotalDebt'] - q_balance_sheet[
+                    'CashAndCashEquivalents']) / q_income_stmt['EBITDA']
+            })
 
-            return self.stock_data #, self.q_income_stmt, self.y_income_stmt, self.earnings_data
+            return self.stock_data , self.earnings_data, self.fundamentals
+
         # Handling of delisted stocks
         except AttributeError:
             self.stock_data = pd.DataFrame(columns=['Open', 'High', 'Low', 'Close', 'Volume'])
-            #self.q_income_stmt = pd.DataFrame()
-            #self.y_income_stmt = pd.DataFrame()
-            #self.earnings_data = pd.DataFrame(index=[0])
-
+            self.fundamentals = pd.DataFrame()
+            self.earnings_data = pd.DataFrame(index=[0])
             # Log this error
             print(f"AttributeError: Could not fetch data for ticker {self.ticker}, returning empty dataframes")
-
-            return
 
     def preprocess_data(self):
         """
@@ -86,35 +98,33 @@ class TickerData:
           - Merge in earnings and income statement data from yfinance
           - Define the target variable
         """
-        try:
-            # Add ticker name
-            self.stock_data['Ticker'] = self.ticker
-            self.dataset_ex_df = self.stock_data.copy().reset_index()
-            self.dataset_ex_df['Date'] = pd.to_datetime(self.dataset_ex_df['Date'])
-            self.dataset_ex_df = self.dataset_ex_df.sort_values('Date')
-            #self.dataset_ex_df.set_index('Date', inplace=True)
+        #try:
+        # Add ticker name
+        self.stock_data['Ticker'] = self.ticker
+        self.dataset_ex_df = self.stock_data.copy().reset_index()
+        self.dataset_ex_df['Date'] = pd.to_datetime(self.dataset_ex_df['Date'])
+        self.dataset_ex_df = self.dataset_ex_df.sort_values('Date')
+        #self.dataset_ex_df.set_index('Date', inplace=True)
 
-            # Merge in earnings call data
-            #self.dataset_ex_df = pd.merge_asof(self.dataset_ex_df, self.earnings_data, on='Date', direction='backward')
+        # Merge in earnings call data
+        self.dataset_ex_df = pd.merge_asof(self.dataset_ex_df, self.earnings_data, on='Date', direction='backward')
 
-            # Merge in income statment data for ttm eps and pe ratio
-            #self.y_income_stmt['Date'] = pd.to_datetime(self.y_income_stmt['Date']).dt.tz_localize('America/New_York')
-            #self.y_income_stmt['ttm_eps'] = self.y_income_stmt['NetIncome'] / self.y_income_stmt['BasicAverageShares']
-            #self.dataset_ex_df = pd.merge_asof(self.dataset_ex_df, self.y_income_stmt[['Date', 'ttm_eps']], on='Date', direction='backward')
-            #self.dataset_ex_df['ttm_pe'] = self.dataset_ex_df['Close'] / self.dataset_ex_df['ttm_eps']
+        # Merge in fundamentals data
+        self.dataset_ex_df = pd.merge_asof(self.dataset_ex_df, self.fundamentals, on='Date', direction='backward')
+        self.dataset_ex_df['ttm_pe'] = self.dataset_ex_df['Close'] / self.dataset_ex_df['ttm_eps']
 
-            # Get market regimes
-            self.dataset_ex_df = MarketRegimes(self.dataset_ex_df, "hmm_model.pkl").run_regime_detection()
+        # Get market regimes
+        self.dataset_ex_df = MarketRegimes(self.dataset_ex_df, "hmm_model.pkl").run_regime_detection()
 
-            # Target or outcome variable
-            if not self.prediction_mode:
-                self.dataset_ex_df['shifted_prices'] = self.dataset_ex_df['Close'].shift(self.prediction_window)
+        # Target or outcome variable
+        if not self.prediction_mode:
+            self.dataset_ex_df['shifted_prices'] = self.dataset_ex_df['Close'].shift(self.prediction_window)
 
-            return self.stock_data, self.dataset_ex_df
+        return self.stock_data, self.dataset_ex_df
             
-        except Exception:
-            print(f"Error while processing the data for {self.ticker}")
-            pass
+        #except Exception:
+            #print(f"Error while processing the data for {self.ticker}")
+            #pass
 
     @staticmethod
     def ema(close, period=20):

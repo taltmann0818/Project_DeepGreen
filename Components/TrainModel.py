@@ -95,19 +95,21 @@ class TEMPUS(nn.Module):
         # Projection layer for residual connections when dimensions don't match
         self.residual_proj = nn.Linear(self.input_size, self.hidden_size * 2)
 
-        # Temporal Convolutional Network (TCN) with layer normalization
+        # Temporal Convolutional Network (TCN) with layer normalization 
         self.tcn_modules = nn.ModuleList()
-        for k_size in self.tcn_kernel_sizes:
-            padding = (k_size - 1) // 2  # Same padding
+        for i, k_size in enumerate(self.tcn_kernel_sizes):
+            dilation = 2 ** i  # Exponentially increasing dilation
+            padding = ((k_size - 1) * dilation) // 2  # Adjusted padding for dilation
             self.tcn_modules.append(nn.Sequential(
-                nn.Conv1d(self.input_size, self.hidden_size, kernel_size=k_size, padding=padding),
+                nn.Conv1d(self.input_size, self.hidden_size, kernel_size=k_size,
+                          padding=padding, dilation=dilation, stride=1),
                 nn.BatchNorm1d(self.hidden_size),
                 nn.ReLU(),
-                nn.Conv1d(self.hidden_size, self.hidden_size, kernel_size=k_size, padding=padding),
+                nn.Conv1d(self.hidden_size, self.hidden_size, kernel_size=k_size,
+                          padding=padding, dilation=dilation, stride=1),
                 nn.BatchNorm1d(self.hidden_size),
                 nn.ReLU()
             ))
-
         self.tcn_fusion = nn.Linear(self.hidden_size * len(self.tcn_kernel_sizes), self.hidden_size * 2)
         self.tcn_fusion_norm = nn.LayerNorm(self.hidden_size * 2)
 
@@ -638,3 +640,95 @@ class SequenceDataset(Dataset):
             x = torch.cat((padding, x), 0)
 
         return x, self.y[i]
+
+
+class EchoStateNetwork(nn.Module):
+    def __init__(self, input_size, reservoir_size, output_size, spectral_radius=0.9,
+                 sparsity=0.1, noise=0.001, bidirectional=False):
+        super(EchoStateNetwork, self).__init__()
+
+        self.input_size = input_size
+        self.reservoir_size = reservoir_size
+        self.output_size = output_size
+        self.spectral_radius = spectral_radius
+        self.sparsity = sparsity
+        self.noise = noise
+        self.bidirectional = bidirectional
+
+        # Input weights (fixed)
+        self.register_buffer('W_in', self._initialize_input_weights())
+
+        # Reservoir weights (fixed)
+        self.register_buffer('W', self._initialize_reservoir_weights())
+
+        # Output weights (trainable)
+        self.W_out = nn.Linear(reservoir_size, output_size)
+
+        if bidirectional:
+            # Second set of weights for backward direction
+            self.register_buffer('W_in_reverse', self._initialize_input_weights())
+            self.register_buffer('W_reverse', self._initialize_reservoir_weights())
+            self.W_out_reverse = nn.Linear(reservoir_size, output_size)
+            # Combined output
+            self.W_combined = nn.Linear(output_size * 2, output_size)
+
+    def _initialize_input_weights(self):
+        W_in = torch.zeros(self.reservoir_size, self.input_size)
+        W_in = torch.nn.init.xavier_uniform_(W_in)
+        return W_in
+
+    def _initialize_reservoir_weights(self):
+        # Create sparse matrix
+        W = torch.zeros(self.reservoir_size, self.reservoir_size)
+        num_connections = int(self.sparsity * self.reservoir_size * self.reservoir_size)
+        indices = torch.randperm(self.reservoir_size * self.reservoir_size)[:num_connections]
+        rows = indices // self.reservoir_size
+        cols = indices % self.reservoir_size
+        values = torch.randn(num_connections)
+        W[rows, cols] = values
+
+        # Scale to desired spectral radius
+        eigenvalues = torch.linalg.eigvals(W)
+        max_eigenvalue = torch.max(torch.abs(eigenvalues))
+        W = W * (self.spectral_radius / max_eigenvalue)
+        return W
+
+    def _reservoir_step(self, x, h_prev, W_in, W):
+        """Execute one step of the reservoir"""
+        # h_new = tanh(W_in @ x + W @ h_prev + noise)
+        h_new = torch.tanh(torch.mm(x, W_in.t()) + torch.mm(h_prev, W.t()) +
+                           self.noise * torch.randn(h_prev.shape, device=h_prev.device))
+        return h_new
+
+    def forward(self, x):
+        """
+        x: input tensor of shape (batch_size, seq_len, input_size)
+        """
+        batch_size, seq_len, _ = x.size()
+
+        # Forward pass
+        h = torch.zeros(batch_size, self.reservoir_size, device=x.device)
+        outputs_forward = []
+
+        for t in range(seq_len):
+            h = self._reservoir_step(x[:, t], h, self.W_in, self.W)
+            outputs_forward.append(self.W_out(h))
+
+        outputs_forward = torch.stack(outputs_forward, dim=1)  # (batch_size, seq_len, output_size)
+
+        if not self.bidirectional:
+            return outputs_forward
+
+        # Backward pass for bidirectional ESN
+        h_reverse = torch.zeros(batch_size, self.reservoir_size, device=x.device)
+        outputs_reverse = []
+
+        for t in range(seq_len - 1, -1, -1):
+            h_reverse = self._reservoir_step(x[:, t], h_reverse, self.W_in_reverse, self.W_reverse)
+            outputs_reverse.insert(0, self.W_out_reverse(h_reverse))
+
+        outputs_reverse = torch.stack(outputs_reverse, dim=1)  # (batch_size, seq_len, output_size)
+
+        # Combine forward and backward outputs
+        combined = torch.cat((outputs_forward, outputs_reverse), dim=2)
+        return self.W_combined(combined)
