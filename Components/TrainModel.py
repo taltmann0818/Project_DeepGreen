@@ -233,7 +233,7 @@ class TEMPUS(nn.Module):
         optimizer = AdamW(self.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay)
 
         # Learning rate scheduler
-        scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, verbose=True)
+        scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
 
         # Early stopping variables
         best_val_loss = float('inf')
@@ -569,13 +569,34 @@ class DataModule:
         self.setup()
 
     def setup(self):
-        # Sequential split with a validation set
-        train_end = int((1 - self.val_size - self.test_size) * len(self.data))
-        val_end = int((1 - self.test_size) * len(self.data))
+        # Get datetime index from the data
+        if not isinstance(self.data.index, pd.DatetimeIndex):
+            raise ValueError("Data index must be a DatetimeIndex for year-based splitting")
 
-        self.df_train = self.data.iloc[:train_end].copy()
-        self.df_val = self.data.iloc[train_end:val_end].copy()
-        self.df_test = self.data.iloc[val_end:].copy()
+        # Extract years from the datetime index
+        years = self.data.index.year.unique()
+        num_years = len(years)
+
+        # Calculate how many years for each split based on proportions
+        test_years_count = max(1, int(num_years * self.test_size))
+        val_years_count = max(1, int(num_years * self.val_size))
+        train_years_count = num_years - test_years_count - val_years_count
+
+        # Ensure we have at least one year for each split
+        if train_years_count < 1:
+            train_years_count = 1
+            val_years_count = max(1, (num_years - train_years_count) // 2)
+            test_years_count = num_years - train_years_count - val_years_count
+
+        # Get the year boundaries for each split
+        train_years = years[:train_years_count]
+        val_years = years[train_years_count:train_years_count + val_years_count]
+        test_years = years[train_years_count + val_years_count:]
+
+        # Create splits based on years (walk-forward approach)
+        self.df_train = self.data[self.data.index.year.isin(train_years)].copy()
+        self.df_val = self.data[self.data.index.year.isin(val_years)].copy()
+        self.df_test = self.data[self.data.index.year.isin(test_years)].copy()
 
         # Create datasets and data loaders
         feature_cols = [col for col in self.data.columns if col != self.target_col]
