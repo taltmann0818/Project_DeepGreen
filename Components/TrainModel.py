@@ -104,11 +104,11 @@ class TEMPUS(nn.Module):
                 nn.Conv1d(self.input_size, self.hidden_size, kernel_size=k_size,
                           padding=padding, dilation=dilation, stride=1),
                 nn.BatchNorm1d(self.hidden_size),
-                nn.ReLU(),
+                nn.GELU(), # Switching from ReLU to GELU
                 nn.Conv1d(self.hidden_size, self.hidden_size, kernel_size=k_size,
                           padding=padding, dilation=dilation, stride=1),
                 nn.BatchNorm1d(self.hidden_size),
-                nn.ReLU()
+                nn.GELU() # Switching from ReLU to GELU
             ))
         self.tcn_fusion = nn.Linear(self.hidden_size * len(self.tcn_kernel_sizes), self.hidden_size * 2)
         self.tcn_fusion_norm = nn.LayerNorm(self.hidden_size * 2)
@@ -212,10 +212,10 @@ class TEMPUS(nn.Module):
         attended_features = self.transformer_encoder(fused_features)
 
         # Final output layers with layer normalization
-        x = F.relu(self.fc1(attended_features))
+        x = F.mish(self.fc1(attended_features)) # Switched to Mish activation function from ReLU
         x = self.fc1_norm(x)
         x = self.dropout_layer(x)
-        x = F.relu(self.fc2(x))
+        x = F.mish(self.fc2(x)) # Switched to Mish activation function from ReLU
         x = self.fc2_norm(x)
         x = self.dropout_layer(x)
         outputs = self.regression_head(x)
