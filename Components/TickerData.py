@@ -68,23 +68,49 @@ class TickerData:
 
             # Fundamentals Data
             q_income_stmt = ticker_obj.get_income_stmt(freq='quarterly').T
+            if q_income_stmt is None or q_income_stmt.empty:
+                q_income_stmt = ticker_obj.get_income_stmt(freq="yearly").T
             q_income_stmt = q_income_stmt.reset_index().rename(columns={"index": "Date"}).sort_values('Date')
             q_balance_sheet = ticker_obj.get_balance_sheet(freq='quarterly').T
+            if q_balance_sheet is None or q_balance_sheet.empty:
+                q_balance_sheet = ticker_obj.get_balance_sheet(freq="yearly").T
             q_balance_sheet = q_balance_sheet.reset_index().rename(columns={"index": "Date"}).sort_values('Date')
 
             try:
-                def foo(x, y):
-                    return pd.Series(np.where(y == 0, 0, x / y), index=x.index)
+                def safe_divide(num, denom):
+                    """
+                    Vectorised, index‑preserving divide that never raises ZeroDivisionError.
+                    Anything that would be ±inf (or where either side is NaN) becomes NaN.
+                    """
+                    # For scalar denominators just short‑circuit
+                    if np.isscalar(denom):
+                        return np.nan if denom in (0, None, np.nan) else num / denom
+                
+                    # For Series / Index‑aligned arrays
+                    denom = denom.replace(0, np.nan)          # avoid 0‑division
+                    out = num.divide(denom)                   # vectorised division
+                    return out.replace([np.inf, -np.inf], np.nan)               
+                # Combine all metrics into a DataFrame
                 self.fundamentals = pd.DataFrame({
-                            'pcf': q_balance_sheet['TotalCapitalization'] / q_income_stmt['OperatingIncome'],
-                            'dte': q_balance_sheet['CurrentLiabilities'] / q_balance_sheet['StockholdersEquity'],
-                            'roe': q_income_stmt['NetIncome'] / q_balance_sheet['StockholdersEquity'],
-                            'roa': q_income_stmt['NetIncome'] / q_balance_sheet['TotalAssets'],
-                            'pts': q_balance_sheet['TotalCapitalization'] / q_income_stmt['TotalRevenue'],
-                            #'evEBITDA': foo(
-                            #(q_balance_sheet['TotalCapitalization'] + q_balance_sheet['TotalDebt'] - q_balance_sheet['CashAndCashEquivalents']),
-                            #q_income_stmt['EBITDA'])
-                        })
+                    "pcf": safe_divide(
+                        q_balance_sheet["TotalCapitalization"],
+                        q_income_stmt["OperatingIncome"]
+                        if "OperatingIncome" in q_income_stmt.columns
+                        else q_income_stmt["OperatingRevenue"]
+                    ),
+                
+                    "dte": safe_divide(q_balance_sheet["TotalDebt"] if 'TotalDebt' in q_balance_sheet.columns else q_balance_sheet['CurrentLiabilities'],
+                                    q_balance_sheet["StockholdersEquity"]),
+                
+                    "roe": safe_divide(q_income_stmt["NetIncome"],
+                                    q_balance_sheet["StockholdersEquity"]),
+                
+                    "roa": safe_divide(q_income_stmt["NetIncome"],
+                                    q_balance_sheet["TotalAssets"]),
+                
+                    "pts": safe_divide(q_balance_sheet["TotalCapitalization"],
+                                    q_income_stmt["TotalRevenue"])
+                })
             # Handle cases where the financial statements are nonstandard
             except KeyError:
                 self.fundamentals = pd.DataFrame()

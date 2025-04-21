@@ -8,79 +8,40 @@ import os
 from functools import partial
 
 # Define a training function for Ray Tune
-def train_lstm(config, input_size=None, train_data=None, val_data=None, test_data=None):
+def train_model(config, input_size=None, train_data=None):
     device = "cuda" if torch.cuda.is_available() else "cpu"
-
 
     data_module = DataModule(train_data, window_size=config["window_size"], batch_size=config["batch_size"])
     train_loader = data_module.train_loader
+    val_loader = data_module.val_loader
     test_loader = data_module.test_loader
-    input_size = data_module.num_features
+    config["input_size"] = data_module.num_features
 
     # Create model with the hyperparameter configuration
-    model = TEMPUS({
-        "input_size": input_size,
-        "hidden_size": config["hidden_size"],
-        "num_layers": config["num_layers"],
-        "dropout": config["dropout"],
-        "device": device
-    }).to(device)
-
-    # Set up loss and optimizer
+    model = TEMPUS(config,scaler=data_module.scaler).to(device)
+    # Define loss function and optimizer with weight decay
     criterion = nn.MSELoss()
-    optimizer = AdamW(
-        model.parameters(),
-        lr=config["lr"],
-        weight_decay=config["weight_decay"]
-    )
+    optimizer = AdamW(model.parameters(), lr=model.learning_rate, weight_decay=model.weight_decay)
 
     # Training loop
     for epoch in range(10):  # Limit epochs for tuning
         # Training
         model.train()
-        train_loss = 0.0
-
-        for inputs, targets in train_loader:
-            inputs, targets = inputs.to(device), targets.to(device)
-
-            optimizer.zero_grad()
-            outputs = model(inputs).to(device).squeeze()
-            loss = criterion(outputs, targets)
-            loss.backward()
-            nn.utils.clip_grad_norm_(model.parameters(), max_norm=config["grad_clip_norm"])
-            optimizer.step()
-
-            train_loss += loss.item()
-
-        # Validation
-        model.eval()
-        test_loss = 0
-        all_predictions = []
-        all_targets = []
-        with torch.no_grad():
-            for inputs, targets in test_loader:
-                inputs, targets = inputs.to(device), targets.to(device)
-                outputs = model(inputs).to(device).squeeze()
-                loss = criterion(outputs, targets)
-
-                test_loss += loss.item() * inputs.size(0)
-
-                all_predictions.append(outputs.cpu().numpy())
-                all_targets.append(targets.cpu().numpy())
-
-        all_predictions = np.concatenate(all_predictions, axis=0)
-        all_targets = np.concatenate(all_targets, axis=0)
-
-        # Calculate RMSE and MAPE
-        rmse = np.sqrt(np.mean((all_predictions - all_targets) ** 2))
-        mape = np.mean(np.abs((all_targets - all_predictions) / (all_targets + 1e-8))) * 100 # Avoid division by zero by adding a small epsilon
+        train_loss, train_rmse, train_mape = model._train_epoch(train_loader, criterion, optimizer)
+        # Validation phase
+        val_loss, val_rmse, val_mape = model.evaluate(val_loader, criterion)
+        # Test phase
+        test_loss, test_rmse, test_mape = model.evaluate(test_loader, criterion)
+        # Update learning rate
+        scheduler.step(val_loss)
 
         # Report metrics to Ray Tune
         session.report({
-            "train_loss": train_loss / len(train_loader),
-            "test_loss": test_loss / len(test_loader),
-            "rmse": rmse,
-            "mape": mape,
+            "train_loss": train_loss,
+            "val_loss": val_loss,
+            "test_loss": test_loss,
+            "test_rmse": test_rmse,
+            "test_mape": test_mape,
             "epoch": epoch
         })
 
@@ -96,8 +57,9 @@ config = {
     "dropout": tune.uniform(0.1, 0.5),
     "weight_decay": tune.loguniform(1e-6, 1e-3),
     "batch_size": tune.choice([16, 32, 64, 128]),
-    "window_size": tune.choice([10, 20, 50, 100, 200]),
-    "grad_clip_norm": tune.uniform(0.0, 1.0)
+    "window_size": tune.choice([5, 10, 20, 50, 100, 200]),
+    "clip_size": tune.uniform(0.0, 1.0),
+    "attention_heads": tune.choice([4, 16, 32, 64, 128])
 }
 
 # Configure the ASHA scheduler
@@ -111,7 +73,7 @@ scheduler = ASHAScheduler(
 tuner = tune.Tuner(
     tune.with_resources(
         partial(
-            train_lstm,
+            train_model,
             train_data=None,
         ),
         resources={"cpu": 2, "gpu": 1}  # Adjust based on your hardware
@@ -143,7 +105,8 @@ best_dropout = best_config["dropout"]
 best_weight_decay = best_config["weight_decay"]
 best_batch_size = best_config["batch_size"]
 best_window_size = best_config["window_size"]
-best_gradclip_size = best_config["grad_clip_norm"]
+best_gradclip_size = best_config["clip_size"]
+best_attention_heads = best_config["attention_heads"]
 
 # Plot results
 df_results = results.get_dataframe()
