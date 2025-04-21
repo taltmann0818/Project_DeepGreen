@@ -65,21 +65,33 @@ class TickerData:
                 columns={"Earnings Date": "Date", "EPS Estimate": "eps_estimate", "Reported EPS": "eps",
                          "Surprise(%)": "eps_surprise"}).sort_values('Date')
             self.earnings_data['eps_surprise'] = self.earnings_data['eps_surprise'] / 100
-            q_income_stmt = ticker_obj.get_income_stmt(freq='quarterly').T
+
             # Fundamentals Data
+            q_income_stmt = ticker_obj.get_income_stmt(freq='quarterly').T
             q_income_stmt = q_income_stmt.reset_index().rename(columns={"index": "Date"}).sort_values('Date')
             q_balance_sheet = ticker_obj.get_balance_sheet(freq='quarterly').T
             q_balance_sheet = q_balance_sheet.reset_index().rename(columns={"index": "Date"}).sort_values('Date')
-            self.fundamentals = pd.DataFrame({
-                'ttm_eps': q_income_stmt['NetIncome'] / q_income_stmt['BasicAverageShares'],
-                'pcf': q_balance_sheet['TotalCapitalization'] / q_income_stmt['OperatingIncome'],
-                'dte': q_balance_sheet['CurrentLiabilities'] / q_balance_sheet['StockholdersEquity'],
-                'roe': q_income_stmt['NetIncome'] / q_balance_sheet['StockholdersEquity'],
-                'roa': q_income_stmt['NetIncome'] / q_balance_sheet['TotalAssets'],
-                'pts': q_balance_sheet['TotalCapitalization'] / q_income_stmt['TotalRevenue'],
-                'evEBITDA': (q_balance_sheet['TotalCapitalization'] + q_balance_sheet['TotalDebt'] - q_balance_sheet[
-                    'CashAndCashEquivalents']) / q_income_stmt['EBITDA']
-            })
+
+            try:
+                def foo(x, y):
+                    return pd.Series(np.where(y == 0, 0, x / y), index=x.index)
+                self.fundamentals = pd.DataFrame({
+                            'pcf': q_balance_sheet['TotalCapitalization'] / q_income_stmt['OperatingIncome'],
+                            'dte': q_balance_sheet['CurrentLiabilities'] / q_balance_sheet['StockholdersEquity'],
+                            'roe': q_income_stmt['NetIncome'] / q_balance_sheet['StockholdersEquity'],
+                            'roa': q_income_stmt['NetIncome'] / q_balance_sheet['TotalAssets'],
+                            'pts': q_balance_sheet['TotalCapitalization'] / q_income_stmt['TotalRevenue'],
+                            #'evEBITDA': foo(
+                            #(q_balance_sheet['TotalCapitalization'] + q_balance_sheet['TotalDebt'] - q_balance_sheet['CashAndCashEquivalents']),
+                            #q_income_stmt['EBITDA'])
+                        })
+            # Handle cases where the financial statements are nonstandard
+            except KeyError:
+                self.fundamentals = pd.DataFrame()
+                print(f"KeyError: Could not fetch fundamentals data for ticker {self.ticker}, returning empty dataframes")
+
+            self.fundamentals ['Date'] = q_balance_sheet['Date'].dt.tz_localize('America/New_York')
+            self.fundamentals  = self.fundamentals.dropna().sort_values('Date')
 
             return self.stock_data , self.earnings_data, self.fundamentals
 
@@ -98,33 +110,34 @@ class TickerData:
           - Merge in earnings and income statement data from yfinance
           - Define the target variable
         """
-        #try:
-        # Add ticker name
-        self.stock_data['Ticker'] = self.ticker
-        self.dataset_ex_df = self.stock_data.copy().reset_index()
-        self.dataset_ex_df['Date'] = pd.to_datetime(self.dataset_ex_df['Date'])
-        self.dataset_ex_df = self.dataset_ex_df.sort_values('Date')
-        #self.dataset_ex_df.set_index('Date', inplace=True)
+        try:
+            # Add ticker name
+            self.stock_data['Ticker'] = self.ticker
+            self.dataset_ex_df = self.stock_data.copy().reset_index()
+            self.dataset_ex_df['Date'] = pd.to_datetime(self.dataset_ex_df['Date'])
+            self.dataset_ex_df = self.dataset_ex_df.sort_values('Date')
+            #self.dataset_ex_df.set_index('Date', inplace=True)
 
-        # Merge in earnings call data
-        self.dataset_ex_df = pd.merge_asof(self.dataset_ex_df, self.earnings_data, on='Date', direction='backward')
+            # Merge in earnings call data
+            self.dataset_ex_df = pd.merge_asof(self.dataset_ex_df, self.earnings_data, on='Date', direction='backward')
 
-        # Merge in fundamentals data
-        self.dataset_ex_df = pd.merge_asof(self.dataset_ex_df, self.fundamentals, on='Date', direction='backward')
-        self.dataset_ex_df['ttm_pe'] = self.dataset_ex_df['Close'] / self.dataset_ex_df['ttm_eps']
+            # Merge in fundamentals data
+            self.dataset_ex_df = pd.merge_asof(self.dataset_ex_df, self.fundamentals, on='Date', direction='backward')
+            self.dataset_ex_df['ttm_eps'] = np.sum(self.dataset_ex_df['eps'].tail(4))
+            self.dataset_ex_df['pe'] = self.dataset_ex_df['Close'] / self.dataset_ex_df['ttm_eps']
 
-        # Get market regimes
-        self.dataset_ex_df = MarketRegimes(self.dataset_ex_df, "hmm_model.pkl").run_regime_detection()
+            # Get market regimes
+            self.dataset_ex_df = MarketRegimes(self.dataset_ex_df, "hmm_model.pkl").run_regime_detection()
 
-        # Target or outcome variable
-        if not self.prediction_mode:
-            self.dataset_ex_df['shifted_prices'] = self.dataset_ex_df['Close'].shift(self.prediction_window)
+            # Target or outcome variable
+            if not self.prediction_mode:
+                self.dataset_ex_df['shifted_prices'] = self.dataset_ex_df['Close'].shift(self.prediction_window)
 
-        return self.stock_data, self.dataset_ex_df
+            return self.stock_data, self.dataset_ex_df
             
-        #except Exception:
-            #print(f"Error while processing the data for {self.ticker}")
-            #pass
+        except Exception:
+            print(f"Error while processing the data for {self.ticker}")
+            pass
 
     @staticmethod
     def ema(close, period=20):
