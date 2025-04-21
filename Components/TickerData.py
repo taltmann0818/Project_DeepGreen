@@ -46,7 +46,7 @@ class TickerData:
         try:
             ticker_obj = yf.Ticker(self.ticker)
             if self.days != 0:
-                current_date = datetime.today() - timedelta(days=1)
+                current_date = datetime.today() #- timedelta(days=1)
                 past_date = current_date - timedelta(days=self.days)
                 self.stock_data = ticker_obj.history(start=past_date.strftime("%Y-%m-%d"),
                                                        end=current_date.strftime("%Y-%m-%d"),
