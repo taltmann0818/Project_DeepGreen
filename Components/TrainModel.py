@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch.cuda.amp import autocast, GradScaler
 import numpy as np
 import pandas as pd
 import math
@@ -212,10 +213,10 @@ class TEMPUS(nn.Module):
         attended_features = self.transformer_encoder(fused_features)
 
         # Final output layers with layer normalization
-        x = F.mish(self.fc1(attended_features)) # Switched to Mish activation function from ReLU
+        x = F.relu(self.fc1(attended_features))
         x = self.fc1_norm(x)
         x = self.dropout_layer(x)
-        x = F.mish(self.fc2(x)) # Switched to Mish activation function from ReLU
+        x = F.relu(self.fc2(x))
         x = self.fc2_norm(x)
         x = self.dropout_layer(x)
         outputs = self.regression_head(x)
@@ -231,6 +232,7 @@ class TEMPUS(nn.Module):
         # Define loss function and optimizer with weight decay
         criterion = nn.MSELoss()
         optimizer = AdamW(self.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay)
+        grad_scaler = GradScaler()
 
         # Learning rate scheduler
         scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
@@ -250,11 +252,11 @@ class TEMPUS(nn.Module):
         for epoch in epoch_progress:
             # Training phase
             self.train()
-            train_loss, train_rmse, train_mape = self._train_epoch(train_loader, criterion, optimizer)
+            train_loss, train_rmse, train_mape = self._train_epoch(train_loader, criterion, optimizer, grad_scaler)
             # Validation phase
-            val_loss, val_rmse, val_mape = self.evaluate(val_loader, criterion)
+            val_loss, val_rmse, val_mape = self.evaluate(val_loader, criterion, grad_scaler)
             # Test phase
-            test_loss, test_rmse, test_mape = self.evaluate(test_loader, criterion)
+            test_loss, test_rmse, test_mape = self.evaluate(test_loader, criterion, grad_scaler)
             # Update learning rate
             scheduler.step(val_loss)
 
@@ -299,7 +301,7 @@ class TEMPUS(nn.Module):
 
         return self.history
 
-    def _train_epoch(self, train_loader, criterion, optimizer):
+    def _train_epoch(self, train_loader, criterion, optimizer, grad_scaler=None):
         """Helper method for training a single epoch"""
         self.train()
         total_loss = 0
@@ -308,22 +310,24 @@ class TEMPUS(nn.Module):
 
         for inputs, targets in train_loader:
             inputs, targets = inputs.to(self.device), targets.to(self.device)
-
+            optimizer.zero_grad()
             # Forward pass
-            outputs = self(inputs)
-            # Squeeze the last dimension if it exists
-            if outputs.dim() > 1:
-                outputs = outputs[:, -1, 0] if outputs.size(1) > 1 and outputs.size(2) > 0 else outputs.squeeze()
-            loss = criterion(outputs, targets)
+            with autocast():
+                outputs = self(inputs)
+                # Squeeze the last dimension if it exists
+                if outputs.dim() > 1:
+                    outputs = outputs[:, -1, 0] if outputs.size(1) > 1 and outputs.size(2) > 0 else outputs.squeeze()
+                loss = criterion(outputs, targets)
 
             # Backward pass and optimize
-            optimizer.zero_grad()
-            loss.backward()
+            grad_scaler.scale(loss).backward()
 
             # Gradient clipping
+            grad_scaler.unscale_(optimizer)
             nn.utils.clip_grad_norm_(self.parameters(), max_norm=self.clip_size)
 
-            optimizer.step()
+            grad_scaler.step(optimizer)
+            grad_scaler.update()
 
             total_loss += loss.item() * inputs.size(0)
             all_predictions.append(outputs.detach().cpu().numpy())
@@ -345,7 +349,7 @@ class TEMPUS(nn.Module):
 
         return avg_loss, rmse, mape
 
-    def evaluate(self, data_loader, criterion):
+    def evaluate(self, data_loader, criterion, grad_scaler=None):
         """Evaluate the model with improved metrics"""
         self.eval()
         total_loss = 0
@@ -353,17 +357,18 @@ class TEMPUS(nn.Module):
         all_targets = []
 
         with torch.no_grad():
-            for inputs, targets in data_loader:
-                inputs, targets = inputs.to(self.device), targets.to(self.device)
-                outputs = self(inputs)
-                # Squeeze the last dimension if it exists
-                if outputs.dim() > 1:
-                    outputs = outputs[:, -1, 0] if outputs.size(1) > 1 and outputs.size(2) > 0 else outputs.squeeze()
-                loss = criterion(outputs, targets)
+            with autocast():
+                for inputs, targets in data_loader:
+                    inputs, targets = inputs.to(self.device), targets.to(self.device)
+                    outputs = self(inputs)
+                    # Squeeze the last dimension if it exists
+                    if outputs.dim() > 1:
+                        outputs = outputs[:, -1, 0] if outputs.size(1) > 1 and outputs.size(2) > 0 else outputs.squeeze()
+                    loss = criterion(outputs, targets)
 
-                total_loss += loss.item() * inputs.size(0)
-                all_predictions.append(outputs.cpu().numpy())
-                all_targets.append(targets.cpu().numpy())
+                    total_loss += loss.item() * inputs.size(0)
+                    all_predictions.append(outputs.cpu().numpy())
+                    all_targets.append(targets.cpu().numpy())
 
         all_predictions = np.concatenate(all_predictions, axis=0)
         all_targets = np.concatenate(all_targets, axis=0)
@@ -547,6 +552,9 @@ def torchscript_predict(model_path, input_df, device, window_size, target_col='s
 
     return preds_df
 
+from torch.utils.data import Dataset, DataLoader
+from sklearn.preprocessing import StandardScaler
+
 class DataModule:
     def __init__(self, data, window_size=20, batch_size=32, val_size=0.1, test_size=0.1,
                  random_state=42, target_col='shifted_prices', padding_strategy='zero'):
@@ -573,34 +581,33 @@ class DataModule:
         if not isinstance(self.data.index, pd.DatetimeIndex):
             raise ValueError("Data index must be a DatetimeIndex for year-based splitting")
 
-        # Extract years from the datetime index
-        years = self.data.index.year.unique()
-        num_years = len(years)
+        # Ensure data is sorted chronologically
+        length = len(self.data)
+        # Calculate the number of days in each split
+        test_days = int(length * self.test_size)
+        val_days = int(length * self.val_size)
+        train_days = length - test_days - val_days
 
-        # Calculate how many years for each split based on proportions
-        test_years_count = max(1, int(num_years * self.test_size))
-        val_years_count = max(1, int(num_years * self.val_size))
-        train_years_count = num_years - test_years_count - val_years_count
-
-        # Ensure we have at least one year for each split
-        if train_years_count < 1:
-            train_years_count = 1
-            val_years_count = max(1, (num_years - train_years_count) // 2)
-            test_years_count = num_years - train_years_count - val_years_count
-
-        # Get the year boundaries for each split
-        train_years = years[:train_years_count]
-        val_years = years[train_years_count:train_years_count + val_years_count]
-        test_years = years[train_years_count + val_years_count:]
-
-        # Create splits based on years (walk-forward approach)
-        self.df_train = self.data[self.data.index.year.isin(train_years)].copy()
-        self.df_val = self.data[self.data.index.year.isin(val_years)].copy()
-        self.df_test = self.data[self.data.index.year.isin(test_years)].copy()
+        # Split the data chronologically
+        self.df_train = self.data[:train_days]
+        self.df_val = self.data[train_days:train_days + val_days]
+        self.df_test = self.data[train_days + val_days:]
 
         # Create datasets and data loaders
         feature_cols = [col for col in self.data.columns if col != self.target_col]
         self.num_features = len(feature_cols)
+
+         # Handle infinite values before scaling
+        self.df_train[feature_cols] = self.df_train[feature_cols].replace([np.inf, -np.inf], np.nan)
+        self.df_val[feature_cols] = self.df_val[feature_cols].replace([np.inf, -np.inf], np.nan)
+        self.df_test[feature_cols] = self.df_test[feature_cols].replace([np.inf, -np.inf], np.nan)
+
+        # Fill NaN values with appropriate method (median is generally robust)
+        for col in feature_cols:
+            median_val = self.df_train[col].median()
+            self.df_train[col] = self.df_train[col].fillna(median_val)
+            self.df_val[col] = self.df_val[col].fillna(median_val)
+            self.df_test[col] = self.df_test[col].fillna(median_val)
 
         # Data Scaler
         self.scaler = StandardScaler()
