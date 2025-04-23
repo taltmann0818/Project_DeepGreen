@@ -298,6 +298,16 @@ class TickerData:
 
         return bullish_engulfing, bearish_engulfing
 
+    @staticmethod
+    def williams_r(high, low, close, period=14):
+        try:
+            highest_high = high.rolling(window=period).max()
+            lowest_low   = low.rolling(window=period).min()
+            will_r = (highest_high - close) / (highest_high - lowest_low) * -1
+            return will_r
+        except Exception:
+            return np.nan
+
     def add_technical_indicators(self):
         # Calculate and add technical indicators to the dataset.
         self.dataset_ex_df['ema_20'] = self.ema(self.dataset_ex_df["Close"], 20)
@@ -309,7 +319,8 @@ class TickerData:
         self.dataset_ex_df['b_percent'] = self.bollinger_percent_b(self.dataset_ex_df["Close"])
         self.dataset_ex_df['keltner_upper'], self.dataset_ex_df['keltner_lower'] = self.keltner_channel(
             self.dataset_ex_df["High"], self.dataset_ex_df["Low"], self.dataset_ex_df["Close"])
-        self.dataset_ex_df['adx'] = self.adx(self.dataset_ex_df["High"], self.dataset_ex_df["Low"],self.dataset_ex_df["Close"])
+        #self.dataset_ex_df['adx'] = self.adx(self.dataset_ex_df["High"], self.dataset_ex_df["Low"],self.dataset_ex_df["Close"])
+        self.dataset_ex_df['williams_r'] = self.williams_r(self.dataset_ex_df["High"], self.dataset_ex_df["Low"],self.dataset_ex_df["Close"])
 
         # Calculate and add candlestick patterns to the dataset.
         #self.dataset_ex_df['bullish_engulfing'], self.dataset_ex_df['bearish_engulfing'] = self.engulfing_patterns(self.dataset_ex_df["Open"], self.dataset_ex_df["Close"])

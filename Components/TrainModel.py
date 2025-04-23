@@ -3,7 +3,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import ReduceLROnPlateau
-from torch.cuda.amp import autocast, GradScaler
+
+#from torch.cuda.amp import autocast, GradScaler
+from transformer_engine.common.recipe import Format, DelayedScaling
+import transformer_engine.pytorch as te
+
 import numpy as np
 import pandas as pd
 import math
@@ -66,6 +70,22 @@ class TEMPUS(nn.Module):
             self.scaler = scaler
             self.register_buffer("mean", torch.tensor(scaler.mean_, dtype=torch.float32))
             self.register_buffer("scale", torch.tensor(scaler.scale_, dtype=torch.float32))
+
+        # ——— sanity check for zero / near-zero scales ———
+        with torch.no_grad():
+            # eps threshold you consider “too small”
+            eps = 1e-6
+            zero_mask = (self.scale == 0)
+            near_zero_mask = (self.scale.abs() < eps)
+    
+            if zero_mask.any():
+                idxs = zero_mask.nonzero(as_tuple=False).view(-1).tolist()
+                print(f"[WARN] scaler.scale_ has EXACT zeros at indices: {idxs}")
+    
+            if near_zero_mask.any():
+                idxs = near_zero_mask.nonzero(as_tuple=False).view(-1).tolist()
+                mins = self.scale[near_zero_mask]
+                print(f"[WARN] scaler.scale_ has near-zero (<{eps}) at indices {idxs}, values: {mins.tolist()}")
 
         # Multiple Temporal Resolutions of LSTM with layer normalization
         self.lstm_short = nn.LSTM(
@@ -232,10 +252,13 @@ class TEMPUS(nn.Module):
         # Define loss function and optimizer with weight decay
         criterion = nn.MSELoss()
         optimizer = AdamW(self.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay)
-        grad_scaler = GradScaler()
+        #grad_scaler = GradScaler()
 
         # Learning rate scheduler
         scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
+
+        # Hybrid: E4M3 forward, E5M2 backward
+        fp8_recipe = DelayedScaling(fp8_format=Format.HYBRID, amax_history_len=16)
 
         # Early stopping variables
         best_val_loss = float('inf')
@@ -252,11 +275,11 @@ class TEMPUS(nn.Module):
         for epoch in epoch_progress:
             # Training phase
             self.train()
-            train_loss, train_rmse, train_mape = self._train_epoch(train_loader, criterion, optimizer, grad_scaler)
+            train_loss, train_rmse, train_mape = self._train_epoch(train_loader, criterion, optimizer, fp8)
             # Validation phase
-            val_loss, val_rmse, val_mape = self.evaluate(val_loader, criterion, grad_scaler)
+            val_loss, val_rmse, val_mape = self.evaluate(val_loader, criterion, fp8)
             # Test phase
-            test_loss, test_rmse, test_mape = self.evaluate(test_loader, criterion, grad_scaler)
+            test_loss, test_rmse, test_mape = self.evaluate(test_loader, criterion, fp8)
             # Update learning rate
             scheduler.step(val_loss)
 
@@ -301,33 +324,55 @@ class TEMPUS(nn.Module):
 
         return self.history
 
-    def _train_epoch(self, train_loader, criterion, optimizer, grad_scaler=None):
+    def _train_epoch(self, train_loader, criterion, optimizer, fp8=None, grad_scaler=None):
         """Helper method for training a single epoch"""
         self.train()
         total_loss = 0
         all_predictions = []
         all_targets = []
 
-        for inputs, targets in train_loader:
+        for batch_idx, (inputs, targets) in enumerate(train_loader):
             inputs, targets = inputs.to(self.device), targets.to(self.device)
             optimizer.zero_grad()
-            # Forward pass
-            with autocast():
+            
+            # ——— forward with fp8 precision + loss ———
+            with te.fp8_autocast(enabled=True, fp8_recipe=fp8):
                 outputs = self(inputs)
                 # Squeeze the last dimension if it exists
                 if outputs.dim() > 1:
                     outputs = outputs[:, -1, 0] if outputs.size(1) > 1 and outputs.size(2) > 0 else outputs.squeeze()
                 loss = criterion(outputs, targets)
 
-            # Backward pass and optimize
-            grad_scaler.scale(loss).backward()
+            # ——— detect NaN loss BEFORE backward ———
+            if torch.isnan(loss) or torch.isinf(loss):
+                # compute output range
+                out_min, out_max = outputs.min().item(), outputs.max().item()
+                print(f"\n[ERROR] NaN/Inf loss at batch {batch_idx}")
+                print(f"  loss = {loss.item()}")
+                print(f"  outputs range = ({out_min:.6f}, {out_max:.6f})")
 
-            # Gradient clipping
-            grad_scaler.unscale_(optimizer)
+                # compute gradient norm BEFORE scaling/clipping
+                # (need a dummy backward to get grads)
+                loss_clone = loss.clone().detach().requires_grad_(True)
+                loss_clone.backward(retain_graph=True)
+                total_norm = 0.0
+                for p in self.parameters():
+                    if p.grad is not None:
+                        param_norm = p.grad.data.norm(2).item()
+                        total_norm += param_norm**2
+                total_norm = math.sqrt(total_norm)
+                print(f"  grad_norm (pre-clip) = {total_norm:.6f}")
+
+                raise RuntimeError("Stopping training due to NaN/Inf loss")
+
+            # ——— backward + step ———
+            #grad_scaler.scale(loss).backward()
+            loss.backward()
+            #grad_scaler.unscale_(optimizer)
             nn.utils.clip_grad_norm_(self.parameters(), max_norm=self.clip_size)
-
-            grad_scaler.step(optimizer)
-            grad_scaler.update()
+            #grad_scaler.step(optimizer)
+            #grad_scaler.update()
+            optimizer.step()
 
             total_loss += loss.item() * inputs.size(0)
             all_predictions.append(outputs.detach().cpu().numpy())
@@ -340,7 +385,7 @@ class TEMPUS(nn.Module):
         avg_loss = total_loss / len(train_loader.dataset)
         rmse = np.sqrt(np.mean((all_predictions - all_targets) ** 2))
 
-        # Improved MAPE calculation to handle near-zero values
+        # MAPE calculation to handle near-zero values
         epsilon = 1e-6  # Larger epsilon for numerical stability
         abs_percentage_errors = np.abs((all_targets - all_predictions) / np.maximum(np.abs(all_targets), epsilon))
         # Clip extreme values
@@ -349,7 +394,7 @@ class TEMPUS(nn.Module):
 
         return avg_loss, rmse, mape
 
-    def evaluate(self, data_loader, criterion, grad_scaler=None):
+    def evaluate(self, data_loader, criterion, fp8=None, grad_scaler=None):
         """Evaluate the model with improved metrics"""
         self.eval()
         total_loss = 0
@@ -357,18 +402,19 @@ class TEMPUS(nn.Module):
         all_targets = []
 
         with torch.no_grad():
-            with autocast():
-                for inputs, targets in data_loader:
-                    inputs, targets = inputs.to(self.device), targets.to(self.device)
+            for inputs, targets in data_loader:
+                inputs, targets = inputs.to(self.device), targets.to(self.device)
+                
+                with te.fp8_autocast(enabled=True, fp8_recipe=fp8):
                     outputs = self(inputs)
                     # Squeeze the last dimension if it exists
                     if outputs.dim() > 1:
                         outputs = outputs[:, -1, 0] if outputs.size(1) > 1 and outputs.size(2) > 0 else outputs.squeeze()
                     loss = criterion(outputs, targets)
 
-                    total_loss += loss.item() * inputs.size(0)
-                    all_predictions.append(outputs.cpu().numpy())
-                    all_targets.append(targets.cpu().numpy())
+                total_loss += loss.item() * inputs.size(0)
+                all_predictions.append(outputs.cpu().numpy())
+                all_targets.append(targets.cpu().numpy())
 
         all_predictions = np.concatenate(all_predictions, axis=0)
         all_targets = np.concatenate(all_targets, axis=0)
@@ -466,35 +512,6 @@ class PositionalEncoding(nn.Module):
         """
         x = x + self.pe[:x.size(1), :]
         return self.dropout(x)
-
-# Implementation of custom Temporal Attention
-class TemporalAttention(nn.Module):
-    def __init__(self, hidden_dim):
-        super().__init__()
-        self.time_attn = nn.Sequential(
-            nn.Linear(1, 16),  # Simple time feature processing
-            nn.Tanh(),
-            nn.Linear(16, 1)
-        )
-        self.feature_attn = nn.Linear(hidden_dim, 1)
-        #self.norm = nn.LayerNorm(hidden_dim)
-
-    def forward(self, lstm_output, time_features):
-        # lstm_output: [batch, seq_len, hidden]
-        # time_features: [batch, seq_len, 1] - normalized position in sequence
-
-        # Compute base attention scores from features
-        feature_scores = self.feature_attn(lstm_output)  # [batch, seq_len, 1]
-        # Compute time-based attention
-        time_weights = self.time_attn(time_features)  # [batch, seq_len, 1]
-        # Combine feature and time attention
-        combined_scores = feature_scores + time_weights
-        # Apply softmax to get attention weights
-        attention_weights = torch.softmax(combined_scores, dim=1)
-        # Apply attention to get context vector
-        context = torch.bmm(attention_weights.transpose(1, 2), lstm_output)  # [batch, 1, hidden]
-
-        return context, attention_weights
 
 def torchscript_predict(model_path, input_df, device, window_size, target_col='shifted_prices', prediction_mode=False):
     # Load the TorchScript model
@@ -760,3 +777,32 @@ class EchoStateNetwork(nn.Module):
         # Combine forward and backward outputs
         combined = torch.cat((outputs_forward, outputs_reverse), dim=2)
         return self.W_combined(combined)
+
+# Implementation of custom Temporal Attention
+class TemporalAttention(nn.Module):
+    def __init__(self, hidden_dim):
+        super().__init__()
+        self.time_attn = nn.Sequential(
+            nn.Linear(1, 16),  # Simple time feature processing
+            nn.Tanh(),
+            nn.Linear(16, 1)
+        )
+        self.feature_attn = nn.Linear(hidden_dim, 1)
+        #self.norm = nn.LayerNorm(hidden_dim)
+
+    def forward(self, lstm_output, time_features):
+        # lstm_output: [batch, seq_len, hidden]
+        # time_features: [batch, seq_len, 1] - normalized position in sequence
+
+        # Compute base attention scores from features
+        feature_scores = self.feature_attn(lstm_output)  # [batch, seq_len, 1]
+        # Compute time-based attention
+        time_weights = self.time_attn(time_features)  # [batch, seq_len, 1]
+        # Combine feature and time attention
+        combined_scores = feature_scores + time_weights
+        # Apply softmax to get attention weights
+        attention_weights = torch.softmax(combined_scores, dim=1)
+        # Apply attention to get context vector
+        context = torch.bmm(attention_weights.transpose(1, 2), lstm_output)  # [batch, 1, hidden]
+
+        return context, attention_weights
