@@ -1,4 +1,6 @@
-import yfinance as yf
+from concurrent.futures import ThreadPoolExecutor
+from polygon import RESTClient
+
 import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
@@ -17,344 +19,256 @@ import urllib.parse
 import os
 
 class TickerData:
-    def __init__(self, ticker, indicator_list, years=1, prediction_window=5,**kwargs):
+    def __init__(self, tickers, indicator_list, years=1, prediction_window=5,**kwargs):
         """
         Initialize the StockAnalyzer with a ticker symbol and number of past days to fetch.
         """
-        self.ticker = ticker
-        self.stock_data = None
-        self.q_income_stmt = None
-        self.y_income_stmt = None
-        self.earnings_data = None
-        self.dataset_ex_df = None
-        self.fft_df_real = None
-        self.fft_df_imag = None
-        self.merged_df = None
+        self.client = RESTClient(os.environ["POLYGON_API_KEY"])
+        self.tickers = tickers
+        self.indicator_list = set(indicator_list)
         self.prediction_window = abs(prediction_window)
-        self.days = years * 365
-        self.indicator_list = indicator_list
-
-        # Kwargs
-        self.start_date = kwargs.get('start_date', None)
-        self.end_date = kwargs.get('end_date', None)
+        if years > 5:
+            raise ValueError("Max years is 5 due to API limits.")
+        self.start_date = kwargs.get('start_date')
+        self.end_date   = kwargs.get('end_date')
         self.prediction_mode = kwargs.get('prediction_mode', False)
+        self.days = years * 365
 
-    def fetch_stock_data(self):
+    def get_ohlc_for_ticker(self, ticker, start_date, end_date, multiplier=1, timespan="day", limit=50000):
         """
-        Fetch historical equity price and financial data using yfinance.
+        Fetch daily OHLC bars for `ticker` in one paginated call and
+        align to full_dates, filling zeros on missing days.
         """
-        try:
-            ticker_obj = yf.Ticker(self.ticker)
-            if self.days != 0:
-                current_date = datetime.today() #- timedelta(days=1)
-                past_date = current_date - timedelta(days=self.days)
-                self.stock_data = ticker_obj.history(start=past_date.strftime("%Y-%m-%d"),
-                                                       end=current_date.strftime("%Y-%m-%d"),
-                                                       interval="1d")
-                
-            elif (self.start_date and self.end_date) is not None:
-                self.stock_data = ticker_obj.history(start=self.start_date.strftime("%Y-%m-%d"),
-                                       end=self.end_date.strftime("%Y-%m-%d"),
-                                       interval="1d")
-            else:
-                raise ValueError("Days must be non-zero or a start_date and end_date provided.")
+        aggs_iter = self.client.list_aggs(
+            ticker=ticker,
+            multiplier=multiplier,
+            timespan=timespan,
+            from_=start_date,
+            to=end_date,
+            limit=limit
+        )  # returns an iterator over all pages :contentReference[oaicite:4]{index=4}
 
-            # Earnings data
-            earnings_data = ticker_obj.get_earnings_dates()
-            self.earnings_data = earnings_data.reset_index().rename(
-                columns={"Earnings Date": "Date", "EPS Estimate": "eps_estimate", "Reported EPS": "eps",
-                         "Surprise(%)": "eps_surprise"}).sort_values('Date')
-            self.earnings_data['eps_surprise'] = self.earnings_data['eps_surprise'] / 100
+        aggs = pd.DataFrame(aggs_iter)
+        if aggs.empty:
+            # No data: return zero-filled template
+            df_empty = pd.DataFrame(0, columns=["open", "high", "low", "close", "volume"])
+            df_empty.index.name = "date"
+            df_empty["ticker"] = ticker
+            return df_empty
 
-            # Fundamentals Data
-            q_income_stmt = ticker_obj.get_income_stmt(freq='quarterly').T
-            if q_income_stmt is None or q_income_stmt.empty:
-                q_income_stmt = ticker_obj.get_income_stmt(freq="yearly").T
-            q_income_stmt = q_income_stmt.reset_index().rename(columns={"index": "Date"}).sort_values('Date')
-            q_balance_sheet = ticker_obj.get_balance_sheet(freq='quarterly').T
-            if q_balance_sheet is None or q_balance_sheet.empty:
-                q_balance_sheet = ticker_obj.get_balance_sheet(freq="yearly").T
-            q_balance_sheet = q_balance_sheet.reset_index().rename(columns={"index": "Date"}).sort_values('Date')
+        # Convert timestamp → NY date
+        dt_utc = pd.to_datetime(aggs['timestamp'], unit="ms", utc=True) \
+            .dt.tz_convert('America/New_York')  # convert TZ :contentReference[oaicite:5]{index=5}
+        aggs['date'] = dt_utc.dt.normalize()  # strip time → midnight
+        aggs['Ticker'] = ticker
 
-            try:
-                def safe_divide(num, denom):
-                    """
-                    Vectorised, index‑preserving divide that never raises ZeroDivisionError.
-                    Anything that would be ±inf (or where either side is NaN) becomes NaN.
-                    """
-                    # For scalar denominators just short‑circuit
-                    if np.isscalar(denom):
-                        return np.nan if denom in (0, None, np.nan) else num / denom
-                
-                    # For Series / Index‑aligned arrays
-                    denom = denom.replace(0, np.nan)          # avoid 0‑division
-                    out = num.divide(denom)                   # vectorised division
-                    return out.replace([np.inf, -np.inf], np.nan)               
-                # Combine all metrics into a DataFrame
-                self.fundamentals = pd.DataFrame({
-                    "pcf": safe_divide(
-                        q_balance_sheet["TotalCapitalization"],
-                        q_income_stmt["OperatingIncome"]
-                        if "OperatingIncome" in q_income_stmt.columns
-                        else q_income_stmt["OperatingRevenue"]
-                    ),
-                
-                    "dte": safe_divide(q_balance_sheet["TotalDebt"] if 'TotalDebt' in q_balance_sheet.columns else q_balance_sheet['CurrentLiabilities'],
-                                    q_balance_sheet["StockholdersEquity"]),
-                
-                    "roe": safe_divide(q_income_stmt["NetIncome"],
-                                    q_balance_sheet["StockholdersEquity"]),
-                
-                    "roa": safe_divide(q_income_stmt["NetIncome"],
-                                    q_balance_sheet["TotalAssets"]),
-                
-                    "pts": safe_divide(q_balance_sheet["TotalCapitalization"],
-                                    q_income_stmt["TotalRevenue"])
-                })
-            # Handle cases where the financial statements are nonstandard
-            except KeyError:
-                self.fundamentals = pd.DataFrame()
-                print(f"KeyError: Could not fetch fundamentals data for ticker {self.ticker}, returning empty dataframes")
+        daily = (
+            aggs
+            .loc[:, ["Ticker", "date", "open", "high", "low", "close", "volume"]]
+            .set_index("date")
+            .sort_index()
+        )
 
-            self.fundamentals ['Date'] = q_balance_sheet['Date'].dt.tz_localize('America/New_York')
-            self.fundamentals  = self.fundamentals.dropna().sort_values('Date')
+        # 8) Reindex to full_dates, filling missing days with zeros
+        daily.index.name = "date"
+        daily["Ticker"] = ticker
 
-            return self.stock_data , self.earnings_data, self.fundamentals
+        return daily[["Ticker", "open", "high", "low", "close", "volume"]]
 
-        # Handling of delisted stocks
-        except AttributeError:
-            self.stock_data = pd.DataFrame(columns=['Open', 'High', 'Low', 'Close', 'Volume'])
-            self.fundamentals = pd.DataFrame()
-            self.earnings_data = pd.DataFrame(index=[0])
-            # Log this error
-            print(f"AttributeError: Could not fetch data for ticker {self.ticker}, returning empty dataframes")
+    def fetch_stock_data(self, workers=20):
+        if not self.start_date:
+            self.start_date = (datetime.now() - timedelta(days=self.days)).strftime("%Y-%m-%d")
+        if not self.end_date:
+            self.end_date = datetime.now().strftime("%Y-%m-%d")
 
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            dfs = ex.map(lambda t: self.get_ohlc_for_ticker(t, self.start_date, self.end_date), self.tickers)
+
+        self.stock_data = pd.concat(dfs, axis=0)
+        return self.stock_data
+
+    # ——— Preprocessing (unchanged) ———
     def preprocess_data(self):
-        """
-        Preprocess the fetched stock data:
-          - Reset index and convert dates
-          - Merge in earnings and income statement data from yfinance
-          - Define the target variable
-        """
-        try:
-            # Add ticker name
-            self.stock_data['Ticker'] = self.ticker
-            self.dataset_ex_df = self.stock_data.copy().reset_index()
-            self.dataset_ex_df['Date'] = pd.to_datetime(self.dataset_ex_df['Date'])
-            self.dataset_ex_df = self.dataset_ex_df.sort_values('Date')
-            #self.dataset_ex_df.set_index('Date', inplace=True)
-
-            # Merge in earnings call data
-            self.dataset_ex_df = pd.merge_asof(self.dataset_ex_df, self.earnings_data, on='Date', direction='backward')
-
-            # Merge in fundamentals data
-            self.dataset_ex_df = pd.merge_asof(self.dataset_ex_df, self.fundamentals, on='Date', direction='backward')
-            self.dataset_ex_df['ttm_eps'] = np.sum(self.dataset_ex_df['eps'].tail(4))
-            self.dataset_ex_df['pe'] = self.dataset_ex_df['Close'] / self.dataset_ex_df['ttm_eps']
-
-            # Get market regimes
-            self.dataset_ex_df = MarketRegimes(self.dataset_ex_df, "hmm_model.pkl").run_regime_detection()
-
-            # Target or outcome variable
-            if not self.prediction_mode:
-                self.dataset_ex_df['shifted_prices'] = self.dataset_ex_df['Close'].shift(self.prediction_window)
-
-            return self.stock_data, self.dataset_ex_df
-            
-        except Exception:
-            print(f"Error while processing the data for {self.ticker}")
-            pass
+        self.dataset_ex_df = (
+            self.stock_data
+            .rename(columns={"open":"Open","high":"High","low":"Low","close":"Close","volume":"Volume"})
+        )
+        # assume MarketRegimes is unchanged
+        self.dataset_ex_df = MarketRegimes(self.dataset_ex_df, "hmm_model.pkl").run_regime_detection()
+        if not self.prediction_mode:
+            self.dataset_ex_df['shifted_prices'] = self.dataset_ex_df['Close'].shift(self.prediction_window)
+        return self.dataset_ex_df
 
     @staticmethod
-    def ema(close, period=20):
-        try:
-            return close.ewm(span=period, adjust=False).mean()
-        except Exception:
-                return np.nan
+    def ema(series, period):
+        return series.ewm(span=period, adjust=False).mean()
 
     @staticmethod
-    def stochastic_rsi(close, rsi_period=14, stoch_period=14):
-        try:
-            delta = close.diff()
-            gain = delta.where(delta > 0, 0)
-            loss = -delta.where(delta < 0, 0)
-            avg_gain = gain.rolling(rsi_period).mean()
-            avg_loss = loss.rolling(rsi_period).mean()
-            rs = avg_gain / avg_loss
-            rsi = 100 - (100 / (1 + rs))
-            stoch_rsi = (rsi - rsi.rolling(stoch_period).min()) / (rsi.rolling(stoch_period).max() - rsi.rolling(stoch_period).min())
-            return stoch_rsi
-        except Exception:
-            return np.nan
+    def stochastic_rsi(series, rsi_period=14, stoch_period=14):
+        delta = series.diff()
+        gain = delta.clip(lower=0)
+        loss = -delta.clip(upper=0)
+        rs = gain.rolling(rsi_period).mean() / loss.rolling(rsi_period).mean()
+        rsi = 100 - (100 / (1 + rs))
+        return (rsi - rsi.rolling(stoch_period).min()) / (rsi.rolling(stoch_period).max() - rsi.rolling(stoch_period).min())
+
 
     @staticmethod
-    def macd(close, fast_period=12, slow_period=26, signal_period=9):
-        try:
-            fast_ema = close.ewm(span=fast_period, adjust=False).mean()
-            slow_ema = close.ewm(span=slow_period, adjust=False).mean()
-            macd_line = fast_ema - slow_ema
-            return macd_line
-        except Exception:
-            return np.nan
+    def macd(series, fast_period=12, slow_period=26, signal_period=9):
+        fast = series.ewm(span=fast_period, adjust=False).mean()
+        slow = series.ewm(span=slow_period, adjust=False).mean()
+        return fast - slow
 
     @staticmethod
-    def obv(close, volume):
-        try:
-            obv_values = np.where(close > close.shift(), volume,
-                                  np.where(close < close.shift(), -volume, 0))
-            return pd.Series(obv_values, index=close.index).cumsum()
-        except Exception:
-            return np.nan
+    def obv(series, volume):
+        direction = np.sign(series.diff().fillna(0))
+        return (direction * volume).cumsum()
 
     @staticmethod     
-    def bollinger_percent_b(close, period=20, std_dev=2):
-        try:
-            sma = close.rolling(period).mean()
-            rolling_std = close.rolling(period).std()
-            upper_band = sma + std_dev * rolling_std
-            lower_band = sma - std_dev * rolling_std
-            b_percent = (close - lower_band) / (upper_band - lower_band)
-            return b_percent
-        except Exception:
-            return np.nan
+    def bollinger_percent_b(series, period=20, std_dev=2):
+        sma = series.rolling(period).mean()
+        std = series.rolling(period).std()
+        upper = sma + std_dev * std
+        lower = sma - std_dev * std
+        return (series - lower) / (upper - lower)
         
     @staticmethod
     def keltner_channel(high, low, close, ema_period=20, atr_period=10, multiplier=2):
-        try:
-            ema = close.ewm(span=ema_period).mean()
-            atr = (high - low).rolling(atr_period).mean()
-            keltner_upper = ema + multiplier * atr
-            keltner_lower = ema - multiplier * atr
-            return keltner_upper, keltner_lower
-        except Exception:
-            return np.nan, np.nan
+        center = close.ewm(span=ema_period).mean()
+        atr = (high - low).rolling(atr_period).mean()
+        return center + multiplier * atr, center - multiplier * atr
 
     @staticmethod
     def adx(high, low, close, period=14, smoothing=14):
-        # Calculate True Range (TR)
-        tr1 = high - low
-        tr2 = abs(high - close.shift(1))
-        tr3 = abs(low - close.shift(1))
-        tr = pd.DataFrame({'tr1': tr1, 'tr2': tr2, 'tr3': tr3}).max(axis=1)
-        atr = tr.rolling(window=smoothing).mean()
-
-        # Calculate Directional Movement (DM)
-        pos_dm_raw = high.diff()
-        neg_dm_raw = low.diff()
-
-        # Create the conditions as numpy arrays
-        pos_condition = (pos_dm_raw > 0) & (pos_dm_raw > neg_dm_raw.abs())
-        neg_condition = (neg_dm_raw < 0) & (neg_dm_raw.abs() > pos_dm_raw)
-
-        # Apply conditions and create Series with the same index
-        pos_dm = pd.Series(np.where(pos_condition, pos_dm_raw, 0), index=high.index)
-        neg_dm = pd.Series(np.where(neg_condition, neg_dm_raw.abs(), 0), index=low.index)
-
-        # Smooth DM
-        pos_di = 100 * (pos_dm.rolling(window=smoothing).mean() / atr)
-        neg_di = 100 * (neg_dm.rolling(window=smoothing).mean() / atr)
-
-        # Calculate Directional Index (DX)
-        dx = 100 * (abs(pos_di - neg_di) / (pos_di + neg_di))
-
-        # Calculate ADX
-        adx = dx.rolling(window=period).mean()
-
-        return adx
+        tr = pd.concat([
+            high - low,
+            (high - close.shift()).abs(),
+            (low - close.shift()).abs()
+        ], axis=1).max(axis=1)
+        atr = tr.rolling(smoothing).mean()
+        up = high.diff().clip(lower=0)
+        down = (-low.diff()).clip(lower=0)
+        pos = 100 * up.rolling(smoothing).mean() / atr
+        neg = 100 * down.rolling(smoothing).mean() / atr
+        dx = 100 * (pos - neg).abs() / (pos + neg)
+        return dx.rolling(period).mean()
 
     @staticmethod
-    def engulfing_patterns(open, close):
-        # Determine if candle is bullish (close > open) or bearish (close < open)
-        current_bullish = close > open
-        prev_bullish = close.shift(1) > open.shift(1)
-
-        # Real body size (absolute difference between open and close)
-        current_body_size = abs(close - open)
-        prev_body_size = abs(close.shift(1) - open.shift(1))
-
-        # Bullish engulfing: current candle is bullish, previous is bearish,
-        # current candle's body completely engulfs previous candle's body
-        bullish_engulfing = (
-                current_bullish &  # Current candle is bullish
-                ~prev_bullish &  # Previous candle is bearish
-                (open <= close.shift(1)) &  # Current open <= Previous close
-                (close >= open.shift(1)) &  # Current close >= Previous open
-                (current_body_size > prev_body_size)  # Current body larger than previous
-        )
-
-        # Bearish engulfing: current candle is bearish, previous is bullish,
-        # current candle's body completely engulfs previous candle's body
-        bearish_engulfing = (
-                ~current_bullish &  # Current candle is bearish
-                prev_bullish &  # Previous candle is bullish
-                (open >= close.shift(1)) &  # Current open >= Previous close
-                (close <= open.shift(1)) &  # Current close <= Previous open
-                (current_body_size > prev_body_size)  # Current body larger than previous
-        )
-
-        # Convert to binary indicators (0 or 1)
-        bullish_engulfing = bullish_engulfing.astype(int)
-        bearish_engulfing = bearish_engulfing.astype(int)
-
-        return bullish_engulfing, bearish_engulfing
+    def engulfing_patterns(open_, close):
+        cur_b = close > open_
+        prev_b = close.shift() > open_.shift()
+        cur_body = (close - open_).abs()
+        prev_body = (close.shift() - open_.shift()).abs()
+        bull = ( cur_b & ~prev_b & (open_ <= close.shift()) & (close >= open_.shift()) & (cur_body > prev_body) )
+        bear = (~cur_b &  prev_b & (open_ >= close.shift()) & (close <= open_.shift()) & (cur_body > prev_body) )
+        return bull.astype(int), bear.astype(int)
 
     @staticmethod
     def williams_r(high, low, close, period=14):
-        try:
-            highest_high = high.rolling(window=period).max()
-            lowest_low   = low.rolling(window=period).min()
-            will_r = (highest_high - close) / (highest_high - lowest_low) * -1
-            return will_r
-        except Exception:
-            return np.nan
+        hh = high.rolling(period).max()
+        ll = low.rolling(period).min()
+        return (hh - close) / (hh - ll) * -1
 
+    # ——— Core Refactored Indicator Loop ———
     def add_technical_indicators(self):
-        # Calculate and add technical indicators to the dataset.
-        self.dataset_ex_df['ema_20'] = self.ema(self.dataset_ex_df["Close"], 20)
-        self.dataset_ex_df['ema_50'] = self.ema(self.dataset_ex_df["Close"], 50)
-        self.dataset_ex_df['ema_200'] = self.ema(self.dataset_ex_df["Close"], 200)
-        #self.dataset_ex_df['obv'] = self.obv(self.dataset_ex_df["Close"], self.dataset_ex_df["Volume"])
-        self.dataset_ex_df['stoch_rsi'] = self.stochastic_rsi(self.dataset_ex_df["Close"])
-        self.dataset_ex_df['macd'] = self.macd(self.dataset_ex_df["Close"])
-        self.dataset_ex_df['b_percent'] = self.bollinger_percent_b(self.dataset_ex_df["Close"])
-        self.dataset_ex_df['keltner_upper'], self.dataset_ex_df['keltner_lower'] = self.keltner_channel(
-            self.dataset_ex_df["High"], self.dataset_ex_df["Low"], self.dataset_ex_df["Close"])
-        #self.dataset_ex_df['adx'] = self.adx(self.dataset_ex_df["High"], self.dataset_ex_df["Low"],self.dataset_ex_df["Close"])
-        self.dataset_ex_df['williams_r'] = self.williams_r(self.dataset_ex_df["High"], self.dataset_ex_df["Low"],self.dataset_ex_df["Close"])
+        df = self.dataset_ex_df.copy()
 
-        # Calculate and add candlestick patterns to the dataset.
-        #self.dataset_ex_df['bullish_engulfing'], self.dataset_ex_df['bearish_engulfing'] = self.engulfing_patterns(self.dataset_ex_df["Open"], self.dataset_ex_df["Close"])
+        # — EMA (single-series via transform) —
+        for period in (20, 50, 200):
+            name = f'ema_{period}'
+            if name in self.indicator_list:
+                df[name] = (
+                    df
+                    .groupby('Ticker')['Close']
+                    .transform(lambda s: self.ema(s, period))
+                )
 
-        return self.dataset_ex_df
+        # — Stochastic RSI, MACD, Bollinger %B (all single-series) —
+        if 'stoch_rsi' in self.indicator_list:
+            df['stoch_rsi'] = df.groupby('Ticker')['Close'].transform(self.stochastic_rsi)
 
+        if 'macd' in self.indicator_list:
+            df['macd'] = df.groupby('Ticker')['Close'].transform(self.macd)
+
+        if 'b_percent' in self.indicator_list:
+            df['b_percent'] = df.groupby('Ticker')['Close'].transform(self.bollinger_percent_b)
+
+        # — On-Balance Volume (needs Close & Volume) —
+        if 'obv' in self.indicator_list:
+            obv_series = (
+                df
+                .groupby('Ticker')
+                .apply(lambda g: self.obv(g['Close'], g['Volume']))
+                .reset_index(level=0, drop=True)
+            )
+            df['obv'] = obv_series
+
+        # — ADX, Williams %R (single-series but need High/Low/Close) —
+        if 'adx' in self.indicator_list:
+            adx_series = (
+                df
+                .groupby('Ticker')
+                .apply(lambda g: self.adx(g['High'], g['Low'], g['Close']))
+                .reset_index(level=0, drop=True)
+            )
+            df['adx'] = adx_series
+
+        if 'williams_r' in self.indicator_list:
+            wr_series = (
+                df
+                .groupby('Ticker')
+                .apply(lambda g: self.williams_r(g['High'], g['Low'], g['Close']))
+                .reset_index(level=0, drop=True)
+            )
+            df['williams_r'] = wr_series
+
+        # — Engulfing patterns (two outputs: bullish & bearish) —
+        if {'bullish_engulfing', 'bearish_engulfing'} & set(self.indicator_list):
+            eng = (
+                df
+                .groupby('Ticker')
+                .apply(lambda g: pd.DataFrame({
+                    'bullish_engulfing': self.engulfing_patterns(g['Open'], g['Close'])[0],
+                    'bearish_engulfing': self.engulfing_patterns(g['Open'], g['Close'])[1],
+                }, index=g.index))
+                .reset_index(level=0, drop=True)
+            )
+            if 'bullish_engulfing' in self.indicator_list:
+                df['bullish_engulfing'] = eng['bullish_engulfing']
+            if 'bearish_engulfing' in self.indicator_list:
+                df['bearish_engulfing'] = eng['bearish_engulfing']
+
+        # — Keltner Channel (two outputs: upper & lower) —
+        if {'keltner_upper', 'keltner_lower'} & set(self.indicator_list):
+            kc = (
+                df
+                .groupby('Ticker')
+                .apply(lambda g: pd.DataFrame({
+                    'keltner_upper': self.keltner_channel(g['High'], g['Low'], g['Close'])[0],
+                    'keltner_lower': self.keltner_channel(g['High'], g['Low'], g['Close'])[1],
+                }, index=g.index))
+                .reset_index(level=0, drop=True)
+            )
+            if 'keltner_upper' in self.indicator_list:
+                df['keltner_upper'] = kc['keltner_upper']
+            if 'keltner_lower' in self.indicator_list:
+                df['keltner_lower'] = kc['keltner_lower']
+
+        self.dataset_ex_df = df
+        return df
+
+    # ——— Final Merge Based on indicators & mode ———
     def merge_data(self):
-        """
-        Merge all data sources into one DataFrame.
-        """
-        try:
-            if self.prediction_mode:
-                self.dataset_ex_df = self.dataset_ex_df[['Date','Ticker']+self.indicator_list]
-                self.final_df = self.dataset_ex_df.dropna()
-                self.final_df.set_index('Date', inplace=True)
-                return self.final_df
-            else:
-                self.dataset_ex_df = self.dataset_ex_df[['Date','Ticker','shifted_prices']+self.indicator_list]
-                self.final_df = self.dataset_ex_df.dropna()
-                self.final_df.set_index('Date', inplace=True)
-                return self.final_df
-        except Exception as e:
-            self.final_df = pd.DataFrame()
-            print(f"Error while merging data for {self.ticker}; error: {e}")
+        cols = ['Ticker']
+        if self.prediction_mode:
+            cols += list(self.indicator_list)
+        else:
+            cols += ['shifted_prices'] + list(self.indicator_list)
+
+        self.final_df = self.dataset_ex_df[cols].dropna()
+        return self.final_df
 
     def process_all(self):
-        """
-        Run the full processing pipeline:
-          1. Fetch stock data
-          2. Preprocess data
-          3. [add the fundemental data]
-          4. Add technical indicators
-          5. Merge and return the final DataFrame
-        """
         self.fetch_stock_data()
         self.preprocess_data()
         self.add_technical_indicators()
