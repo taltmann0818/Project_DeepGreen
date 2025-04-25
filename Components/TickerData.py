@@ -34,6 +34,49 @@ class TickerData:
         self.prediction_mode = kwargs.get('prediction_mode', False)
         self.days = years * 365
 
+    def get_news_for_ticker(self, ticker, start_date, end_date, full_dates, limit=1000):
+        # 1) Fetch all articles in one paginated iterator
+        articles = self.client.list_ticker_news(
+            ticker=ticker,
+            published_utc_gte=start_date,
+            published_utc_lte=end_date,
+            limit=limit,
+            sort="published_utc",
+            order="asc"
+        )
+        # 2) Flatten into rows of (ticker, date, sentiment)
+        rows = [
+            (ticker, art.published_utc.split("T")[0], ins.sentiment)
+            for art in articles
+            for ins in (art.insights or [])
+        ]
+        # If no news at all, return zeros for every date
+        if not rows:
+            df_empty = pd.DataFrame(0,
+                                    index=full_dates,
+                                    columns=["positive", "neutral", "negative"]
+                                    )
+            df_empty.index.name = "date"
+            df_empty["Ticker"] = ticker
+            return df_empty
+
+        df = pd.DataFrame(rows, columns=["Ticker", "date", "sentiment"])
+        # 3) Pivot daily counts
+        daily = (
+            df.groupby(["Ticker", "date", "sentiment"])
+            .size()
+            .unstack(fill_value=0)
+            .reset_index()
+        )
+
+        for col in ['bearish', 'bullish', 'hold', 'mixed']:
+            if col not in daily.columns:
+                daily[col] = 0
+
+        daily['date'] = pd.to_datetime(daily['date']).dt.tz_localize('America/New_York')
+
+        return daily.set_index(["date"])
+
     def get_ohlc_for_ticker(self, ticker, start_date, end_date, multiplier=1, timespan="day", limit=50000):
         """
         Fetch daily OHLC bars for `ticker` in one paginated call and
@@ -81,11 +124,20 @@ class TickerData:
         if not self.end_date:
             self.end_date = datetime.now().strftime("%Y-%m-%d")
 
-        with ThreadPoolExecutor(max_workers=workers) as ex:
-            dfs = ex.map(lambda t: self.get_ohlc_for_ticker(t, self.start_date, self.end_date), self.tickers)
+        full_dates = pd.date_range(start=self.start_date,end=self.end_date,freq="D",tz="America/New_York")
 
-        self.stock_data = pd.concat(dfs, axis=0)
-        return self.stock_data
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            stock_dfs = ex.map(lambda t: self.get_ohlc_for_ticker(t, self.start_date, self.end_date), self.tickers)
+        self.stock_data = pd.concat(stock_dfs, axis=0)
+
+        if 'positive' in self.indicator_list:
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                news_dfs = ex.map(lambda t: self.get_news_for_ticker(t, self.start_date, self.end_date, full_dates), self.tickers)
+            self.news_data = pd.concat(news_dfs, axis=0)
+        else:
+            self.news_data = None
+
+        return self.stock_data, self.news_data
 
     # ——— Preprocessing (unchanged) ———
     def preprocess_data(self):
@@ -93,10 +145,27 @@ class TickerData:
             self.stock_data
             .rename(columns={"open":"Open","high":"High","low":"Low","close":"Close","volume":"Volume"})
         )
-        # assume MarketRegimes is unchanged
+        # Merge in MarketRegimes
         self.dataset_ex_df = MarketRegimes(self.dataset_ex_df, "hmm_model.pkl").run_regime_detection()
         if not self.prediction_mode:
             self.dataset_ex_df['shifted_prices'] = self.dataset_ex_df['Close'].shift(self.prediction_window)
+
+        # Merge in news data if requested
+        if self.news_data is not None:
+            # bring 'date' back as a column in both
+            df_stocks = self.dataset_ex_df.reset_index()  # date→ column
+            df_news = self.news_data.reset_index()  # date→ column
+
+            # perform the merge on date + Ticker
+            merged = pd.merge(
+                df_stocks,
+                df_news,
+                on=['date', 'Ticker'],
+                how='left'
+            ).fillna(0)
+            # restore date as the index
+            self.dataset_ex_df = merged.set_index('date')
+
         return self.dataset_ex_df
 
     @staticmethod
@@ -264,7 +333,6 @@ class TickerData:
             cols += list(self.indicator_list)
         else:
             cols += ['shifted_prices'] + list(self.indicator_list)
-
         self.final_df = self.dataset_ex_df[cols].dropna()
         return self.final_df
 
