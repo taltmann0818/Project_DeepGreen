@@ -1,6 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
 from polygon import RESTClient
-
+import warnings
 import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
@@ -139,6 +139,9 @@ class TickerData:
 
         return self.stock_data, self.news_data
 
+    def get_fundamentals(self):
+        pass
+
     # ——— Preprocessing (unchanged) ———
     def preprocess_data(self):
         self.dataset_ex_df = (
@@ -172,6 +175,18 @@ class TickerData:
     def ema(series, period):
         return series.ewm(span=period, adjust=False).mean()
 
+    def trend(self, series, period1=8, period2=21, period3=55):
+        ema_8 = self.ema(series, period1)
+        ema_21 = self.ema(series, period2)
+        ema_55 = self.ema(series, period3)
+        return np.where(ema_8  > ema_21, 1, 0), np.where(ema_21 > ema_55, 1, 0)
+
+    @staticmethod
+    def z_score(series, period=50):
+        ma_50 = series.rolling(window=period).mean()
+        std_50 = series.rolling(window=period).std()
+        return (series - ma_50) / std_50
+
     @staticmethod
     def stochastic_rsi(series, rsi_period=14, stoch_period=14):
         delta = series.diff()
@@ -181,7 +196,6 @@ class TickerData:
         rsi = 100 - (100 / (1 + rs))
         return (rsi - rsi.rolling(stoch_period).min()) / (rsi.rolling(stoch_period).max() - rsi.rolling(stoch_period).min())
 
-
     @staticmethod
     def macd(series, fast_period=12, slow_period=26, signal_period=9):
         fast = series.ewm(span=fast_period, adjust=False).mean()
@@ -189,9 +203,20 @@ class TickerData:
         return fast - slow
 
     @staticmethod
-    def obv(series, volume):
-        direction = np.sign(series.diff().fillna(0))
-        return (direction * volume).cumsum()
+    def atr(close, high, low, period=14):
+        true_range = pd.concat([high - low, abs(high - close.shift()), abs(low - close.shift())], axis=1).max(axis=1)
+        return true_range.rolling(period).mean()
+
+    @staticmethod
+    def momentum_signals(close, volume):
+        returns = close.pct_change()
+        mom_1m = returns.rolling(21).sum()
+        mom_3m = returns.rolling(63).sum()
+        mom_6m = returns.rolling(126).sum()
+        price_momentum = (0.4 * mom_1m + 0.3 * mom_3m + 0.3 * mom_6m)
+        volume_momentum = volume / volume.rolling(21).mean()
+
+        return price_momentum, volume_momentum
 
     @staticmethod     
     def bollinger_percent_b(series, period=20, std_dev=2):
@@ -251,28 +276,27 @@ class TickerData:
                     .groupby('Ticker')['Close']
                     .transform(lambda s: self.ema(s, period))
                 )
+        # — Stochastic RSI (single-series via transform) —
+        for period in (14, 28):
+            name = f'stoch_rsi{period}'
+            if name in self.indicator_list:
+                df[name] = (
+                    df
+                    .groupby('Ticker')['Close']
+                    .transform(lambda s: self.stochastic_rsi(s, period))
+                )
 
-        # — Stochastic RSI, MACD, Bollinger %B (all single-series) —
-        if 'stoch_rsi' in self.indicator_list:
-            df['stoch_rsi'] = df.groupby('Ticker')['Close'].transform(self.stochastic_rsi)
-
+        # — Single-series indicators —
         if 'macd' in self.indicator_list:
             df['macd'] = df.groupby('Ticker')['Close'].transform(self.macd)
 
         if 'b_percent' in self.indicator_list:
             df['b_percent'] = df.groupby('Ticker')['Close'].transform(self.bollinger_percent_b)
 
-        # — On-Balance Volume (needs Close & Volume) —
-        if 'obv' in self.indicator_list:
-            obv_series = (
-                df
-                .groupby('Ticker')
-                .apply(lambda g: self.obv(g['Close'], g['Volume']))
-                .reset_index(level=0, drop=True)
-            )
-            df['obv'] = obv_series
+        if 'z_score' in self.indicator_list:
+            df['z_score'] = df.groupby('Ticker')['Close'].transform(self.z_score)
 
-        # — ADX, Williams %R (single-series but need High/Low/Close) —
+        # — Single-series but need multiple of OHLC —
         if 'adx' in self.indicator_list:
             adx_series = (
                 df
@@ -290,6 +314,15 @@ class TickerData:
                 .reset_index(level=0, drop=True)
             )
             df['williams_r'] = wr_series
+
+        if 'atr' in self.indicator_list:
+            atr_series = (
+                df
+                .groupby('Ticker')
+                .apply(lambda g: self.atr(g['Close'], g['High'], g['Low']))
+                .reset_index(level=0, drop=True)
+            )
+            df['atr'] = atr_series
 
         # — Engulfing patterns (two outputs: bullish & bearish) —
         if {'bullish_engulfing', 'bearish_engulfing'} & set(self.indicator_list):
@@ -322,6 +355,22 @@ class TickerData:
                 df['keltner_upper'] = kc['keltner_upper']
             if 'keltner_lower' in self.indicator_list:
                 df['keltner_lower'] = kc['keltner_lower']
+
+        # — Momentum (two outputs: price & volume) —
+        if {'price_momentum', 'volume_momentum'} & set(self.indicator_list):
+            momentum = (
+                df
+                .groupby('Ticker')
+                .apply(lambda g: pd.DataFrame({
+                    'price_momentum': self.momentum_signals(g['Close'], g['Volume'])[0],
+                    'volume_momentum': self.momentum_signals(g['Close'], g['Volume'])[1],
+                }, index=g.index))
+                .reset_index(level=0, drop=True)
+            )
+            if 'price_momentum' in self.indicator_list:
+                df['price_momentum'] = momentum['price_momentum']
+            if 'volume_momentum' in self.indicator_list:
+                df['volume_momentum'] = momentum['volume_momentum']
 
         self.dataset_ex_df = df
         return df
