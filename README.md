@@ -12,6 +12,7 @@ Streamlit Deployment Link: https://projectdeepgreen-nyuq3jdtij9etdtdnvy87p.strea
 
 ## Features
 
+- **Paper Trading**: Testing trading strategy with paper trading via the Alapa API: https://docs.alpaca.markets/reference/authentication-2#paper-trading 
 - **Machine Learning**: Leverages a custom ML model, TEMPUS, for United States equities price prediction. Model architecture is built on a hybrid of LSTMs at multiple temporal resolutions, Temporal Convolutional Network, and a Temporal Attention mechanism.
 - **Backtesting**: Tools to evaluate model performance on historical market data and generate portfolio performance and tearsheets
 - **Interactive Web Interface**: Built with Streamlit for easy navigation and use
