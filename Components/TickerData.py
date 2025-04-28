@@ -464,35 +464,3 @@ def fetch_sql_data(table_name):
     except Exception as e:
         print(f"Error fetching data: {str(e)}")
         return pd.DataFrame()  # Return an empty DataFrame in case of error
-
-def get_market_cap(ticker, asof=None):
-    try:
-        if asof is None:
-            asof = datetime.today().strftime("%Y-%m-%d")
-        client = RESTClient(os.environ["POLYGON_API_KEY"])
-        return client.get_ticker_details(ticker, date=asof).market_cap
-    except Exception as e:
-        print(f"Error getting market cap: {str(e)}")
-
-def get_close_price(ticker, asof=None):
-    try:
-        if asof is None:
-            asof = datetime.today().strftime("%Y-%m-%d")
-        else:
-            asof = datetime.strptime(asof, "%Y-%m-%d").date()
-        while True:
-            if not np.is_busday(asof.strftime("%Y-%m-%d")):
-                asof += timedelta(days=1)
-                continue
-            try:
-                client = RESTClient(os.environ["POLYGON_API_KEY"])
-                response = client.get_daily_open_close_agg(ticker, date=asof.strftime("%Y-%m-%d"))
-                if response and hasattr(response, 'close'):
-                    return response.close
-                else:
-                    asof += timedelta(days=1)
-            except Exception as e:
-                asof += timedelta(days=1)
-    except Exception as e:
-        print(f"Error getting close price: {str(e)}")
-        return None
