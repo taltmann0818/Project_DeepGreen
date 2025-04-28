@@ -118,6 +118,23 @@ class TickerData:
 
         return daily[["Ticker", "open", "high", "low", "close", "volume"]]
 
+    def get_index_vol(self, period=14, multiplier=1, timespan="day", limit=50000):
+        aggs_iter = self.client.list_aggs(
+            ticker='I:NDX',
+            multiplier=multiplier,
+            timespan=timespan,
+            from_=self.start_date,
+            to=self.end_date,
+            limit=limit
+        )  # returns an iterator over all pages :contentReference[oaicite:4]{index=4}
+        aggs = pd.DataFrame(aggs_iter)
+        dt_utc = pd.to_datetime(aggs['timestamp'], unit="ms", utc=True) \
+            .dt.tz_convert('America/New_York')  # convert TZ :contentReference[oaicite:5]{index=5}
+        aggs['date'] = dt_utc.dt.normalize()
+        aggs.set_index("date")
+
+        return self.stochastic_rsi(aggs['close'], rsi_period=period, stoch_period=period)
+
     def fetch_stock_data(self, workers=20):
         if not self.start_date:
             self.start_date = (datetime.now() - timedelta(days=self.days)).strftime("%Y-%m-%d")
@@ -447,3 +464,35 @@ def fetch_sql_data(table_name):
     except Exception as e:
         print(f"Error fetching data: {str(e)}")
         return pd.DataFrame()  # Return an empty DataFrame in case of error
+
+def get_market_cap(ticker, asof=None):
+    try:
+        if asof is None:
+            asof = datetime.today().strftime("%Y-%m-%d")
+        client = RESTClient(os.environ["POLYGON_API_KEY"])
+        return client.get_ticker_details(ticker, date=asof).market_cap
+    except Exception as e:
+        print(f"Error getting market cap: {str(e)}")
+
+def get_close_price(ticker, asof=None):
+    try:
+        if asof is None:
+            asof = datetime.today().strftime("%Y-%m-%d")
+        else:
+            asof = datetime.strptime(asof, "%Y-%m-%d").date()
+        while True:
+            if not np.is_busday(asof.strftime("%Y-%m-%d")):
+                asof += timedelta(days=1)
+                continue
+            try:
+                client = RESTClient(os.environ["POLYGON_API_KEY"])
+                response = client.get_daily_open_close_agg(ticker, date=asof.strftime("%Y-%m-%d"))
+                if response and hasattr(response, 'close'):
+                    return response.close
+                else:
+                    asof += timedelta(days=1)
+            except Exception as e:
+                asof += timedelta(days=1)
+    except Exception as e:
+        print(f"Error getting close price: {str(e)}")
+        return None

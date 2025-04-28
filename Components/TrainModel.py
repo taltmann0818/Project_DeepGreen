@@ -5,9 +5,6 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 #from torch.cuda.amp import autocast, GradScaler
-from transformer_engine.common.recipe import Format, DelayedScaling
-import transformer_engine.pytorch as te
-
 import numpy as np
 import pandas as pd
 import math

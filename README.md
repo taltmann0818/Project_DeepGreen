@@ -16,6 +16,9 @@ Streamlit Deployment Link: https://projectdeepgreen-nyuq3jdtij9etdtdnvy87p.strea
 - **Backtesting**: Tools to evaluate model performance on historical market data and generate portfolio performance and tearsheets
 - **Interactive Web Interface**: Built with Streamlit for easy navigation and use
 
+# Architecture
+![Screenshot 2025-04-26 at 11.31.58 AM.png](Screenshot%202025-04-26%20at%2011.31.58%E2%80%AFAM.png)
+
 ## Requirements
 
 Make sure you have Python 3.8.8 installed. Install the required packages by running the following command:
