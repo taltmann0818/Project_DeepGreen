@@ -38,10 +38,9 @@ class CathieWoodAgent:
             limit=5
         )
 
-        market_cap = get_market_cap(ticker, end_date)
         disruptive_analysis = analyze_disruptive_potential(metrics, financial_line_items)
         innovation_analysis = analyze_innovation_growth(metrics, financial_line_items)
-        valuation_analysis = analyze_cathie_wood_valuation(financial_line_items, market_cap)
+        valuation_analysis = analyze_cathie_wood_valuation(financial_line_items, self.metrics['market_cap'])
 
         # Combine partial scores or signals
         total_score = disruptive_analysis["score"] + innovation_analysis["score"] + valuation_analysis["score"]

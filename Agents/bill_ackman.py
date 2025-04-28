@@ -26,18 +26,16 @@ class BillAckmanAgent:
                 "dividends_and_other_cash_distributions",
                 "outstanding_shares",
                 # Optional: intangible_assets if available
-                # "intangible_assets"
+                "intangible_assets"
             ],
             end_date,
             period="annual",
             limit=5
         )
-
-        market_cap = get_market_cap(ticker, end_date)
         quality_analysis = analyze_business_quality(self.metrics, financial_line_items)
         balance_sheet_analysis = analyze_financial_discipline(self.metrics, financial_line_items)
         activism_analysis = analyze_activism_potential(financial_line_items)
-        valuation_analysis = analyze_valuation(financial_line_items, market_cap)
+        valuation_analysis = analyze_valuation(financial_line_items, self.metrics['market_cap'])
 
         # Combine partial scores or signals
         total_score = (
@@ -136,10 +134,10 @@ class BillAckmanAgent:
             details.append("ROE data not available.")
 
         # 4. (Optional) Brand Intangible (if intangible_assets are fetched)
-        # intangible_vals = [item.intangible_assets for item in financial_line_items if item.intangible_assets]
-        # if intangible_vals and sum(intangible_vals) > 0:
-        #     details.append("Significant intangible assets may indicate brand value or proprietary tech.")
-        #     score += 1
+        intangible_vals = [item.intangible_assets for item in financial_line_items if item.intangible_assets]
+        if intangible_vals and sum(intangible_vals) > 0:
+            details.append("Significant intangible assets may indicate brand value or proprietary tech.")
+            score += 1
 
         return {
             "score": score,

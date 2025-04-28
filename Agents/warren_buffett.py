@@ -23,9 +23,7 @@ class WarrenBuffettAgent():
             ],
             end_date,
         )
-
-        market_cap = get_market_cap(ticker, end_date)
-
+        market_cap = self.metrics['market_cap']
         fundamental_analysis = self.analyze_fundamentals(self.metrics)
         consistency_analysis = self.analyze_consistency(financial_line_items)
         moat_analysis = self.analyze_moat(self.metrics)

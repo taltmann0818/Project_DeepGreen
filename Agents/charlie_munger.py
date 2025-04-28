@@ -36,27 +36,10 @@ class CharlieMungerAgent:
             period="annual",
             limit=10  # Munger examines long-term trends
         )
-
-        market_cap = get_market_cap(self.ticker)
-        insider_trades = get_insider_trades(
-            ticker,
-            end_date,
-            # Look back 2 years for insider trading patterns
-            start_date=None,
-            limit=100
-        )
-        progress.update_status("charlie_munger_agent", ticker, "Fetching company news")
-        company_news = get_company_news(
-            ticker,
-            end_date,
-            # Look back 1 year for news
-            start_date=None,
-            limit=100
-        )
         moat_analysis = self.analyze_moat_strength(self.metrics, financial_line_items)
-        management_analysis = self.analyze_management_quality(financial_line_items, insider_trades)
+        management_analysis = self.analyze_management_quality(financial_line_items, None)
         predictability_analysis = self.analyze_predictability(financial_line_items)
-        valuation_analysis = self.calculate_munger_valuation(financial_line_items, market_cap)
+        valuation_analysis = self.calculate_munger_valuation(financial_line_items, self.metrics['market_cap'])
 
         # Combine partial scores with Munger's weighting preferences
         # Munger weights quality and predictability higher than current valuation

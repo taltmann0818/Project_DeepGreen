@@ -44,17 +44,11 @@ class StanleyDruckenmillerAgent():
             period="annual",
             limit=5,
         )
-
-        market_cap = get_market_cap(self.ticker)
-        insider_trades = get_insider_trades(ticker, end_date, start_date=None, limit=50)
-        company_news = get_company_news(ticker, end_date, start_date=None, limit=50)
-        prices = get_prices(ticker, start_date=start_date, end_date=end_date)
-
-        growth_momentum_analysis = self.analyze_growth_and_momentum(financial_line_items, prices)
-        sentiment_analysis = self.analyze_sentiment(company_news)
-        insider_activity = self.analyze_insider_activity(insider_trades)
-        risk_reward_analysis = self.analyze_risk_reward(financial_line_items, market_cap, prices)
-        valuation_analysis = self.analyze_druckenmiller_valuation(financial_line_items, market_cap)
+        growth_momentum_analysis = self.analyze_growth_and_momentum(financial_line_items, self.metrics['share_price'])
+        sentiment_analysis = self.analyze_sentiment(None)
+        insider_activity = self.analyze_insider_activity(None)
+        risk_reward_analysis = self.analyze_risk_reward(financial_line_items, self.metrics['market_cap'], self.metrics['share_price'])
+        valuation_analysis = self.analyze_druckenmiller_valuation(financial_line_items, self.metrics['market_cap'])
 
         # Combine partial scores with weights typical for Druckenmiller:
         #   35% Growth/Momentum, 20% Risk/Reward, 20% Valuation,

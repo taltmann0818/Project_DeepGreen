@@ -1,19 +1,4 @@
-from graph.state import AgentState, show_agent_reasoning
-from tools.api import (
-    get_financial_metrics,
-    get_market_cap,
-    search_line_items,
-    get_insider_trades,
-    get_company_news,
-    get_prices,
-)
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.messages import HumanMessage
-from pydantic import BaseModel
-import json
-from typing_extensions import Literal
-from utils.progress import progress
-from utils.llm import call_llm
+
 
 
 class PeterLynchAgent():
@@ -57,15 +42,11 @@ class PeterLynchAgent():
             period="annual",
             limit=5,
         )
-        market_cap = get_market_cap(ticker, end_date)
-        insider_trades = get_insider_trades(ticker, end_date, start_date=None, limit=50)
-        company_news = get_company_news(ticker, end_date, start_date=None, limit=50)
-
         growth_analysis = analyze_lynch_growth(financial_line_items)
         fundamentals_analysis = analyze_lynch_fundamentals(financial_line_items)
-        valuation_analysis = analyze_lynch_valuation(financial_line_items, market_cap)
-        sentiment_analysis = analyze_sentiment(company_news)
-        insider_activity = analyze_insider_activity(insider_trades)
+        valuation_analysis = analyze_lynch_valuation(financial_line_items, self.metrics['market_cap'])
+        sentiment_analysis = analyze_sentiment(None)
+        insider_activity = analyze_insider_activity(None)
 
         # Combine partial scores with weights typical for Peter Lynch:
         #   30% Growth, 25% Valuation, 20% Fundamentals,

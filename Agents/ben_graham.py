@@ -17,12 +17,11 @@ class BenGrahamAgent:
     def analyze(self):
         #metrics = get_financial_metrics(ticker, end_date, period="annual", limit=10)
         financial_line_items = search_line_items(ticker, ["earnings_per_share", "revenue", "net_income", "book_value_per_share", "total_assets", "total_liabilities", "current_assets", "current_liabilities", "dividends_and_other_cash_distributions", "outstanding_shares"], end_date, period="annual", limit=10)
-        market_cap = get_market_cap(ticker, end_date)
 
         # Perform sub-analyses
         earnings_analysis = self.analyze_earnings_stability(self.metrics, financial_line_items)
         strength_analysis = self.analyze_financial_strength(self.metrics, financial_line_items)
-        valuation_analysis = self.analyze_valuation_graham(self.metrics, financial_line_items, market_cap)
+        valuation_analysis = self.analyze_valuation_graham(self.metrics, financial_line_items, self.metrics['market_cap'])
 
         # Aggregate scoring
         total_score = earnings_analysis["score"] + strength_analysis["score"] + valuation_analysis["score"]
