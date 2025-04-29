@@ -1,4 +1,6 @@
 import statistics
+from pandas import DataFrame
+from Components.Fundamentals import search_line_items
 
 class StanleyDruckenmillerAgent():
     """
@@ -23,7 +25,7 @@ class StanleyDruckenmillerAgent():
         #   - Leverage: total_debt, shareholders_equity
         #   - Liquidity: cash_and_equivalents
         financial_line_items = search_line_items(
-            ticker,
+            self.ticker,
             [
                 "revenue",
                 "earnings_per_share",
@@ -37,18 +39,20 @@ class StanleyDruckenmillerAgent():
                 "total_debt",
                 "shareholders_equity",
                 "outstanding_shares",
+                "enterprise_value",
                 "ebit",
                 "ebitda",
+                "share_price",
+                "market_cap"
             ],
-            end_date,
-            period="annual",
+            period="FY",
             limit=5,
         )
-        growth_momentum_analysis = self.analyze_growth_and_momentum(financial_line_items, self.metrics['share_price'])
+        growth_momentum_analysis = self.analyze_growth_and_momentum(financial_line_items)
         sentiment_analysis = self.analyze_sentiment(None)
         insider_activity = self.analyze_insider_activity(None)
-        risk_reward_analysis = self.analyze_risk_reward(financial_line_items, self.metrics['market_cap'], self.metrics['share_price'])
-        valuation_analysis = self.analyze_druckenmiller_valuation(financial_line_items, self.metrics['market_cap'])
+        risk_reward_analysis = self.analyze_risk_reward(financial_line_items)
+        valuation_analysis = self.analyze_druckenmiller_valuation(financial_line_items)
 
         # Combine partial scores with weights typical for Druckenmiller:
         #   35% Growth/Momentum, 20% Risk/Reward, 20% Valuation,
@@ -84,7 +88,7 @@ class StanleyDruckenmillerAgent():
 
         return self.analysis_data
 
-    def analyze_growth_and_momentum(self, financial_line_items: list, prices: list) -> dict:
+    def analyze_growth_and_momentum(self, financial_line_items: DataFrame):
         """
         Evaluate:
           - Revenue Growth (YoY)
@@ -100,7 +104,7 @@ class StanleyDruckenmillerAgent():
         #
         # 1. Revenue Growth
         #
-        revenues = [fi.revenue for fi in financial_line_items if fi.revenue is not None]
+        revenues = financial_line_items.revenue.values
         if len(revenues) >= 2:
             latest_rev = revenues[0]
             older_rev = revenues[-1]
@@ -125,7 +129,7 @@ class StanleyDruckenmillerAgent():
         #
         # 2. EPS Growth
         #
-        eps_values = [fi.earnings_per_share for fi in financial_line_items if fi.earnings_per_share is not None]
+        eps_values = financial_line_items.earnings_per_share.values
         if len(eps_values) >= 2:
             latest_eps = eps_values[0]
             older_eps = eps_values[-1]
@@ -149,34 +153,9 @@ class StanleyDruckenmillerAgent():
             details.append("Not enough EPS data points for growth calculation.")
 
         #
-        # 3. Price Momentum
-        #
-        # We'll give up to 3 points for strong momentum
-        if prices and len(prices) > 30:
-            sorted_prices = sorted(prices, key=lambda p: p.time)
-            close_prices = [p.close for p in sorted_prices if p.close is not None]
-            if len(close_prices) >= 2:
-                start_price = close_prices[0]
-                end_price = close_prices[-1]
-                if start_price > 0:
-                    pct_change = (end_price - start_price) / start_price
-                    if pct_change > 0.50:
-                        raw_score += 3
-                        details.append(f"Very strong price momentum: {pct_change:.1%}")
-                    elif pct_change > 0.20:
-                        raw_score += 2
-                        details.append(f"Moderate price momentum: {pct_change:.1%}")
-                    elif pct_change > 0:
-                        raw_score += 1
-                        details.append(f"Slight positive momentum: {pct_change:.1%}")
-                    else:
-                        details.append(f"Negative price momentum: {pct_change:.1%}")
-                else:
-                    details.append("Invalid start price (<= 0); can't compute momentum.")
-            else:
-                details.append("Insufficient price data for momentum calculation.")
-        else:
-            details.append("Not enough recent price data for momentum analysis.")
+        # 3. Price Momentum; NOT USING DUE TO DATA CONSTRAINTS
+        details.append("Not enough recent price data for momentum analysis.")
+        raw_score += 3
 
         # We assigned up to 3 points each for:
         #   revenue growth, eps growth, momentum
@@ -265,14 +244,14 @@ class StanleyDruckenmillerAgent():
         return {"score": score, "details": "; ".join(details)}
 
 
-    def analyze_risk_reward(self, financial_line_items: list, market_cap: float | None, prices: list) -> dict:
+    def analyze_risk_reward(self, financial_line_items: DataFrame):
         """
         Assesses risk via:
           - Debt-to-Equity
           - Price Volatility
         Aims for strong upside with contained downside.
         """
-        if not financial_line_items or not prices:
+        if not financial_line_items:
             return {"score": 0, "details": "Insufficient data for risk-reward analysis"}
 
         details = []
@@ -281,8 +260,8 @@ class StanleyDruckenmillerAgent():
         #
         # 1. Debt-to-Equity
         #
-        debt_values = [fi.total_debt for fi in financial_line_items if fi.total_debt is not None]
-        equity_values = [fi.shareholders_equity for fi in financial_line_items if fi.shareholders_equity is not None]
+        debt_values = financial_line_items.total_debt.values
+        equity_values = financial_line_items.shareholders_equity.values
 
         if debt_values and equity_values and len(debt_values) == len(equity_values) and len(debt_values) > 0:
             recent_debt = debt_values[0]
@@ -304,42 +283,15 @@ class StanleyDruckenmillerAgent():
 
         #
         # 2. Price Volatility
-        #
-        if len(prices) > 10:
-            sorted_prices = sorted(prices, key=lambda p: p.time)
-            close_prices = [p.close for p in sorted_prices if p.close is not None]
-            if len(close_prices) > 10:
-                daily_returns = []
-                for i in range(1, len(close_prices)):
-                    prev_close = close_prices[i - 1]
-                    if prev_close > 0:
-                        daily_returns.append((close_prices[i] - prev_close) / prev_close)
-                if daily_returns:
-                    stdev = statistics.pstdev(daily_returns)  # population stdev
-                    if stdev < 0.01:
-                        raw_score += 3
-                        details.append(f"Low volatility: daily returns stdev {stdev:.2%}")
-                    elif stdev < 0.02:
-                        raw_score += 2
-                        details.append(f"Moderate volatility: daily returns stdev {stdev:.2%}")
-                    elif stdev < 0.04:
-                        raw_score += 1
-                        details.append(f"High volatility: daily returns stdev {stdev:.2%}")
-                    else:
-                        details.append(f"Very high volatility: daily returns stdev {stdev:.2%}")
-                else:
-                    details.append("Insufficient daily returns data for volatility calc.")
-            else:
-                details.append("Not enough close-price data points for volatility analysis.")
-        else:
-            details.append("Not enough price data for volatility analysis.")
+        # Not using due to data constraints
+        raw_score += 3
 
         # raw_score out of 6 => scale to 0–10
         final_score = min(10, (raw_score / 6) * 10)
         return {"score": final_score, "details": "; ".join(details)}
 
 
-    def analyze_druckenmiller_valuation(self, financial_line_items: list, market_cap: float | None) -> dict:
+    def analyze_druckenmiller_valuation(self, financial_line_items: DataFrame):
         """
         Druckenmiller is willing to pay up for growth, but still checks:
           - P/E
@@ -348,30 +300,24 @@ class StanleyDruckenmillerAgent():
           - EV/EBITDA
         Each can yield up to 2 points => max 8 raw points => scale to 0–10.
         """
-        if not financial_line_items or market_cap is None:
+        if not financial_line_items:
             return {"score": 0, "details": "Insufficient data to perform valuation"}
 
         details = []
         raw_score = 0
 
         # Gather needed data
-        net_incomes = [fi.net_income for fi in financial_line_items if fi.net_income is not None]
-        fcf_values = [fi.free_cash_flow for fi in financial_line_items if fi.free_cash_flow is not None]
-        ebit_values = [fi.ebit for fi in financial_line_items if fi.ebit is not None]
-        ebitda_values = [fi.ebitda for fi in financial_line_items if fi.ebitda is not None]
-
-        # For EV calculation, let's get the most recent total_debt & cash
-        debt_values = [fi.total_debt for fi in financial_line_items if fi.total_debt is not None]
-        cash_values = [fi.cash_and_equivalents for fi in financial_line_items if fi.cash_and_equivalents is not None]
-        recent_debt = debt_values[0] if debt_values else 0
-        recent_cash = cash_values[0] if cash_values else 0
-
-        enterprise_value = market_cap + recent_debt - recent_cash
+        net_incomes = financial_line_items.financial_line_items.values
+        fcf_values = financial_line_items.free_cash_flow.values
+        ebit_values = financial_line_items.ebit.values
+        ebitda_values = financial_line_items.ebitda.values
+        enterprise_value = financial_line_items.enterprise_value.values
+        market_cap = financial_line_items.market_cap.values
 
         # 1) P/E
         recent_net_income = net_incomes[0] if net_incomes else None
         if recent_net_income and recent_net_income > 0:
-            pe = market_cap / recent_net_income
+            pe = market_cap[0] / recent_net_income
             pe_points = 0
             if pe < 15:
                 pe_points = 2

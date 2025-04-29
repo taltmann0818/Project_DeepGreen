@@ -1,4 +1,6 @@
 import statistics
+from pandas import DataFrame
+from Components.Fundamentals import search_line_items
 
 class PhilFisherAgent():
     """
@@ -40,16 +42,16 @@ class PhilFisherAgent():
                 "cash_and_equivalents",
                 "ebit",
                 "ebitda",
+                "market_cap"
             ],
-            end_date,
-            period="annual",
+            period="FY",
             limit=5,
         )
 
         growth_quality = analyze_fisher_growth_quality(financial_line_items)
         margins_stability = analyze_margins_stability(financial_line_items)
         mgmt_efficiency = analyze_management_efficiency_leverage(financial_line_items)
-        fisher_valuation = analyze_fisher_valuation(financial_line_items, self.metrics['market_cap'])
+        fisher_valuation = analyze_fisher_valuation(financial_line_items)
         insider_activity = analyze_insider_activity(None)
         sentiment_analysis = analyze_sentiment(None)
 
@@ -94,7 +96,7 @@ class PhilFisherAgent():
         return self.analysis_data
 
 
-def analyze_fisher_growth_quality(financial_line_items: list) -> dict:
+def analyze_fisher_growth_quality(financial_line_items: DataFrame):
     """
     Evaluate growth & quality:
       - Consistent Revenue Growth
@@ -111,7 +113,7 @@ def analyze_fisher_growth_quality(financial_line_items: list) -> dict:
     raw_score = 0  # up to 9 raw points => scale to 0–10
 
     # 1. Revenue Growth (YoY)
-    revenues = [fi.revenue for fi in financial_line_items if fi.revenue is not None]
+    revenues = financial_line_items.revenue.values
     if len(revenues) >= 2:
         # We'll look at the earliest vs. latest to gauge multi-year growth if possible
         latest_rev = revenues[0]
@@ -135,7 +137,7 @@ def analyze_fisher_growth_quality(financial_line_items: list) -> dict:
         details.append("Not enough revenue data points for growth calculation.")
 
     # 2. EPS Growth (YoY)
-    eps_values = [fi.earnings_per_share for fi in financial_line_items if fi.earnings_per_share is not None]
+    eps_values = financial_line_items.earnings_per_share.values
     if len(eps_values) >= 2:
         latest_eps = eps_values[0]
         oldest_eps = eps_values[-1]
@@ -158,7 +160,7 @@ def analyze_fisher_growth_quality(financial_line_items: list) -> dict:
         details.append("Not enough EPS data points for growth calculation.")
 
     # 3. R&D as % of Revenue (if we have R&D data)
-    rnd_values = [fi.research_and_development for fi in financial_line_items if fi.research_and_development is not None]
+    rnd_values = financial_line_items.research_and_development.values
     if rnd_values and revenues and len(rnd_values) == len(revenues):
         # We'll just look at the most recent for a simple measure
         recent_rnd = rnd_values[0]
@@ -185,7 +187,7 @@ def analyze_fisher_growth_quality(financial_line_items: list) -> dict:
     return {"score": final_score, "details": "; ".join(details)}
 
 
-def analyze_margins_stability(financial_line_items: list) -> dict:
+def analyze_margins_stability(financial_line_items: DataFrame):
     """
     Looks at margin consistency (gross/operating margin) and general stability over time.
     """
@@ -199,7 +201,7 @@ def analyze_margins_stability(financial_line_items: list) -> dict:
     raw_score = 0  # up to 6 => scale to 0-10
 
     # 1. Operating Margin Consistency
-    op_margins = [fi.operating_margin for fi in financial_line_items if fi.operating_margin is not None]
+    op_margins = financial_line_items.operating_margin.values
     if len(op_margins) >= 2:
         # Check if margins are stable or improving (comparing oldest to newest)
         oldest_op_margin = op_margins[-1]
@@ -216,7 +218,7 @@ def analyze_margins_stability(financial_line_items: list) -> dict:
         details.append("Not enough operating margin data points")
 
     # 2. Gross Margin Level
-    gm_values = [fi.gross_margin for fi in financial_line_items if fi.gross_margin is not None]
+    gm_values = financial_line_items.gross_margin.values
     if gm_values:
         # We'll just take the most recent
         recent_gm = gm_values[0]
@@ -251,7 +253,7 @@ def analyze_margins_stability(financial_line_items: list) -> dict:
     return {"score": final_score, "details": "; ".join(details)}
 
 
-def analyze_management_efficiency_leverage(financial_line_items: list) -> dict:
+def analyze_management_efficiency_leverage(financial_line_items: DataFrame):
     """
     Evaluate management efficiency & leverage:
       - Return on Equity (ROE)
@@ -268,8 +270,8 @@ def analyze_management_efficiency_leverage(financial_line_items: list) -> dict:
     raw_score = 0  # up to 6 => scale to 0–10
 
     # 1. Return on Equity (ROE)
-    ni_values = [fi.net_income for fi in financial_line_items if fi.net_income is not None]
-    eq_values = [fi.shareholders_equity for fi in financial_line_items if fi.shareholders_equity is not None]
+    ni_values = financial_line_items.net_income.values
+    eq_values = financial_line_items.shareholders_equity.values
     if ni_values and eq_values and len(ni_values) == len(eq_values):
         recent_ni = ni_values[0]
         recent_eq = eq_values[0] if eq_values[0] else 1e-9
@@ -292,7 +294,7 @@ def analyze_management_efficiency_leverage(financial_line_items: list) -> dict:
         details.append("Insufficient data for ROE calculation")
 
     # 2. Debt-to-Equity
-    debt_values = [fi.total_debt for fi in financial_line_items if fi.total_debt is not None]
+    debt_values = financial_line_items.total_debt.values
     if debt_values and eq_values and len(debt_values) == len(eq_values):
         recent_debt = debt_values[0]
         recent_equity = eq_values[0] if eq_values[0] else 1e-9
@@ -309,7 +311,7 @@ def analyze_management_efficiency_leverage(financial_line_items: list) -> dict:
         details.append("Insufficient data for debt/equity analysis")
 
     # 3. FCF Consistency
-    fcf_values = [fi.free_cash_flow for fi in financial_line_items if fi.free_cash_flow is not None]
+    fcf_values = financial_line_items.free_cash_flow.values
     if fcf_values and len(fcf_values) >= 2:
         # Check if FCF is positive in recent years
         positive_fcf_count = sum(1 for x in fcf_values if x and x > 0)
@@ -327,7 +329,7 @@ def analyze_management_efficiency_leverage(financial_line_items: list) -> dict:
     return {"score": final_score, "details": "; ".join(details)}
 
 
-def analyze_fisher_valuation(financial_line_items: list, market_cap: float | None) -> dict:
+def analyze_fisher_valuation(financial_line_items: DataFrame):
     """
     Phil Fisher is willing to pay for quality and growth, but still checks:
       - P/E
@@ -335,20 +337,21 @@ def analyze_fisher_valuation(financial_line_items: list, market_cap: float | Non
       - (Optionally) Enterprise Value metrics, but simpler approach is typical
     We will grant up to 2 points for each of two metrics => max 4 raw => scale to 0–10.
     """
-    if not financial_line_items or market_cap is None:
+    if not financial_line_items:
         return {"score": 0, "details": "Insufficient data to perform valuation"}
 
     details = []
     raw_score = 0
 
     # Gather needed data
-    net_incomes = [fi.net_income for fi in financial_line_items if fi.net_income is not None]
-    fcf_values = [fi.free_cash_flow for fi in financial_line_items if fi.free_cash_flow is not None]
+    net_incomes = financial_line_items.net_income.values
+    fcf_values = financial_line_items.free_cash_flow.values
+    market_cap = financial_line_items.market_cap.values
 
     # 1) P/E
     recent_net_income = net_incomes[0] if net_incomes else None
     if recent_net_income and recent_net_income > 0:
-        pe = market_cap / recent_net_income
+        pe = market_cap[0] / recent_net_income
         pe_points = 0
         if pe < 20:
             pe_points = 2
@@ -365,7 +368,7 @@ def analyze_fisher_valuation(financial_line_items: list, market_cap: float | Non
     # 2) P/FCF
     recent_fcf = fcf_values[0] if fcf_values else None
     if recent_fcf and recent_fcf > 0:
-        pfcf = market_cap / recent_fcf
+        pfcf = market_cap[0] / recent_fcf
         pfcf_points = 0
         if pfcf < 20:
             pfcf_points = 2

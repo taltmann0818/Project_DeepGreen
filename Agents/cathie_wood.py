@@ -1,3 +1,4 @@
+from Components.Fundamentals import search_line_items
 
 class CathieWoodAgent:
     """
@@ -33,8 +34,7 @@ class CathieWoodAgent:
                 "operating_expense",
 
             ],
-            end_date,
-            period="annual",
+            period="FY",
             limit=5
         )
 

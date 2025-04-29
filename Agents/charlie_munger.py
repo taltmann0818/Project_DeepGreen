@@ -1,3 +1,4 @@
+from Components.Fundamentals import search_line_items
 
 class CharlieMungerAgent:
     """
@@ -32,8 +33,7 @@ class CharlieMungerAgent:
                 "research_and_development",
                 "goodwill_and_intangible_assets",
             ],
-            end_date,
-            period="annual",
+            period="FY",
             limit=10  # Munger examines long-term trends
         )
         moat_analysis = self.analyze_moat_strength(self.metrics, financial_line_items)
