@@ -14,7 +14,7 @@ class FundementalData:
         """
         Initialize the FundamentalData class with a ticker symbol and number of past days to fetch.
         """
-        self.client = RESTClient(os.environ["POLYGON_API_KEY"])
+        self.client = RESTClient("XizU4KyrwjCA6bxHrR5_eQnUxwFFUnI2")
         self.tickers = tickers
 
         self.current_date = kwargs.get('end_date', datetime.today())
@@ -104,27 +104,20 @@ class FundementalData:
         fundementals['ebitda'] = fundementals['ebit'] + self.financial_data[
             'income_statement.depreciation_and_amortization.value']
         fundementals['enterprise_value_to_ebitda_ratio'] = fundementals['enterprise_value'] / fundementals['ebitda']
-        fundementals['pe_ratio'] = self.financial_data['share_price'] / self.financial_data[
-            'income_statement.basic_earnings_per_share.value']
-        fundementals['free_cash_flow'] = self.financial_data[
-                                             'cash_flow_statement.net_cash_flow_from_operating_activities.value'] + \
-                                         self.financial_data['income_statement.interest_and_debt_expense.value'] - self.financial_data[
-                                             'income_statement.income_tax_expense_benefit.value'] - self.financial_data[
-                                             'cash_flow_statement.net_cash_flow_from_investing_activities.value']
-        fundementals['fcf_per_share'] = fundementals['free_cash_flow'] / self.financial_data[
-            'income_statement.basic_average_shares.value']
-        fundementals['price_to_fcf'] = self.financial_data['market_cap'] / fundementals['free_cash_flow']
+        #fundementals['pe_ratio'] = self.financial_data['share_price'] / self.financial_data[
+        #    'income_statement.basic_earnings_per_share.value']
+        fundementals['free_cash_flow'] = self.financial_data['cash_flow_statement.net_cash_flow_from_operating_activities.value']-self.financial_data['cash_flow_statement.net_cash_flow_from_investing_activities.value']
         fundementals['net_margin'] = self.financial_data['income_statement.net_income_loss.value'] / self.financial_data[
             'income_statement.revenues.value']
         self.financial_data['book_value_per_share'] = self.financial_data['balance_sheet.equity.value'] / self.financial_data[
             'income_statement.basic_average_shares.value']
         fundementals['book_value_per_share'] = self.financial_data['book_value_per_share']
-        fundementals['price_to_book_ratio'] = self.financial_data['share_price'] / self.financial_data['book_value_per_share']
+        #fundementals['price_to_book_ratio'] = self.financial_data['share_price'] / self.financial_data['book_value_per_share']
         fundementals['current_ratio'] = self.financial_data['balance_sheet.current_assets.value'] / self.financial_data[
             'balance_sheet.liabilities.value']
-        fundementals['price_to_sales'] = self.financial_data['share_price'] / (
-                    self.financial_data['income_statement.revenues.value'] / self.financial_data[
-                'income_statement.basic_average_shares.value'])
+        #fundementals['price_to_sales'] = self.financial_data['share_price'] / (
+        #            self.financial_data['income_statement.revenues.value'] / self.financial_data[
+        #        'income_statement.basic_average_shares.value'])
         fundementals['return_on_invested_capital'] = (self.financial_data['income_statement.net_income_loss.value'] - self.financial_data[
             'income_statement.common_stock_dividends.value']) / (self.financial_data['balance_sheet.equity.value'] + self.financial_data[
             'balance_sheet.liabilities.value'])
@@ -140,7 +133,7 @@ class FundementalData:
         fundementals['total_liabilities'] = self.financial_data['balance_sheet.liabilities.value']
         fundementals['total_debt'] = self.financial_data['balance_sheet.liabilities.value']
         fundementals['current_assets'] = self.financial_data['balance_sheet.current_assets.value']
-        fundementals['total_assets'] = self.financial_data['balance_sheet.current_liabilities.value']
+        fundementals['current_liabilities'] = self.financial_data['balance_sheet.current_liabilities.value']
         fundementals['dividends_and_other_cash_distributions'] = self.financial_data[
             'income_statement.preferred_stock_dividends_and_other_adjustments.value']
         fundementals['issuance_or_purchase_of_equity_shares'] = self.financial_data[
@@ -157,7 +150,8 @@ class FundementalData:
         fundementals['depreciation_and_amortization'] = self.financial_data[
             'income_statement.depreciation_and_amortization.value']
         fundementals['earnings_per_share'] = self.financial_data['income_statement.basic_earnings_per_share.value']
-        fundementals['share_price'] = self.financial_data['share_price']
+        #fundementals['share_price'] = self.financial_data['share_price']
+        fundementals['market_cap'] = self.financial_data['market_cap']
         fundementals['intangible_assets'] = self.financial_data['balance_sheet.intangible_assets.value']
 
         return fundementals.set_index('end_date')
@@ -221,7 +215,7 @@ def search_line_items(ticker: str, line_items: list, period: str, limit: int = 5
     if missing_columns:
         print(f"Warning: Missing columns in DataFrame: {missing_columns}")
 
-    filtered = filtered[columns_available].sort_index(ascending=False)
+    filtered = filtered[columns_available].sort_index(ascending=True)
 
     # Apply row limit
     return filtered.head(limit)

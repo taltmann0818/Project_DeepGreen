@@ -46,8 +46,10 @@ class PhilFisherAgent():
             ],
             period="FY",
             limit=5,
+            df=self.metrics
         )
-
+        
+        # Perform sub-analyses
         growth_quality = analyze_fisher_growth_quality(financial_line_items)
         margins_stability = analyze_margins_stability(financial_line_items)
         mgmt_efficiency = analyze_management_efficiency_leverage(financial_line_items)
@@ -103,7 +105,7 @@ def analyze_fisher_growth_quality(financial_line_items: DataFrame):
       - Consistent EPS Growth
       - R&D as a % of Revenue (if relevant, indicative of future-oriented spending)
     """
-    if not financial_line_items or len(financial_line_items) < 2:
+    if financial_line_items.empty or len(financial_line_items) < 2:
         return {
             "score": 0,
             "details": "Insufficient financial data for growth/quality analysis",
@@ -161,7 +163,7 @@ def analyze_fisher_growth_quality(financial_line_items: DataFrame):
 
     # 3. R&D as % of Revenue (if we have R&D data)
     rnd_values = financial_line_items.research_and_development.values
-    if rnd_values and revenues and len(rnd_values) == len(revenues):
+    if rnd_values.any() and revenues.any() and len(rnd_values) == len(revenues):
         # We'll just look at the most recent for a simple measure
         recent_rnd = rnd_values[0]
         recent_rev = revenues[0] if revenues[0] else 1e-9
@@ -191,7 +193,7 @@ def analyze_margins_stability(financial_line_items: DataFrame):
     """
     Looks at margin consistency (gross/operating margin) and general stability over time.
     """
-    if not financial_line_items or len(financial_line_items) < 2:
+    if financial_line_items.empty or len(financial_line_items) < 2:
         return {
             "score": 0,
             "details": "Insufficient data for margin stability analysis",
@@ -219,7 +221,7 @@ def analyze_margins_stability(financial_line_items: DataFrame):
 
     # 2. Gross Margin Level
     gm_values = financial_line_items.gross_margin.values
-    if gm_values:
+    if gm_values.any():
         # We'll just take the most recent
         recent_gm = gm_values[0]
         if recent_gm > 0.5:
@@ -260,7 +262,7 @@ def analyze_management_efficiency_leverage(financial_line_items: DataFrame):
       - Debt-to-Equity ratio
       - Possibly check if free cash flow is consistently positive
     """
-    if not financial_line_items:
+    if financial_line_items.empty:
         return {
             "score": 0,
             "details": "No financial data for management efficiency analysis",
@@ -272,7 +274,7 @@ def analyze_management_efficiency_leverage(financial_line_items: DataFrame):
     # 1. Return on Equity (ROE)
     ni_values = financial_line_items.net_income.values
     eq_values = financial_line_items.shareholders_equity.values
-    if ni_values and eq_values and len(ni_values) == len(eq_values):
+    if ni_values.any() and eq_values.any() and len(ni_values) == len(eq_values):
         recent_ni = ni_values[0]
         recent_eq = eq_values[0] if eq_values[0] else 1e-9
         if recent_ni > 0:
@@ -295,7 +297,7 @@ def analyze_management_efficiency_leverage(financial_line_items: DataFrame):
 
     # 2. Debt-to-Equity
     debt_values = financial_line_items.total_debt.values
-    if debt_values and eq_values and len(debt_values) == len(eq_values):
+    if debt_values.any() and eq_values.any() and len(debt_values) == len(eq_values):
         recent_debt = debt_values[0]
         recent_equity = eq_values[0] if eq_values[0] else 1e-9
         dte = recent_debt / recent_equity
@@ -312,7 +314,7 @@ def analyze_management_efficiency_leverage(financial_line_items: DataFrame):
 
     # 3. FCF Consistency
     fcf_values = financial_line_items.free_cash_flow.values
-    if fcf_values and len(fcf_values) >= 2:
+    if fcf_values.any() and len(fcf_values) >= 2:
         # Check if FCF is positive in recent years
         positive_fcf_count = sum(1 for x in fcf_values if x and x > 0)
         # We'll be simplistic: if most are positive, reward
@@ -337,7 +339,7 @@ def analyze_fisher_valuation(financial_line_items: DataFrame):
       - (Optionally) Enterprise Value metrics, but simpler approach is typical
     We will grant up to 2 points for each of two metrics => max 4 raw => scale to 0–10.
     """
-    if not financial_line_items:
+    if financial_line_items.empty:
         return {"score": 0, "details": "Insufficient data to perform valuation"}
 
     details = []
@@ -349,7 +351,7 @@ def analyze_fisher_valuation(financial_line_items: DataFrame):
     market_cap = financial_line_items.market_cap.values
 
     # 1) P/E
-    recent_net_income = net_incomes[0] if net_incomes else None
+    recent_net_income = net_incomes[0] if net_incomes.any() else None
     if recent_net_income and recent_net_income > 0:
         pe = market_cap[0] / recent_net_income
         pe_points = 0
@@ -366,7 +368,7 @@ def analyze_fisher_valuation(financial_line_items: DataFrame):
         details.append("No positive net income for P/E calculation")
 
     # 2) P/FCF
-    recent_fcf = fcf_values[0] if fcf_values else None
+    recent_fcf = fcf_values[0] if fcf_values.any() else None
     if recent_fcf and recent_fcf > 0:
         pfcf = market_cap[0] / recent_fcf
         pfcf_points = 0
