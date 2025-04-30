@@ -1,5 +1,4 @@
-
-
+from pandas import DataFrame
 
 class PeterLynchAgent():
     """
@@ -211,7 +210,7 @@ class PeterLynchAgent():
         return {"score": final_score, "details": "; ".join(details)}
 
 
-    def analyze_lynch_valuation(self, financial_line_items: list, market_cap: float | None) -> dict:
+    def analyze_lynch_valuation(self, financial_line_items: DataFrame):
         """
         Peter Lynch's approach to 'Growth at a Reasonable Price' (GARP):
           - Emphasize the PEG ratio: (P/E) / Growth Rate

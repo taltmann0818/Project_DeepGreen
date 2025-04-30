@@ -114,10 +114,10 @@ class ValuationAgent():
 #############################
 
     def calculate_owner_earnings_value(self,
-        net_income: float | None,
-        depreciation: float | None,
-        capex: float | None,
-        working_capital_change: float | None,
+        net_income: float,
+        depreciation: float,
+        capex: float,
+        working_capital_change: float,
         growth_rate: float = 0.05,
         required_return: float = 0.15,
         margin_of_safety: float = 0.25,
@@ -147,7 +147,7 @@ class ValuationAgent():
 
 
     def calculate_intrinsic_value(self,
-        free_cash_flow: float | None,
+        free_cash_flow: float,
         growth_rate: float = 0.05,
         discount_rate: float = 0.10,
         terminal_growth_rate: float = 0.02,
@@ -190,9 +190,9 @@ class ValuationAgent():
 
 
     def calculate_residual_income_value(self,
-        market_cap: float | None,
-        net_income: float | None,
-        price_to_book_ratio: float | None,
+        market_cap: float,
+        net_income: float,
+        price_to_book_ratio: float,
         book_value_growth: float = 0.03,
         cost_of_equity: float = 0.10,
         terminal_growth_rate: float = 0.03,

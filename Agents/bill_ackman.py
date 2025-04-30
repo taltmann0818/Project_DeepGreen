@@ -27,6 +27,7 @@ class BillAckmanAgent:
                 "total_liabilities",
                 "dividends_and_other_cash_distributions",
                 "outstanding_shares",
+                "return_on_equity",
                 # Optional: intangible_assets if available
                 "intangible_assets",
                 "market_cap"
@@ -105,7 +106,7 @@ def analyze_business_quality(financial_line_items: DataFrame):
     # 2. Operating margin and free cash flow consistency
     fcf_vals = financial_line_items.free_cash_flow.values
     op_margin_vals = financial_line_items.operating_margin.values
-    if op_margin_vals.any():
+    if op_margin_vals is not None:
         above_15 = sum(1 for m in op_margin_vals if m > 0.15)
         if above_15 >= (len(op_margin_vals) // 2 + 1):
             score += 2
@@ -115,7 +116,7 @@ def analyze_business_quality(financial_line_items: DataFrame):
     else:
         details.append("No operating margin data across periods.")
 
-    if fcf_vals.any():
+    if fcf_vals is not None:
         positive_fcf_count = sum(1 for f in fcf_vals if f > 0)
         if positive_fcf_count >= (len(fcf_vals) // 2 + 1):
             score += 1
@@ -126,7 +127,7 @@ def analyze_business_quality(financial_line_items: DataFrame):
         details.append("No free cash flow data across periods.")
 
     # 3. Return on Equity (ROE) check from the latest metrics
-    return_on_equity = financial_line_items.return_on_equity.values[0] if financial_line_items.return_on_equity.values.any() else None
+    return_on_equity = financial_line_items.return_on_equity.values[0]
     if return_on_equity and return_on_equity > 0.15:
         score += 2
         details.append(f"High ROE of {return_on_equity:.1%}, indicating a competitive advantage.")
@@ -137,7 +138,7 @@ def analyze_business_quality(financial_line_items: DataFrame):
 
     # 4. (Optional) Brand Intangible (if intangible_assets are fetched)
     intangible_vals = financial_line_items.intangible_assets.values if financial_line_items.intangible_assets.values.any() else None
-    if intangible_vals.any() and sum(intangible_vals) > 0:
+    if intangible_vals is not None and sum(intangible_vals) > 0:
         details.append("Significant intangible assets may indicate brand value or proprietary tech.")
         score += 1
 
@@ -164,7 +165,7 @@ def analyze_financial_discipline(financial_line_items: DataFrame):
 
     # 1. Multi-period debt ratio or debt_to_equity
     debt_to_equity_vals = financial_line_items.debt_to_equity.values if financial_line_items.debt_to_equity.values.any() else None
-    if debt_to_equity_vals.any():
+    if debt_to_equity_vals is not None:
         below_one_count = sum(1 for d in debt_to_equity_vals if d < 1.0)
         if below_one_count >= (len(debt_to_equity_vals) // 2 + 1):
             score += 2
@@ -176,7 +177,7 @@ def analyze_financial_discipline(financial_line_items: DataFrame):
 
     # 2. Capital allocation approach (dividends + share counts)
     dividends_list = financial_line_items.dividends_and_other_cash_distributions.values if financial_line_items.dividends_and_other_cash_distributions.values.any() else None
-    if dividends_list.any():
+    if dividends_list is not None:
         paying_dividends_count = sum(1 for d in dividends_list if d < 0)
         if paying_dividends_count >= (len(dividends_list) // 2 + 1):
             score += 1
@@ -212,7 +213,7 @@ def analyze_activism_potential(financial_line_items: DataFrame):
     - Look for positive revenue trends but subpar margins
     - That may indicate 'activism upside' if operational improvements could unlock value.
     """
-    if not financial_line_items:
+    if financial_line_items.empty:
         return {
             "score": 0,
             "details": "Insufficient data for activism potential"
@@ -228,7 +229,7 @@ def analyze_activism_potential(financial_line_items: DataFrame):
             "details": "Not enough data to assess activism potential (need multi-year revenue + margins)."
         }
 
-    initial, final = revenues[0], revenues[-1]
+    initial, final = revenues[-1], revenues[0]
     revenue_growth = (final - initial) / abs(initial) if initial else 0
     avg_margin = sum(op_margins) / len(op_margins)
 
@@ -253,14 +254,14 @@ def analyze_valuation(financial_line_items: DataFrame):
     Ackman invests in companies trading at a discount to intrinsic value.
     Uses a simplified DCF with FCF as a proxy, plus margin of safety analysis.
     """
-    if not financial_line_items or market_cap is None:
+    if financial_line_items.empty or not financial_line_items.market_cap.values.any():
         return {
             "score": 0,
             "details": "Insufficient data to perform valuation"
         }
 
-    latest = financial_line_items[-1]
-    fcf = latest.free_cash_flow if latest.free_cash_flow else 0
+    fcf = financial_line_items.free_cash_flow.values[0] if financial_line_items.free_cash_flow.values.any() else 0
+    market_cap = financial_line_items.market_cap.values[0]
 
     if fcf <= 0:
         return {

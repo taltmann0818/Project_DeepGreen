@@ -1,4 +1,5 @@
 from typing import Dict
+from pandas import DataFrame
 
 
 class WarrenBuffettAgent():
@@ -70,7 +71,7 @@ class WarrenBuffettAgent():
 
         return self.analysis_data
 
-    def analyze_fundamentals(self, metrics: list) -> Dict[str, any]:
+    def analyze_fundamentals(self, metrics: DataFrame):
         """Analyze company fundamentals based on Buffett's criteria."""
         if not metrics:
             return {"score": 0, "details": "Insufficient fundamental data"}
@@ -119,7 +120,7 @@ class WarrenBuffettAgent():
         return {"score": score, "details": "; ".join(reasoning), "metrics": latest_metrics.model_dump()}
 
 
-    def analyze_consistency(self, financial_line_items: list) -> Dict[str, any]:
+    def analyze_consistency(self, financial_line_items: DataFrame):
         """Analyze earnings consistency and growth."""
         if len(financial_line_items) < 4:  # Need at least 4 periods for trend analysis
             return {"score": 0, "details": "Insufficient historical data"}
@@ -152,7 +153,7 @@ class WarrenBuffettAgent():
         }
 
 
-    def analyze_moat(self, metrics: list) -> Dict[str, any]:
+    def analyze_moat(self, metrics: DataFrame):
         """
         Evaluate whether the company likely has a durable competitive advantage (moat).
         For simplicity, we look at stability of ROE/operating margins over multiple periods
@@ -202,7 +203,7 @@ class WarrenBuffettAgent():
         }
 
 
-    def analyze_management_quality(self, financial_line_items: list) -> dict[str, any]:
+    def analyze_management_quality(self, financial_line_items: DataFrame):
         """
         Checks for share dilution or consistent buybacks, and some dividend track record.
         A simplified approach:
@@ -242,7 +243,7 @@ class WarrenBuffettAgent():
         }
 
 
-    def calculate_owner_earnings(self, financial_line_items: list) -> Dict[str, any]:
+    def calculate_owner_earnings(self, financial_line_items: DataFrame):
         """Calculate owner earnings (Buffett's preferred measure of true earnings power).
         Owner Earnings = Net Income + Depreciation - Maintenance CapEx"""
         if not financial_line_items or len(financial_line_items) < 1:

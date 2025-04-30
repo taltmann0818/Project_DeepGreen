@@ -19,17 +19,18 @@ class BenGrahamAgent:
     def analyze(self):
         financial_line_items = search_line_items(
             self.ticker, 
-            ["earnings_per_share", 
-             "revenue", 
-             "net_income", 
-             "book_value_per_share", 
-             "total_assets", 
-             "total_liabilities", 
-             "current_assets", 
-             "current_liabilities", 
-             "dividends_and_other_cash_distributions", 
-             "outstanding_shares",
-             "market_cap"
+            [
+                "earnings_per_share",
+                "revenue",
+                "net_income",
+                "book_value_per_share",
+                "total_assets",
+                "total_liabilities",
+                "current_assets",
+                "current_liabilities",
+                "dividends_and_other_cash_distributions",
+                "outstanding_shares",
+                "market_cap"
             ], 
             period="FY", 
             limit=10,
@@ -71,11 +72,11 @@ def analyze_earnings_stability(financial_line_items: DataFrame):
     1. Number of years with positive EPS.
     2. Growth in EPS from first to last period.
     """
-    if financial_line_items.empty:
-        return {"score": score, "details": "Insufficient data for earnings stability analysis"}
-
     score = 0
     details = []
+
+    if financial_line_items.empty:
+        return {"score": score, "details": "Insufficient data for earnings stability analysis"}
 
     eps_vals = financial_line_items.earnings_per_share.values
     if len(eps_vals) < 2:
@@ -108,11 +109,11 @@ def analyze_financial_strength(financial_line_items: DataFrame):
     Graham checks liquidity (current ratio >= 2), manageable debt,
     and dividend record (preferably some history of dividends).
     """
-    if financial_line_items.empty:
-        return {"score": score, "details": "No data for financial strength analysis"}
-
     score = 0
     details = []
+
+    if financial_line_items.empty:
+        return {"score": score, "details": "No data for financial strength analysis"}
 
     total_assets = financial_line_items.total_assets.values[0] if financial_line_items.total_assets.values.any() else 0
     total_liabilities = financial_line_items.total_liabilities.values[0] if financial_line_items.total_liabilities.values.any() else 0

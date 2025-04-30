@@ -103,9 +103,6 @@ class FundementalData:
                                    'income_statement.interest_and_debt_expense.value']
         fundementals['ebitda'] = fundementals['ebit'] + self.financial_data[
             'income_statement.depreciation_and_amortization.value']
-        fundementals['enterprise_value_to_ebitda_ratio'] = fundementals['enterprise_value'] / fundementals['ebitda']
-        #fundementals['pe_ratio'] = self.financial_data['share_price'] / self.financial_data[
-        #    'income_statement.basic_earnings_per_share.value']
         fundementals['free_cash_flow'] = self.financial_data['cash_flow_statement.net_cash_flow_from_operating_activities.value']-self.financial_data['cash_flow_statement.net_cash_flow_from_investing_activities.value']
         fundementals['net_margin'] = self.financial_data['income_statement.net_income_loss.value'] / self.financial_data[
             'income_statement.revenues.value']
@@ -215,7 +212,7 @@ def search_line_items(ticker: str, line_items: list, period: str, limit: int = 5
     if missing_columns:
         print(f"Warning: Missing columns in DataFrame: {missing_columns}")
 
-    filtered = filtered[columns_available].sort_index(ascending=True)
+    filtered = filtered[columns_available].sort_index(ascending=False)
 
     # Apply row limit
     return filtered.head(limit)
