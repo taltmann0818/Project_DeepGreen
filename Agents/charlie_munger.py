@@ -9,11 +9,14 @@ class CharlieMungerAgent:
     3. Discount to intrinsic value (e.g. Graham Number or net-net).
     4. Adequate margin of safety.
     """
-    def __init__(self, ticker, metrics):
+    def __init__(self, ticker, metrics, **kwargs):
         self.agent_name = "Charlie Munger"
         self.analysis_data = {}
         self.metrics = metrics
         self.ticker = ticker
+
+        self.period = kwargs.get('analysis_period','FY')
+        self.limit = kwargs.get('analysis_period', 10)
 
     def analyze(self):
         financial_line_items = search_line_items(
@@ -35,8 +38,8 @@ class CharlieMungerAgent:
                 "goodwill_and_intangible_assets",
                 "market_cap"
             ],
-            period="FY",
-            limit=10,  # Munger examines long-term trends
+            period=self.period,
+            limit=self.limit,  # Munger examines long-term trends
             df=self.metrics
         )
         moat_analysis = analyze_moat_strength(financial_line_items)

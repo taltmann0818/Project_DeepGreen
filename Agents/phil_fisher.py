@@ -14,11 +14,13 @@ class PhilFisherAgent():
 
     Returns a bullish/bearish/neutral signal with confidence and reasoning.
     """
-    def __init__(self, ticker, metrics):
+    def __init__(self, ticker, metrics, **kwargs):
         self.agent_name = 'Phil Fisher'
         self.analysis_data = {}
         self.metrics = metrics
         self.ticker = ticker
+
+        self.period = kwargs.get('analysis_period','FY')
 
     def analyze(self):
         # Include relevant line items for Phil Fisher's approach:
@@ -44,7 +46,7 @@ class PhilFisherAgent():
                 "ebitda",
                 "market_cap"
             ],
-            period="FY",
+            period=self.period,
             limit=5,
             df=self.metrics
         )

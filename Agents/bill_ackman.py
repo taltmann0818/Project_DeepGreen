@@ -7,11 +7,13 @@ class BillAckmanAgent:
     Fetches multiple periods of data for a more robust long-term view.
     Incorporates brand/competitive advantage, activism potential, and other key factors.
     """
-    def __init__(self, ticker, metrics):
+    def __init__(self, ticker, metrics, **kwargs):
         self.agent_name = "Bill Ackman"
         self.analysis_data = {}
         self.metrics = metrics
         self.ticker = ticker
+
+        self.period = kwargs.get('analysis_period','FY')
 
     def analyze(self):
         #metrics = get_financial_metrics(ticker, end_date, period="annual", limit=5)
@@ -32,7 +34,7 @@ class BillAckmanAgent:
                 "intangible_assets",
                 "market_cap"
             ],
-            period="FY", 
+            period=self.period, 
             limit=10,
             df=self.metrics
         )

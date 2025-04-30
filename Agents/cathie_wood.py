@@ -9,11 +9,13 @@ class CathieWoodAgent:
     3. Invests mostly in AI, robotics, genomic sequencing, fintech, and blockchain.
     4. Willing to endure short-term volatility for long-term gains.
     """
-    def __init__(self, ticker, metrics):
+    def __init__(self, ticker, metrics, **kwargs):
         self.agent_name = "Cathie Wood"
         self.analysis_data = {}
         self.metrics = metrics
         self.ticker = ticker
+
+        self.period = kwargs.get('analysis_period','FY')
 
     def analyze(self):
         #metrics = get_financial_metrics(ticker, end_date, period="annual", limit=5)
@@ -35,7 +37,7 @@ class CathieWoodAgent:
                 "operating_expense",
                 "market_cap"
             ],
-            period="FY",
+            period=self.period,
             limit=5,
             df=self.metrics
         )

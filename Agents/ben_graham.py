@@ -10,11 +10,13 @@ class BenGrahamAgent:
     3. Discount to intrinsic value (e.g. Graham Number or net-net).
     4. Adequate margin of safety.
     """
-    def __init__(self, ticker, metrics):
+    def __init__(self, ticker, metrics, **kwargs):
         self.agent_name = "Benjamin Graham"
         self.analysis_data = {}
         self.metrics = metrics
         self.ticker = ticker
+
+        self.period = kwargs.get('analysis_period','FY')
 
     def analyze(self):
         financial_line_items = search_line_items(
@@ -32,7 +34,7 @@ class BenGrahamAgent:
                 "outstanding_shares",
                 "market_cap"
             ], 
-            period="FY", 
+            period=self.period, 
             limit=10,
             df=self.metrics
         )
