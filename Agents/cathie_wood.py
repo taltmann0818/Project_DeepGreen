@@ -16,6 +16,7 @@ class CathieWoodAgent:
         self.ticker = ticker
 
         self.period = kwargs.get('analysis_period','FY')
+        self.limit = kwargs.get('analysis_limit',5)
 
     def analyze(self):
         #metrics = get_financial_metrics(ticker, end_date, period="annual", limit=5)
@@ -38,7 +39,7 @@ class CathieWoodAgent:
                 "market_cap"
             ],
             period=self.period,
-            limit=5,
+            limit=self.limit,
             df=self.metrics
         )
 

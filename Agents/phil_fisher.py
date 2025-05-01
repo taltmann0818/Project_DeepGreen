@@ -21,6 +21,7 @@ class PhilFisherAgent():
         self.ticker = ticker
 
         self.period = kwargs.get('analysis_period','FY')
+        self.limit = kwargs.get('analysis_limit', 5)        
 
     def analyze(self):
         # Include relevant line items for Phil Fisher's approach:
@@ -47,7 +48,7 @@ class PhilFisherAgent():
                 "market_cap"
             ],
             period=self.period,
-            limit=5,
+            limit=self.limit,
             df=self.metrics
         )
         

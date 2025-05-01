@@ -17,6 +17,7 @@ class BenGrahamAgent:
         self.ticker = ticker
 
         self.period = kwargs.get('analysis_period','FY')
+        self.limit = kwargs.get('analysis_limit',10)
 
     def analyze(self):
         financial_line_items = search_line_items(
@@ -35,7 +36,7 @@ class BenGrahamAgent:
                 "market_cap"
             ], 
             period=self.period, 
-            limit=10,
+            limit=self.limit,
             df=self.metrics
         )
 

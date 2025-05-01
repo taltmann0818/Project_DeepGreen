@@ -19,7 +19,7 @@ class StanleyDruckenmillerAgent():
         self.ticker = ticker
 
         self.period = kwargs.get('analysis_period','FY')
-        self.limit = kwargs.get('analysis_period',4)
+        self.limit = kwargs.get('analysis_limit', 5)  
 
     def analyze(self):
         # Include relevant line items for Stan Druckenmiller's approach:

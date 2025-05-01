@@ -1,32 +1,46 @@
 
 class FundamentalsAgent:
     """Analyzes fundamental data and generates trading signals for a ticker."""
-    def __init__(self, ticker, metrics):
+    def __init__(self, ticker, metrics, **kwargs):
         self.agent_name = 'Fundamentals'
         self.analysis_data = {}
         self.metrics = metrics
         self.ticker = ticker
 
+        self.period = kwargs.get('analysis_period','FY')
+        self.limit = kwargs.get('analysis_limit',10)
+
     def analyze(self):
         # Get the financial metrics
-        financial_metrics = get_financial_metrics(
-            ticker=ticker,
-            end_date=end_date,
-            period="ttm",
-            limit=10,
+        financial_line_items = search_line_items(
+            self.ticker,
+            [
+                "return_on_equity",
+                "net_margin",
+                "operating_margin",
+                "revenue",
+                "earnings_per_share",
+                "book_value",
+                "current_ratio",
+                "debt_to_equity",
+                "free_cash_flow_per_share",
+                "price_to_book_ratio",
+                "market_cap",
+                "net_income",
+                "revenue"
+            ],
+            period=self.period,
+            limit=self.limit,
+            df=self.metrics
         )
-
-        # Pull the most recent financial metrics
-        metrics = financial_metrics[0]
-
         # Initialize signals list for different fundamental aspects
         signals = []
         reasoning = {}
 
         # 1. Profitability Analysis
-        return_on_equity = metrics.return_on_equity
-        net_margin = metrics.net_margin
-        operating_margin = metrics.operating_margin
+        return_on_equity = financial_line_items.return_on_equity.values[0]
+        net_margin = financial_line_items.return_on_equity.values[0]
+        operating_margin = financial_line_items.return_on_equity.values[0]
 
         thresholds = [
             (return_on_equity, 0.15),  # Strong ROE above 15%
@@ -42,9 +56,12 @@ class FundamentalsAgent:
         }
 
         # 2. Growth Analysis
-        revenue_growth = metrics.revenue_growth
-        earnings_growth = metrics.earnings_growth
-        book_value_growth = metrics.book_value_growth
+        revenues = financial_line_items.revenue.values
+        revenue_growth = (revenues[0] - revenues[-1]) / abs(revenues[-1]) if not revenues[-1] == 0 else 0
+        earnings = financial_line_items.earnings_per_share.values
+        earnings_growth = (earnings[0] - earnings[-1]) / abs(earnings[-1]) if not earnings[-1] == 0 else 0
+        book_values = financial_line_items.book_value.values
+        book_value_growth = (book_values[0] - book_values[-1]) / abs(book_values[-1]) if not book_values[-1] == 0 else 0
 
         thresholds = [
             (revenue_growth, 0.10),  # 10% revenue growth
@@ -60,10 +77,10 @@ class FundamentalsAgent:
         }
 
         # 3. Financial Health
-        current_ratio = metrics.current_ratio
-        debt_to_equity = metrics.debt_to_equity
-        free_cash_flow_per_share = metrics.free_cash_flow_per_share
-        earnings_per_share = metrics.earnings_per_share
+        current_ratio = financial_line_items.current_ratio.values[0]
+        debt_to_equity = financial_line_items.debt_to_equity.values[0]
+        free_cash_flow_per_share = financial_line_items.free_cash_flow_per_share.values[0]
+        earnings_per_share = financial_line_items.earnings_per_share.values[0]
 
         health_score = 0
         if current_ratio and current_ratio > 1.5:  # Strong liquidity
@@ -80,9 +97,10 @@ class FundamentalsAgent:
         }
 
         # 4. Price to X ratios
-        pe_ratio = metrics.price_to_earnings_ratio
-        pb_ratio = metrics.price_to_book_ratio
-        ps_ratio = metrics.price_to_sales_ratio
+        eps_values = financial_line_items.earnings_per_share.values
+        pe_ratio = financial_line_items.market_cap.values[0] / financial_line_items.net_income.values[0]
+        pb_ratio = financial_line_items.price_to_book_ratio.values[0]
+        ps_ratio = financial_line_items.market_cap.values[0] / financial_line_items.revenue.values[0]
 
         thresholds = [
             (pe_ratio, 25),  # Reasonable P/E ratio

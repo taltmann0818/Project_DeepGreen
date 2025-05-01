@@ -22,7 +22,7 @@ class PeterLynchAgent():
         self.ticker = ticker
 
         self.period = kwargs.get('analysis_period','FY')
-        self.limit = kwargs.get('analysis_period', 10)
+        self.limit = kwargs.get('analysis_limit', 10)
 
     def analyze(self):
         financial_line_items = search_line_items(

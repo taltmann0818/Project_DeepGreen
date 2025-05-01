@@ -14,6 +14,7 @@ class BillAckmanAgent:
         self.ticker = ticker
 
         self.period = kwargs.get('analysis_period','FY')
+        self.limit = kwargs.get('analysis_limit', 10)
 
     def analyze(self):
         #metrics = get_financial_metrics(ticker, end_date, period="annual", limit=5)
@@ -35,7 +36,7 @@ class BillAckmanAgent:
                 "market_cap"
             ],
             period=self.period, 
-            limit=10,
+            limit=self.limit,
             df=self.metrics
         )
         quality_analysis = analyze_business_quality(financial_line_items)

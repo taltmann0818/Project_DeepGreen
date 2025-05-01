@@ -104,14 +104,17 @@ class FundementalData:
         fundementals['ebitda'] = fundementals['ebit'] + self.financial_data[
             'income_statement.depreciation_and_amortization.value']
         fundementals['free_cash_flow'] = self.financial_data['cash_flow_statement.net_cash_flow_from_operating_activities.value']-self.financial_data['cash_flow_statement.net_cash_flow_from_investing_activities.value']
+        fundementals['free_cash_flow_per_share'] = fundementals['free_cash_flow'] / self.financial_data[
+            'income_statement.basic_average_shares.value']
         fundementals['net_margin'] = self.financial_data['income_statement.net_income_loss.value'] / self.financial_data[
             'income_statement.revenues.value']
-        self.financial_data['book_value_per_share'] = self.financial_data['balance_sheet.equity.value'] / self.financial_data[
+        self.financial_data['book_value'] = self.financial_data['balance_sheet.assets.value'] - self.financial_data['balance_sheet.liabilities.value']
+        self.financial_data['book_value_per_share'] = self.financial_data['book_value'] / self.financial_data[
             'income_statement.basic_average_shares.value']
         fundementals['book_value_per_share'] = self.financial_data['book_value_per_share']
-        #fundementals['price_to_book_ratio'] = self.financial_data['share_price'] / self.financial_data['book_value_per_share']
+        fundementals['price_to_book_ratio'] = self.financial_data['market_cap'] / self.financial_data['book_value']
         fundementals['current_ratio'] = self.financial_data['balance_sheet.current_assets.value'] / self.financial_data[
-            'balance_sheet.liabilities.value']
+            'balance_sheet.current_liabilities.value']
         #fundementals['price_to_sales'] = self.financial_data['share_price'] / (
         #            self.financial_data['income_statement.revenues.value'] / self.financial_data[
         #        'income_statement.basic_average_shares.value'])
