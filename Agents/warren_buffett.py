@@ -13,7 +13,7 @@ class WarrenBuffettAgent:
 
     def analyze(self):
         financial_line_items = search_line_items(
-            ticker,
+            self.ticker,
             [
                 "capital_expenditure",
                 "return_on_equity",
@@ -134,12 +134,16 @@ def analyze_consistency(financial_line_items: DataFrame):
     reasoning = []
 
     # Check earnings growth trend
-    earnings_values = [item.net_income for item in financial_line_items if item.net_income]
+    earnings_values = financial_line_items.net_income.values
     if len(earnings_values) >= 4:
         # Simple check: is each period's earnings bigger than the next?
-        earnings_growth = all(earnings_values[i] > earnings_values[i + 1] for i in range(len(earnings_values) - 1))
+        growth_rates = []
+        for i in range(len(earnings_values) - 1):
+            if earnings_values[i] and earnings_values[i + 1]:
+                growth_rate = (earnings_values[i + 1] - earnings_values[i]) / abs(earnings_values[i]) if earnings_values[i] != 0 else 0
+                growth_rates.append(growth_rate)
 
-        if earnings_growth:
+        if len(growth_rates) >= 2 and growth_rates[0] > growth_rates[-1]:
             score += 3
             reasoning.append("Consistent earnings growth over past periods")
         else:
@@ -157,26 +161,20 @@ def analyze_consistency(financial_line_items: DataFrame):
         "details": "; ".join(reasoning),
     }
 
-
-def analyze_moat(self, metrics: list) -> Dict[str, any]:
+def analyze_moat(financial_line_items: DataFrame):
     """
     Evaluate whether the company likely has a durable competitive advantage (moat).
     For simplicity, we look at stability of ROE/operating margins over multiple periods
     or high margin over the last few years. Higher stability => higher moat score.
     """
-    if not metrics or len(metrics) < 3:
+    if financial_line_items.empty or len(financial_line_items) < 3:
         return {"score": 0, "max_score": 3, "details": "Insufficient data for moat analysis"}
 
     reasoning = []
     moat_score = 0
-    historical_roes = []
-    historical_margins = []
 
-    for m in metrics:
-        if m.return_on_equity is not None:
-            historical_roes.append(m.return_on_equity)
-        if m.operating_margin is not None:
-            historical_margins.append(m.operating_margin)
+    historical_roes = financial_line_items.return_on_equity.values
+    historical_margins = financial_line_items.operating_margin.values
 
     # Check for stable or improving ROE
     if len(historical_roes) >= 3:
@@ -207,8 +205,7 @@ def analyze_moat(self, metrics: list) -> Dict[str, any]:
         "details": "; ".join(reasoning),
     }
 
-
-def analyze_management_quality(self, financial_line_items: list) -> dict[str, any]:
+def analyze_management_quality(financial_line_items: DataFrame):
     """
     Checks for share dilution or consistent buybacks, and some dividend track record.
     A simplified approach:
@@ -216,26 +213,26 @@ def analyze_management_quality(self, financial_line_items: list) -> dict[str, an
         might be shareholder-friendly.
         - if there's a big new issuance, it might be a negative sign (dilution).
     """
-    if not financial_line_items:
+    if financial_line_items.empty:
         return {"score": 0, "max_score": 2, "details": "Insufficient data for management analysis"}
 
     reasoning = []
     mgmt_score = 0
 
-    latest = financial_line_items[0]
-    if hasattr(latest, "issuance_or_purchase_of_equity_shares") and latest.issuance_or_purchase_of_equity_shares and latest.issuance_or_purchase_of_equity_shares < 0:
+    stock_issuance = financial_line_items.issuance_or_purchase_of_equity_shares.values[0]
+    if stock_issuance < 0:
         # Negative means the company spent money on buybacks
         mgmt_score += 1
         reasoning.append("Company has been repurchasing shares (shareholder-friendly)")
-
-    if hasattr(latest, "issuance_or_purchase_of_equity_shares") and latest.issuance_or_purchase_of_equity_shares and latest.issuance_or_purchase_of_equity_shares > 0:
+    if stock_issuance > 0:
         # Positive issuance means new shares => possible dilution
         reasoning.append("Recent common stock issuance (potential dilution)")
     else:
         reasoning.append("No significant new stock issuance detected")
 
     # Check for any dividends
-    if hasattr(latest, "dividends_and_other_cash_distributions") and latest.dividends_and_other_cash_distributions and latest.dividends_and_other_cash_distributions < 0:
+    dividends = financial_line_items.dividends_and_other_cash_distributions.values[0]
+    if dividends < 0:
         mgmt_score += 1
         reasoning.append("Company has a track record of paying dividends")
     else:
@@ -246,7 +243,6 @@ def analyze_management_quality(self, financial_line_items: list) -> dict[str, an
         "max_score": 2,
         "details": "; ".join(reasoning),
     }
-
 
 def calculate_owner_earnings(financial_line_items: DataFrame):
     """Calculate owner earnings (Buffett's preferred measure of true earnings power).
@@ -275,12 +271,20 @@ def calculate_owner_earnings(financial_line_items: DataFrame):
 def calculate_intrinsic_value(financial_line_items: DataFrame):
     """Calculate intrinsic value using DCF with owner earnings."""
     if financial_line_items.empty:
-        return {"intrinsic_value": None, "details": ["Insufficient data for valuation"]}
+        return {
+            "intrinsic_value": None,
+            "margin_of_safety": None,
+            "details": ["Insufficient data for valuation"]
+        }
 
     # Calculate owner earnings
-    earnings_data = self.calculate_owner_earnings(financial_line_items)
-    if not earnings_data["owner_earnings"]:
-        return {"intrinsic_value": None, "details": earnings_data["details"]}
+    earnings_data = calculate_owner_earnings(financial_line_items)
+    if earnings_data["owner_earnings"] is None:
+        return {
+            "intrinsic_value": None,
+            "margin_of_safety": None,
+            "details": earnings_data["details"]
+        }
 
     owner_earnings = earnings_data["owner_earnings"]
 
@@ -305,7 +309,10 @@ def calculate_intrinsic_value(financial_line_items: DataFrame):
     terminal_value = (owner_earnings * (1 + growth_rate) ** projection_years * terminal_multiple) / ((1 + discount_rate) ** projection_years)
 
     intrinsic_value = future_value + terminal_value
-    margin_of_safety = (intrinsic_value - market_cap) / market_cap
+    if intrinsic_value is not None and market_cap is not None and market_cap != 0:
+        margin_of_safety = (intrinsic_value - market_cap) / market_cap
+    else:
+        margin_of_safety = 0
 
     return {
         "intrinsic_value": intrinsic_value,

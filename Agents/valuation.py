@@ -1,19 +1,21 @@
 from statistics import median
+from Components.Fundamentals import search_line_items
 
 class ValuationAgent():
     """Valuation Agent
     Implements four complementary valuation methodologies and aggregates them with
     configurable weights.
     """
-    def __init__(self, ticker, metrics):
+    def __init__(self, ticker, metrics, **kwargs):
         self.agent_name = 'Valuation'
         self.analysis_data = {}
         self.metrics = metrics
         self.ticker = ticker
 
-    def analyze(self):
-        most_recent_metrics = self.metrics[0]
+        self.period = kwargs.get('analysis_period','FY')
+        self.limit = kwargs.get('analysis_period', 2)
 
+    def analyze(self):
         # --- Fine‑grained line‑items (need two periods to calc WC change) ---
         line_items = search_line_items(
             ticker=self.ticker,
@@ -24,16 +26,15 @@ class ValuationAgent():
                 "capital_expenditure",
                 "working_capital",
             ],
-            end_date=end_date,
-            period="ttm",
-            limit=2,
+            period=self.period,
+            limit=self.limit,
+            df=self.metrics
         )
-        li_curr, li_prev = line_items[0], line_items[1]
 
         # ------------------------------------------------------------------
         # Valuation models
         # ------------------------------------------------------------------
-        wc_change = li_curr.working_capital - li_prev.working_capital
+        wc_change = line_items.working_capital[0] - line_items.working_capital[1]
 
         # Owner Earnings
         owner_val = self.calculate_owner_earnings_value(
