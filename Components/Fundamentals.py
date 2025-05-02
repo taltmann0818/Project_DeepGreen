@@ -24,43 +24,42 @@ class FundementalData:
         self.workers = kwargs.get("workers", 20)
 
     def _ticker(self, ticker):
-        financials = []
-        market_caps = []
-        close_prices = []
-        for f in self.client.vx.list_stock_financials(ticker,
-                                                      filing_date_lte=self.current_date.strftime("%Y-%m-%d"),
-                                                      filing_date_gte=self.past_date.strftime("%Y-%m-%d")):
-            financials.append(f)
-
-        financials = pd.DataFrame(financials)
-        financials["financials"] = financials["financials"].apply(
-            lambda v: v if isinstance(v, dict) else json.loads(v)
-        )
-        flat = pd.json_normalize(
-            financials["financials"].tolist()
-        )
-        flat_filtered = (
-            flat
-            .filter(like="value")
-            # .dropna(axis=1, how="all")   # drop cols that are all missing
-        )
-
-        flat_filtered.index = financials.index
-        financials = financials.drop(columns=["financials"]).join(flat_filtered).sort_index()
-
-        if self.fetch_market_cap or self.fetch_stock_price:
-            for val in financials['end_date'].values:
+        try:
+            financials = []
+            for f in self.client.vx.list_stock_financials(ticker,filing_date_lte=self.current_date.strftime("%Y-%m-%d"),filing_date_gte=self.past_date.strftime("%Y-%m-%d")):
+                financials.append(f)
+    
+            if not financials:
+                #logging.warning(f"No financials for {ticker}; skipping.")
+                return pd.DataFrame()
+    
+            financials = pd.DataFrame(financials)
+            financials["financials"] = financials["financials"].apply(
+                lambda v: v if isinstance(v, dict) else json.loads(v)
+            )
+            flat = pd.json_normalize(financials["financials"].tolist())
+            flat_filtered = (flat.filter(like="value"))
+            flat_filtered.index = financials.index
+            financials = financials.drop(columns=["financials"]).join(flat_filtered).sort_index()
+            
+            market_caps = []
+            close_prices = []
+            for asof in financials['end_date']:
                 if self.fetch_market_cap:
-                    market_caps.append(self.get_market_cap(ticker, val))
+                    market_caps.append(self.get_market_cap(ticker, asof))
                 if self.fetch_stock_price:
-                    close_prices.append(self.get_close_price(ticker, val))
-        if self.fetch_market_cap:
-            financials['market_cap'] = market_caps
-        if self.fetch_stock_price:
-            financials['share_price'] = close_prices
-        financials['ticker'] = ticker
-
-        return financials.fillna(0)
+                    close_prices.append(self.get_close_price(ticker, asof))
+            if self.fetch_market_cap:
+                financials['market_cap'] = market_caps
+            if self.fetch_stock_price:
+                financials['share_price'] = close_prices
+            financials['ticker'] = ticker
+    
+            return financials.fillna(0)
+            
+        except Exception as e:
+            #logging.warning(f"[_ticker] failed for {ticker}: {e}")
+            return pd.DataFrame()
 
     def get_market_cap(self, ticker, asof=None):
         try:
@@ -68,7 +67,8 @@ class FundementalData:
                 asof = datetime.today().strftime("%Y-%m-%d")
             return self.client.get_ticker_details(ticker, date=asof).market_cap
         except Exception as e:
-            print(f"Error getting market cap: {str(e)}")
+            #logging.warning(f"[get_market_cap] {ticker} @ {asof} failed: {e}")
+            return e
 
     def get_close_price(self, ticker, asof=None):
         if asof:
@@ -81,8 +81,8 @@ class FundementalData:
             resp = self.client.get_daily_open_close_agg(ticker, date=date_str)
             return getattr(resp, "close", None)
         except Exception as err:
-            logging.error(f"[get_close_price] failed for {ticker} on {date_str}: {err}")
-            return None
+            logging.warning(f"[get_close_price] {ticker} failed for {asof}: {err}")
+            return pd.DataFrame()
     
     def get_fundamentals(self):
         fundementals = pd.DataFrame()
@@ -108,11 +108,11 @@ class FundementalData:
             'income_statement.basic_average_shares.value']
         fundementals['net_margin'] = self.financial_data['income_statement.net_income_loss.value'] / self.financial_data[
             'income_statement.revenues.value']
-        self.financial_data['book_value'] = self.financial_data['balance_sheet.assets.value'] - self.financial_data['balance_sheet.liabilities.value']
-        self.financial_data['book_value_per_share'] = self.financial_data['book_value'] / self.financial_data[
+        fundementals['book_value'] = self.financial_data['balance_sheet.assets.value'] - self.financial_data['balance_sheet.liabilities.value']
+        self.financial_data['book_value_per_share'] = fundementals['book_value'] / self.financial_data[
             'income_statement.basic_average_shares.value']
         fundementals['book_value_per_share'] = self.financial_data['book_value_per_share']
-        fundementals['price_to_book_ratio'] = self.financial_data['market_cap'] / self.financial_data['book_value']
+        fundementals['price_to_book_ratio'] = self.financial_data['market_cap'] / fundementals['book_value']
         fundementals['current_ratio'] = self.financial_data['balance_sheet.current_assets.value'] / self.financial_data[
             'balance_sheet.current_liabilities.value']
         #fundementals['price_to_sales'] = self.financial_data['share_price'] / (
@@ -158,8 +158,9 @@ class FundementalData:
 
     def fetch(self):
         with ThreadPoolExecutor(max_workers=self.workers) as ex:
-            financial_dfs = ex.map(lambda t: self._ticker(t), self.tickers)
-        self.financial_data = pd.concat(financial_dfs, axis=0)
+            all_results = ex.map(lambda t: self._ticker(t), self.tickers)
+        dfs = [df for df in all_results if df is not None and not df.empty]
+        self.financial_data = pd.concat(dfs, axis=0)
         self.fundamentals = self.get_fundamentals()
 
         return self.fundamentals

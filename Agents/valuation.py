@@ -1,5 +1,6 @@
 from statistics import median
 from Components.Fundamentals import search_line_items
+from pandas import DataFrame
 
 class ValuationAgent():
     """Valuation Agent
@@ -68,8 +69,9 @@ class ValuationAgent():
         ev_ebitda_val = calculate_ev_ebitda_value(line_items)
 
         # Residual Income Model
+        market_cap = line_items.market_cap.values[0]
         rim_val = calculate_residual_income_value(
-            market_cap=line_items.market_cap.values[0],
+            market_cap=market_cap,
             net_income=line_items.net_income.values[0],
             price_to_book_ratio=line_items.price_to_book_ratio.values[0],
             book_value_growth=book_value_growth,
@@ -78,7 +80,6 @@ class ValuationAgent():
         # ------------------------------------------------------------------
         # Aggregate & signal
         # ------------------------------------------------------------------
-        market_cap = get_market_cap(self.ticker)
         method_values = {
             "dcf": {"value": dcf_val, "weight": 0.35},
             "owner_earnings": {"value": owner_val, "weight": 0.35},
@@ -181,7 +182,7 @@ def calculate_intrinsic_value(
     return pv + pv_term
 
 
-def calculate_ev_ebitda_value(financial_metrics: Dataframe):
+def calculate_ev_ebitda_value(financial_metrics: DataFrame):
     """Implied equity value via median EV/EBITDA multiple."""
     if financial_metrics.empty:
         return 0
@@ -193,7 +194,7 @@ def calculate_ev_ebitda_value(financial_metrics: Dataframe):
     if not (enterprise_values[0] and enterprise_value_to_ebitda_ratio[0]) or enterprise_value_to_ebitda_ratio[0] == 0:
         return 0
 
-    ebitda_now = enterprise_value[0] / enterprise_value_to_ebitda_ratio[0]
+    ebitda_now = enterprise_values[0] / enterprise_value_to_ebitda_ratio[0]
     med_mult = median(enterprise_value_to_ebitda_ratio)
     ev_implied = med_mult * ebitdas[0]
     net_debt = (enterprise_values[0] or 0) - (financial_metrics.market_cap.values[0] or 0)
