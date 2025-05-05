@@ -24,7 +24,7 @@ def logout():
 # Pages
 login_page = st.Page(login, title="Log in", icon=":material/login:")
 logout_page = st.Page(logout, title="Log out", icon=":material/logout:")
-financials = st.Page("Pages/Financials.py", title="Financials", icon="", default=True)
+financials = st.Page("Pages/Financials.py", title="Financials", icon=":material/corporate_fare:", default=True)
 forecasting = st.Page("Pages/Forecasting.py", title="Forecasting", icon=":material/bolt:")
 backtesting = st.Page("Pages/Backtesting.py", title="Backtesting", icon=":material/candlestick_chart:")
 

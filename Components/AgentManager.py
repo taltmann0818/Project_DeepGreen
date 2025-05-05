@@ -21,7 +21,7 @@ class AgentManager:
         self,
         metrics: pd.DataFrame,
         agents: Optional[List[AgentType]] = None,
-        period: Optional[str] = 'annual',
+        period: Optional[str] = 'Annual',
     ):
         self.tickers: List[str] = list(metrics.ticker.values)
         self.metrics: pd.DataFrame = metrics
@@ -38,8 +38,8 @@ class AgentManager:
             ValuationAgent,
             FundamentalsAgent,
         ]
-        self.period = 'Q' if period == 'quarterly' else 'FY'
-        self.limit = 4 if period == 'quarterly' else 10
+        self.period = 'Q' if period == 'Quarterly' else 'FY'
+        self.limit = 4 if period == 'Quarterly' else 10
 
     def _analyze_one_ticker(self, ticker: str) -> Dict[str, Any]:
         """
