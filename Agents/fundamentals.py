@@ -1,16 +1,22 @@
-from Components.Fundamentals import search_line_items
 from pandas import DataFrame
+from Components.Fundamentals import search_line_items, get_metric_value
+import pandas as pd
 
 class FundamentalsAgent:
     """Analyzes fundamental data and generates trading signals for a ticker."""
     def __init__(self, ticker, metrics, **kwargs):
         self.agent_name = 'Fundamentals'
-        self.analysis_data = {}
         self.metrics = metrics
         self.ticker = ticker
+        self.period = kwargs.get('analysis_period')
+        self.limit = kwargs.get('analysis_limit')
+        self.SIC_code = self.metrics['4digit_SIC_code'][0] if self.metrics['2digit_SIC_code'][0] == '73' else self.metrics['2digit_SIC_code'][0]
+        if len(self.SIC_code) > 2:
+            self.threshold_matrix = pd.read_csv('Agents/Matrices/Fundamentals Matrix - 4digit SIC 73 - Business Services.csv')
+        else:
+            self.threshold_matrix = pd.read_csv('Agents/Matrices/Fundamentals Matrix - 2digit SIC.csv')
 
-        self.period = kwargs.get('analysis_period','FY')
-        self.limit = kwargs.get('analysis_limit',10)
+        self.analysis_data = {} # Storing returned results in dict
 
     def analyze(self):
         # Get the financial metrics
@@ -23,6 +29,7 @@ class FundamentalsAgent:
                 "revenue",
                 "earnings_per_share",
                 "book_value",
+                "book_value_per_share",
                 "current_ratio",
                 "debt_to_equity",
                 "free_cash_flow_per_share",
@@ -44,9 +51,9 @@ class FundamentalsAgent:
         operating_margin = financial_line_items.return_on_equity.values[0]
 
         thresholds = [
-            (return_on_equity, 0.15),  # Strong ROE above 15%
-            (net_margin, 0.20),  # Healthy profit margins
-            (operating_margin, 0.15),  # Strong operating efficiency
+            (return_on_equity, get_metric_value(self.threshold_matrix, self.SIC_code, 'return_on_equity')),  # Strong ROE above 15%
+            (net_margin, get_metric_value(self.threshold_matrix, self.SIC_code, 'net_margin')),  # Healthy profit margins
+            (operating_margin, get_metric_value(self.threshold_matrix, self.SIC_code, 'operating_margin')),  # Strong operating efficiency
         ]
         profitability_score = sum(metric > threshold for metric, threshold in thresholds)
 
@@ -58,16 +65,16 @@ class FundamentalsAgent:
         
         # 2. Growth Analysis
         revenues = financial_line_items.revenue.values
-        revenue_growth = (revenues[0] - revenues[-1]) / abs(revenues[-1])
+        revenue_growth = (revenues[0] - revenues[1]) / abs(revenues[1])
         earnings = financial_line_items.earnings_per_share.values
-        earnings_growth = (earnings[0] - earnings[-1]) / abs(earnings[-1])
+        earnings_growth = (earnings[0] - earnings[1]) / abs(earnings[1])
         book_values = financial_line_items.book_value.values
-        book_value_growth = (book_values[0] - book_values[-1]) / abs(book_values[-1])
+        book_value_growth = (book_values[0] - book_values[1]) / abs(book_values[1])
 
         thresholds = [
-            (revenue_growth, 0.10),  # 10% revenue growth
-            (earnings_growth, 0.10),  # 10% earnings growth
-            (book_value_growth, 0.10),  # 10% book value growth
+            (revenue_growth, get_metric_value(self.threshold_matrix, self.SIC_code, 'revenue_growth_qoq')),  # 10% revenue growth
+            (earnings_growth, get_metric_value(self.threshold_matrix, self.SIC_code, 'eps_growth_qoq')),  # 10% earnings growth
+            (book_value_growth, get_metric_value(self.threshold_matrix, self.SIC_code, 'bookValue_growth_qoq')),  # 10% book value growth
         ]
         growth_score = sum(metric > threshold for metric, threshold in thresholds)
         
@@ -81,13 +88,19 @@ class FundamentalsAgent:
         current_ratio = financial_line_items.current_ratio.values[0]
         debt_to_equity = financial_line_items.debt_to_equity.values[0]
         free_cash_flow_per_share = financial_line_items.free_cash_flow_per_share.values[0]
+        book_value_per_share = financial_line_items.book_value_per_share.values[0]
 
         health_score = 0
-        if current_ratio != 0 and current_ratio > 1.5:  # Strong liquidity
+        current_ratio_threshold = get_metric_value(self.threshold_matrix, self.SIC_code, 'current_ratio')
+        debt_to_equity_threshold = get_metric_value(self.threshold_matrix, self.SIC_code, 'debt_to_equity')
+        bv_per_share_threshold = get_metric_value(self.threshold_matrix, self.SIC_code, 'book_value_per_share')
+        if current_ratio != 0 and current_ratio > current_ratio_threshold:  # Strong liquidity
             health_score += 1
-        if debt_to_equity != 0 and debt_to_equity < 0.5:  # Conservative debt levels
+        if debt_to_equity != 0 and debt_to_equity < debt_to_equity_threshold:  # Conservative debt levels
             health_score += 1
         if free_cash_flow_per_share != 0 and earnings[0] != 0 and free_cash_flow_per_share > earnings[0] * 0.8:  # Strong FCF conversion
+            health_score += 1
+        if book_value_per_share != 0 and book_value_per_share > bv_per_share_threshold:  # Strong FCF conversion
             health_score += 1
 
         signals.append("bullish" if health_score >= 2 else "bearish" if health_score == 0 else "neutral")
@@ -102,9 +115,9 @@ class FundamentalsAgent:
         ps_ratio = financial_line_items.market_cap.values[0] / financial_line_items.revenue.values[0]
 
         thresholds = [
-            (pe_ratio, 25),  # Reasonable P/E ratio
-            (pb_ratio, 3),  # Reasonable P/B ratio
-            (ps_ratio, 5),  # Reasonable P/S ratio
+            (pe_ratio, get_metric_value(self.threshold_matrix, self.SIC_code, 'price_to_earning_ratio')),  # Reasonable P/E ratio
+            (pb_ratio, get_metric_value(self.threshold_matrix, self.SIC_code, 'price_to_book_ratio')),  # Reasonable P/B ratio
+            (ps_ratio, get_metric_value(self.threshold_matrix, self.SIC_code, 'price_to_sales_ratio')),  # Reasonable P/S ratio
         ]
         price_ratio_score = sum(metric > threshold for metric, threshold in thresholds)
 
@@ -130,6 +143,7 @@ class FundamentalsAgent:
         confidence = round(max(bullish_signals, bearish_signals) / total_signals, 2) * 100
 
         self.analysis_data = {
+            "name": self.agent_name,
             "signal": overall_signal,
             "confidence": confidence,
             "reasoning": reasoning,

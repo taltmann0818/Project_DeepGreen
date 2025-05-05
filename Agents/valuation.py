@@ -1,6 +1,7 @@
 from statistics import median
-from Components.Fundamentals import search_line_items
 from pandas import DataFrame
+from Components.Fundamentals import search_line_items, get_metric_value
+import pandas as pd
 
 class ValuationAgent():
     """Valuation Agent
@@ -9,12 +10,17 @@ class ValuationAgent():
     """
     def __init__(self, ticker, metrics, **kwargs):
         self.agent_name = 'Valuation'
-        self.analysis_data = {}
         self.metrics = metrics
         self.ticker = ticker
+        self.period = kwargs.get('analysis_period')
+        self.limit = kwargs.get('analysis_limit')
+        self.SIC_code = self.metrics['4digit_SIC_code'][0] if self.metrics['2digit_SIC_code'][0] == '73' else self.metrics['2digit_SIC_code'][0]
+        if len(self.SIC_code) > 2:
+            self.threshold_matrix = pd.read_csv('Agents/Matrices/Fundamentals Matrix - 4digit SIC 73 - Business Services.csv')
+        else:
+            self.threshold_matrix = pd.read_csv('Agents/Matrices/Fundamentals Matrix - 2digit SIC.csv')
 
-        self.period = kwargs.get('analysis_period','FY')
-        self.limit = kwargs.get('analysis_period', 2)
+        self.analysis_data = {} # Storing returned results in dict
 
     def analyze(self):
         # --- Fine‑grained line‑items (need two periods to calc WC change) ---
@@ -31,10 +37,10 @@ class ValuationAgent():
                 "ebitda",
                 "market_cap",
                 "book_value",
-                "price_to_book_ratio"
+                "price_to_book_ratio",
             ],
             period=self.period,
-            limit=2,
+            limit=2, # Override kwargs to ensure this is always period-over-period
             df=self.metrics
         )
 
@@ -43,9 +49,9 @@ class ValuationAgent():
         # ------------------------------------------------------------------
         wc_change = line_items.working_capital.values[0] - line_items.working_capital.values[1]
         earnings = line_items.earnings_per_share.values
-        earnings_growth = (earnings[0] - earnings[-1]) / abs(earnings[-1]) if not earnings[-1] > 0 else 0.05
+        earnings_growth = (earnings[0] - earnings[1]) / abs(earnings[1])
         book_values = line_items.book_value.values
-        book_value_growth = (book_values[0] - book_values[-1]) / abs(book_values[-1]) if not book_values[-1] > 0 else 0.03
+        book_value_growth = (book_values[0] - book_values[1]) / abs(book_values[1])
 
         # Owner Earnings
         owner_val = calculate_owner_earnings_value(
@@ -114,6 +120,7 @@ class ValuationAgent():
         }
 
         self.analysis_data = {
+            "name": self.agent_name,
             "signal": signal,
             "confidence": confidence,
             "reasoning": reasoning,

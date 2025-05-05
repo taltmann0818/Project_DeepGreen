@@ -8,6 +8,7 @@ from pandas.tseries.holiday import USFederalHolidayCalendar
 from concurrent.futures import ThreadPoolExecutor
 import json
 import logging
+from typing import Union
 
 class FundementalData:
     def __init__(self, tickers, years=5, **kwargs):
@@ -44,13 +45,18 @@ class FundementalData:
             
             market_caps = []
             close_prices = []
+            sic_codes = []
             for asof in financials['end_date']:
                 if self.fetch_market_cap:
-                    market_caps.append(self.get_market_cap(ticker, asof))
+                    market_cap, sic_code = self.get_market_cap(ticker, asof)
+                    market_caps.append(market_cap)
+                    sic_codes.append(sic_code)
                 if self.fetch_stock_price:
                     close_prices.append(self.get_close_price(ticker, asof))
             if self.fetch_market_cap:
                 financials['market_cap'] = market_caps
+                financials['4digit_SIC_code'] = sic_codes
+                financials['2digit_SIC_code'] = financials['4digit_SIC_code'].astype(str).str[:2]
             if self.fetch_stock_price:
                 financials['share_price'] = close_prices
             financials['ticker'] = ticker
@@ -61,11 +67,63 @@ class FundementalData:
             #logging.warning(f"[_ticker] failed for {ticker}: {e}")
             return pd.DataFrame()
 
+    def reconstruct_q4(self):
+        df = self.financial_data
+        metrics = [c for c in df.columns if c.endswith('.value')]
+        sub = df[df['fiscal_period'].isin(['Q1', 'Q2', 'Q3', 'FY'])].copy()
+        pivot = sub.pivot_table(
+            index=['ticker', 'fiscal_year'],
+            columns='fiscal_period',
+            values=metrics,
+            aggfunc='first'
+        )
+        q4_rows = []
+        for (ticker, year), row in pivot.iterrows():
+            periods_present = set(
+                sub.loc[
+                    (sub['ticker'] == ticker) &
+                    (sub['fiscal_year'] == year),
+                    'fiscal_period'
+                ].unique()
+            )
+            if not {'Q1', 'Q2', 'Q3', 'FY'}.issubset(periods_present):
+                continue
+            fy_slice = df.loc[
+                (df['ticker'] == ticker) &
+                (df['fiscal_year'] == year) &
+                (df['fiscal_period'] == 'FY')
+                ]
+            if fy_slice.empty:
+                continue
+            fy_row = fy_slice.iloc[0]
+
+            q1_vals = row.xs('Q1', level=1)
+            q2_vals = row.xs('Q2', level=1)
+            q3_vals = row.xs('Q3', level=1)
+            fy_vals = row.xs('FY', level=1)
+            # compute Q4 = FY – (Q1 + Q2 + Q3)
+            q4_vals = fy_vals - (q1_vals + q2_vals + q3_vals)
+            new = {'ticker': ticker,'cik': fy_row['cik'],'company_name': fy_row['company_name'],'fiscal_year': year,'fiscal_period': 'Q4','end_date': fy_row['end_date'],
+                   'filing_date': fy_row['filing_date'], '2digit_SIC_code': fy_row['2digit_SIC_code'], '4digit_SIC_code': fy_row['4digit_SIC_code'], 'market_cap': fy_row['market_cap']}
+            for metric, val in q4_vals.items():
+                new[metric] = val
+            q4_rows.append(new)
+
+        if q4_rows:
+            q4_df = pd.DataFrame(q4_rows)
+            self.financial_data = pd.concat(
+                [df, q4_df],
+                ignore_index=True,
+                sort=False
+            )
+
     def get_market_cap(self, ticker, asof=None):
         try:
             if asof is None:
                 asof = datetime.today().strftime("%Y-%m-%d")
-            return self.client.get_ticker_details(ticker, date=asof).market_cap
+            market_cap = self.client.get_ticker_details(ticker, date=asof).market_cap
+            sic_code = self.client.get_ticker_details(ticker, date=asof).sic_code
+            return market_cap, sic_code
         except Exception as e:
             #logging.warning(f"[get_market_cap] {ticker} @ {asof} failed: {e}")
             return e
@@ -87,6 +145,9 @@ class FundementalData:
     def get_fundamentals(self):
         fundementals = pd.DataFrame()
         fundementals['ticker'] = self.financial_data['ticker']
+        fundementals['2digit_SIC_code'] = self.financial_data['2digit_SIC_code']
+        fundementals['4digit_SIC_code'] = self.financial_data['4digit_SIC_code']
+        fundementals['filing_date'] = self.financial_data['filing_date']
         fundementals['end_date'] = self.financial_data['end_date']
         fundementals['fiscal_period'] = self.financial_data['fiscal_period']
         fundementals['fiscal_year'] = self.financial_data['fiscal_year']
@@ -96,8 +157,11 @@ class FundementalData:
             'income_statement.revenues.value']
         fundementals['debt_to_equity'] = self.financial_data['balance_sheet.liabilities.value'] / self.financial_data[
             'balance_sheet.equity.value']
-        fundementals['enterprise_value'] = self.financial_data['market_cap'] + self.financial_data['balance_sheet.liabilities.value'] - \
-                                           self.financial_data['balance_sheet.cash.value']
+        fundementals['debt_ratio'] = self.financial_data['balance_sheet.liabilities.value'] / self.financial_data[
+            'balance_sheet.assets.value']
+        fundementals['current_ratio'] = self.financial_data['balance_sheet.current_assets.value'] / self.financial_data[
+            'balance_sheet.current_liabilities.value']
+        fundementals['enterprise_value'] = self.financial_data['market_cap'] + self.financial_data['balance_sheet.liabilities.value'] - self.financial_data['balance_sheet.cash.value']
         fundementals['ebit'] = self.financial_data['income_statement.net_income_loss.value'] + self.financial_data[
             'income_statement.income_tax_expense_benefit.value'] + self.financial_data[
                                    'income_statement.interest_and_debt_expense.value']
@@ -113,11 +177,6 @@ class FundementalData:
             'income_statement.basic_average_shares.value']
         fundementals['book_value_per_share'] = self.financial_data['book_value_per_share']
         fundementals['price_to_book_ratio'] = self.financial_data['market_cap'] / fundementals['book_value']
-        fundementals['current_ratio'] = self.financial_data['balance_sheet.current_assets.value'] / self.financial_data[
-            'balance_sheet.current_liabilities.value']
-        #fundementals['price_to_sales'] = self.financial_data['share_price'] / (
-        #            self.financial_data['income_statement.revenues.value'] / self.financial_data[
-        #        'income_statement.basic_average_shares.value'])
         fundementals['return_on_invested_capital'] = (self.financial_data['income_statement.net_income_loss.value'] - self.financial_data[
             'income_statement.common_stock_dividends.value']) / (self.financial_data['balance_sheet.equity.value'] + self.financial_data[
             'balance_sheet.liabilities.value'])
@@ -150,7 +209,6 @@ class FundementalData:
         fundementals['depreciation_and_amortization'] = self.financial_data[
             'income_statement.depreciation_and_amortization.value']
         fundementals['earnings_per_share'] = self.financial_data['income_statement.basic_earnings_per_share.value']
-        #fundementals['share_price'] = self.financial_data['share_price']
         fundementals['market_cap'] = self.financial_data['market_cap']
         fundementals['intangible_assets'] = self.financial_data['balance_sheet.intangible_assets.value']
 
@@ -161,6 +219,8 @@ class FundementalData:
             all_results = ex.map(lambda t: self._ticker(t), self.tickers)
         dfs = [df for df in all_results if df is not None and not df.empty]
         self.financial_data = pd.concat(dfs, axis=0)
+        # *** reconstruct Q4 rows before computing fundamentals ***
+        self.reconstruct_q4()
         self.fundamentals = self.get_fundamentals()
 
         return self.fundamentals
@@ -183,40 +243,37 @@ def generate_us_market_holidays(start_year: int, end_year: int) -> np.ndarray:
 
 
 def search_line_items(ticker: str, line_items: list, period: str, limit: int = 5, df: pd.DataFrame = None) -> pd.DataFrame:
-    """
-    Filters the financial DataFrame based on ticker, period, line items, and row limit.
-
-    Args:
-        ticker (str): The ticker symbol to filter by.
-        line_items (list): List of financial line item column names to select.
-        period (str, optional): The fiscal period to filter by (e.g., 'annual'). Defaults to 'annual'.
-        limit (int, optional): The number of rows to return. Defaults to 5.
-        df (pd.DataFrame): The full financial DataFrame to filter.
-
-    Returns:
-        pd.DataFrame: The filtered and selected DataFrame.
-    """
-
     if df is None:
         raise ValueError("You must provide a DataFrame to search.")
+    if period == 'Q':
+        quarterly = df[(df['ticker'] == ticker) &
+                       (df['fiscal_period'].isin(['Q1','Q2','Q3','Q4']))]
+        quarterly = quarterly.sort_values('filing_date', ascending=False)
+        result = quarterly.head(4)
+    else:
+        result = df[(df['ticker']==ticker) & (df['fiscal_period']==period)]
+        result = result.sort_index(ascending=False).head(limit)
 
-    # Ensure required columns are present
-    required_columns = {'ticker', 'fiscal_period'}
-    missing = required_columns - set(df.columns)
+    cols = ['ticker'] + line_items
+    avail = [c for c in cols if c in result.columns]
+    missing = set(cols) - set(avail)
     if missing:
-        raise ValueError(f"DataFrame is missing required columns: {missing}")
+        print(f"Warning: Missing columns in DataFrame: {missing}")
+    return result[avail]
 
-    # Filter by ticker and period
-    filtered = df[(df['ticker'] == ticker) & (df['fiscal_period'] == period)]
+def get_metric_value(df: pd.DataFrame, sic_code: Union[str, int], metric: str):
+    df_copy = df.copy()
+    df_copy['SIC_str'] = df_copy.index.astype(str)
+    lookup_code = str(sic_code)
 
-    # Select the requested columns plus 'ticker' and any index column (if needed)
-    columns_to_select = ['ticker'] + line_items
-    columns_available = [col for col in columns_to_select if col in filtered.columns]
-    missing_columns = set(columns_to_select) - set(columns_available)
-    if missing_columns:
-        print(f"Warning: Missing columns in DataFrame: {missing_columns}")
+    matches = df_copy.loc[df_copy['SIC_str'] == lookup_code, metric]
+    if not matches.empty:
+        val = matches.iloc[0]
+    else:
+        val = None
 
-    filtered = filtered[columns_available].sort_index(ascending=False)
+    blank_values = {None, '', 'N/A'}
+    if pd.isna(val) or val in blank_values:
+        val = df_copy.iloc[0][metric]
 
-    # Apply row limit
-    return filtered.head(limit)
+    return val

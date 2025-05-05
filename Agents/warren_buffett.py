@@ -1,15 +1,21 @@
 from pandas import DataFrame
-from Components.Fundamentals import search_line_items
+from Components.Fundamentals import search_line_items, get_metric_value
+import pandas as pd
 
 class WarrenBuffettAgent:
     def __init__(self, ticker, metrics, **kwargs):
         self.agent_name = "Warren Buffett"
-        self.analysis_data = {}
         self.metrics = metrics
         self.ticker = ticker
+        self.period = kwargs.get('analysis_period')
+        self.limit = kwargs.get('analysis_limit')
+        self.SIC_code = self.metrics['4digit_SIC_code'][0] if self.metrics['2digit_SIC_code'][0] == '73' else self.metrics['2digit_SIC_code'][0]
+        if len(self.SIC_code) > 2:
+            self.threshold_matrix = pd.read_csv('Agents/Matrices/Fundamentals Matrix - 4digit SIC 73 - Business Services.csv')
+        else:
+            self.threshold_matrix = pd.read_csv('Agents/Matrices/Fundamentals Matrix - 2digit SIC.csv')
 
-        self.period = kwargs.get('analysis_period','FY')
-        self.limit = kwargs.get('analysis_limit', 10)
+        self.analysis_data = {} # Storing returned results in dict
 
     def analyze(self):
         financial_line_items = search_line_items(
@@ -27,17 +33,17 @@ class WarrenBuffettAgent:
                 "total_liabilities",
                 "dividends_and_other_cash_distributions",
                 "issuance_or_purchase_of_equity_shares",
-                "market_cap"
+                "market_cap",
             ],
             period=self.period,
             limit=self.limit,
             df=self.metrics
         )
-        fundamental_analysis = analyze_fundamentals(financial_line_items)
-        consistency_analysis = analyze_consistency(financial_line_items)
-        moat_analysis = analyze_moat(financial_line_items)
-        mgmt_analysis = analyze_management_quality(financial_line_items)
-        intrinsic_value_analysis = calculate_intrinsic_value(financial_line_items)
+        fundamental_analysis = self.analyze_fundamentals(financial_line_items)
+        consistency_analysis = self.analyze_consistency(financial_line_items)
+        moat_analysis = self.analyze_moat(financial_line_items)
+        mgmt_analysis = self.analyze_management_quality(financial_line_items)
+        intrinsic_value_analysis = self.calculate_intrinsic_value(financial_line_items)
 
         # Calculate total score
         total_score = fundamental_analysis["score"] + consistency_analysis["score"] + moat_analysis["score"] + mgmt_analysis["score"]
@@ -61,6 +67,7 @@ class WarrenBuffettAgent:
 
         # Combine all analysis results
         self.analysis_data = {
+            "name": self.agent_name,
             "signal": signal,
             "score": total_score,
             "max_score": max_possible_score,
@@ -74,255 +81,264 @@ class WarrenBuffettAgent:
 
         return self.analysis_data
 
-def analyze_fundamentals(financial_line_items: DataFrame):
-    """Analyze company fundamentals based on Buffett's criteria."""
-    if financial_line_items.empty:
-        return {"score": 0, "details": "Insufficient fundamental data"}
+    def analyze_fundamentals(self, financial_line_items: DataFrame):
+        """Analyze company fundamentals based on Buffett's criteria."""
+        if financial_line_items.empty:
+            return {"score": 0, "details": "Insufficient fundamental data"}
 
-    score = 0
-    reasoning = []
+        score = 0
+        reasoning = []
 
-    # Check ROE (Return on Equity)
-    return_on_equity = financial_line_items.return_on_equity.values[0]
-    if return_on_equity is not None and return_on_equity > 0.15:  # 15% ROE threshold
-        score += 2
-        reasoning.append(f"Strong ROE of {return_on_equity:.1%}")
-    elif return_on_equity is not None:
-        reasoning.append(f"Weak ROE of {return_on_equity:.1%}")
-    else:
-        reasoning.append("ROE data not available")
-
-    # Check Debt to Equity
-    debt_to_equity = financial_line_items.debt_to_equity.values[0]
-    if debt_to_equity is not None and debt_to_equity < 0.5:
-        score += 2
-        reasoning.append("Conservative debt levels")
-    elif debt_to_equity:
-        reasoning.append(f"High debt to equity ratio of {debt_to_equity:.1f}")
-    else:
-        reasoning.append("Debt to equity data not available")
-
-    # Check Operating Margin
-    operating_margin = financial_line_items.operating_margin.values[0]
-    if operating_margin is not None and operating_margin > 0.15:
-        score += 2
-        reasoning.append("Strong operating margins")
-    elif operating_margin is not None:
-        reasoning.append(f"Weak operating margin of {operating_margin:.1%}")
-    else:
-        reasoning.append("Operating margin data not available")
-
-    # Check Current Ratio
-    current_ratio = financial_line_items.current_ratio.values[0]
-    if current_ratio is not None and current_ratio > 1.5:
-        score += 1
-        reasoning.append("Good liquidity position")
-    elif current_ratio is not None:
-        reasoning.append(f"Weak liquidity with current ratio of {current_ratio:.1f}")
-    else:
-        reasoning.append("Current ratio data not available")
-
-    return {"score": score, "details": "; ".join(reasoning), "metrics": f"Operating Margin: {operating_margin}; Current Ratio: {current_ratio}; Debt to Equity: {debt_to_equity}; Return on Equity: {return_on_equity}"}
-
-
-def analyze_consistency(financial_line_items: DataFrame):
-    """Analyze earnings consistency and growth."""
-    if len(financial_line_items) < 4:  # Need at least 4 periods for trend analysis
-        return {"score": 0, "details": "Insufficient historical data"}
-
-    score = 0
-    reasoning = []
-
-    # Check earnings growth trend
-    earnings_values = financial_line_items.net_income.values
-    if len(earnings_values) >= 4:
-        # Simple check: is each period's earnings bigger than the next?
-        growth_rates = []
-        for i in range(len(earnings_values) - 1):
-            if earnings_values[i] and earnings_values[i + 1]:
-                growth_rate = (earnings_values[i + 1] - earnings_values[i]) / abs(earnings_values[i]) if earnings_values[i] != 0 else 0
-                growth_rates.append(growth_rate)
-
-        if len(growth_rates) >= 2 and growth_rates[0] > growth_rates[-1]:
-            score += 3
-            reasoning.append("Consistent earnings growth over past periods")
+        # Check ROE (Return on Equity)
+        roe_threshold = get_metric_value(self.threshold_matrix, self.SIC_code, 'return_on_equity')
+        roe_threshold = (roe_threshold*0.5)+roe_threshold
+        return_on_equity = financial_line_items.return_on_equity.values[0]
+        if return_on_equity is not None and return_on_equity > roe_threshold:  # 15% ROE threshold
+            score += 2
+            reasoning.append(f"Strong ROE of {return_on_equity:.1%}")
+        elif return_on_equity is not None:
+            reasoning.append(f"Weak ROE of {return_on_equity:.1%}")
         else:
-            reasoning.append("Inconsistent earnings growth pattern")
+            reasoning.append("ROE data not available")
 
-        # Calculate total growth rate from oldest to latest
-        if len(earnings_values) >= 2 and earnings_values[-1] != 0:
-            growth_rate = (earnings_values[0] - earnings_values[-1]) / abs(earnings_values[-1])
-            reasoning.append(f"Total earnings growth of {growth_rate:.1%} over past {len(earnings_values)} periods")
-    else:
-        reasoning.append("Insufficient earnings data for trend analysis")
-
-    return {
-        "score": score,
-        "details": "; ".join(reasoning),
-    }
-
-def analyze_moat(financial_line_items: DataFrame):
-    """
-    Evaluate whether the company likely has a durable competitive advantage (moat).
-    For simplicity, we look at stability of ROE/operating margins over multiple periods
-    or high margin over the last few years. Higher stability => higher moat score.
-    """
-    if financial_line_items.empty or len(financial_line_items) < 3:
-        return {"score": 0, "max_score": 3, "details": "Insufficient data for moat analysis"}
-
-    reasoning = []
-    moat_score = 0
-
-    historical_roes = financial_line_items.return_on_equity.values
-    historical_margins = financial_line_items.operating_margin.values
-
-    # Check for stable or improving ROE
-    if len(historical_roes) >= 3:
-        stable_roe = all(r > 0.15 for r in historical_roes)
-        if stable_roe:
-            moat_score += 1
-            reasoning.append("Stable ROE above 15% across periods (suggests moat)")
+        # Check Debt to Equity
+        dte_threshold = get_metric_value(self.threshold_matrix, self.SIC_code, 'debt_to_equity')
+        debt_to_equity = financial_line_items.debt_to_equity.values[0]
+        if debt_to_equity is not None and debt_to_equity < dte_threshold:
+            score += 2
+            reasoning.append("Conservative debt levels")
+        elif debt_to_equity:
+            reasoning.append(f"High debt to equity ratio of {debt_to_equity:.1f}")
         else:
-            reasoning.append("ROE not consistently above 15%")
+            reasoning.append("Debt to equity data not available")
 
-    # Check for stable or improving operating margin
-    if len(historical_margins) >= 3:
-        stable_margin = all(m > 0.15 for m in historical_margins)
-        if stable_margin:
-            moat_score += 1
-            reasoning.append("Stable operating margins above 15% (moat indicator)")
+        # Check Operating Margin
+        om_threshold = get_metric_value(self.threshold_matrix, self.SIC_code, 'operating_margin')
+        om_threshold = (om_threshold*0.5)+om_threshold
+        operating_margin = financial_line_items.operating_margin.values[0]
+        if operating_margin is not None and operating_margin > om_threshold:
+            score += 2
+            reasoning.append("Strong operating margins")
+        elif operating_margin is not None:
+            reasoning.append(f"Weak operating margin of {operating_margin:.1%}")
         else:
-            reasoning.append("Operating margin not consistently above 15%")
+            reasoning.append("Operating margin data not available")
 
-    # If both are stable/improving, add an extra point
-    if moat_score == 2:
-        moat_score += 1
-        reasoning.append("Both ROE and margin stability indicate a solid moat")
+        # Check Current Ratio
+        current_ratio_threshold = get_metric_value(self.threshold_matrix, self.SIC_code, 'current_ratio')
+        current_ratio = financial_line_items.current_ratio.values[0]
+        if current_ratio is not None and current_ratio > current_ratio_threshold:
+            score += 1
+            reasoning.append("Good liquidity position")
+        elif current_ratio is not None:
+            reasoning.append(f"Weak liquidity with current ratio of {current_ratio:.1f}")
+        else:
+            reasoning.append("Current ratio data not available")
 
-    return {
-        "score": moat_score,
-        "max_score": 3,
-        "details": "; ".join(reasoning),
-    }
-
-def analyze_management_quality(financial_line_items: DataFrame):
-    """
-    Checks for share dilution or consistent buybacks, and some dividend track record.
-    A simplified approach:
-        - if there's net share repurchase or stable share count, it suggests management
-        might be shareholder-friendly.
-        - if there's a big new issuance, it might be a negative sign (dilution).
-    """
-    if financial_line_items.empty:
-        return {"score": 0, "max_score": 2, "details": "Insufficient data for management analysis"}
-
-    reasoning = []
-    mgmt_score = 0
-
-    stock_issuance = financial_line_items.issuance_or_purchase_of_equity_shares.values[0]
-    if stock_issuance < 0:
-        # Negative means the company spent money on buybacks
-        mgmt_score += 1
-        reasoning.append("Company has been repurchasing shares (shareholder-friendly)")
-    if stock_issuance > 0:
-        # Positive issuance means new shares => possible dilution
-        reasoning.append("Recent common stock issuance (potential dilution)")
-    else:
-        reasoning.append("No significant new stock issuance detected")
-
-    # Check for any dividends
-    dividends = financial_line_items.dividends_and_other_cash_distributions.values[0]
-    if dividends < 0:
-        mgmt_score += 1
-        reasoning.append("Company has a track record of paying dividends")
-    else:
-        reasoning.append("No or minimal dividends paid")
-
-    return {
-        "score": mgmt_score,
-        "max_score": 2,
-        "details": "; ".join(reasoning),
-    }
-
-def calculate_owner_earnings(financial_line_items: DataFrame):
-    """Calculate owner earnings (Buffett's preferred measure of true earnings power).
-    Owner Earnings = Net Income + Depreciation - Maintenance CapEx"""
-    if financial_line_items.empty or len(financial_line_items) < 1:
-        return {"owner_earnings": None, "details": ["Insufficient data for owner earnings calculation"]}
-
-    net_income = financial_line_items.net_income.values[0]
-    depreciation = financial_line_items.depreciation_and_amortization.values[0]
-    capex = financial_line_items.capital_expenditure.values[0]
-
-    if not all([net_income, depreciation, capex]):
-        return {"owner_earnings": None, "details": ["Missing components for owner earnings calculation"]}
-
-    # Estimate maintenance capex (typically 70-80% of total capex)
-    maintenance_capex = capex * 0.75
-    owner_earnings = net_income + depreciation - maintenance_capex
-
-    return {
-        "owner_earnings": owner_earnings,
-        "components": {"net_income": net_income, "depreciation": depreciation, "maintenance_capex": maintenance_capex},
-        "details": ["Owner earnings calculated successfully"],
-    }
+        return {"score": score, "details": "; ".join(reasoning), "metrics": f"Operating Margin: {operating_margin}; Current Ratio: {current_ratio}; Debt to Equity: {debt_to_equity}; Return on Equity: {return_on_equity}"}
 
 
-def calculate_intrinsic_value(financial_line_items: DataFrame):
-    """Calculate intrinsic value using DCF with owner earnings."""
-    if financial_line_items.empty:
+    def analyze_consistency(self, financial_line_items: DataFrame):
+        """Analyze earnings consistency and growth."""
+        if len(financial_line_items) < 4:  # Need at least 4 periods for trend analysis
+            return {"score": 0, "details": "Insufficient historical data"}
+
+        score = 0
+        reasoning = []
+
+        # Check earnings growth trend
+        earnings_values = financial_line_items.net_income.values
+        if len(earnings_values) >= 4:
+            # Simple check: is each period's earnings bigger than the next?
+            growth_rates = []
+            for i in range(len(earnings_values) - 1):
+                if earnings_values[i] and earnings_values[i + 1]:
+                    growth_rate = (earnings_values[i + 1] - earnings_values[i]) / abs(earnings_values[i]) if earnings_values[i] != 0 else 0
+                    growth_rates.append(growth_rate)
+
+            if len(growth_rates) >= 2 and growth_rates[0] > growth_rates[1]:
+                score += 3
+                reasoning.append("Consistent earnings growth over past periods")
+            else:
+                reasoning.append("Inconsistent earnings growth pattern")
+
+            # Calculate total growth rate from oldest to latest
+            if len(earnings_values) >= 2 and earnings_values[1] != 0:
+                growth_rate = (earnings_values[0] - earnings_values[1]) / abs(earnings_values[1])
+                reasoning.append(f"Total earnings growth of {growth_rate:.1%} over past {len(earnings_values)} periods")
+        else:
+            reasoning.append("Insufficient earnings data for trend analysis")
+
         return {
-            "intrinsic_value": None,
-            "margin_of_safety": None,
-            "details": ["Insufficient data for valuation"]
+            "score": score,
+            "details": "; ".join(reasoning),
         }
 
-    # Calculate owner earnings
-    earnings_data = calculate_owner_earnings(financial_line_items)
-    if earnings_data["owner_earnings"] is None:
+    def analyze_moat(self, financial_line_items: DataFrame):
+        """
+        Evaluate whether the company likely has a durable competitive advantage (moat).
+        For simplicity, we look at stability of ROE/operating margins over multiple periods
+        or high margin over the last few years. Higher stability => higher moat score.
+        """
+        if financial_line_items.empty or len(financial_line_items) < 3:
+            return {"score": 0, "max_score": 3, "details": "Insufficient data for moat analysis"}
+
+        reasoning = []
+        moat_score = 0
+
+        # Check for stable or improving ROE
+        roe_threshold = get_metric_value(self.threshold_matrix, self.SIC_code, 'return_on_equity')
+        roe_threshold = (roe_threshold*0.5)+roe_threshold
+        historical_roes = financial_line_items.return_on_equity.values
+        if len(historical_roes) >= 3:
+            stable_roe = all(r > roe_threshold for r in historical_roes)
+            if stable_roe:
+                moat_score += 1
+                reasoning.append(f"Stable ROE above {roe_threshold*100}% across periods (suggests moat)")
+            else:
+                reasoning.append(f"ROE not consistently above {roe_threshold*100}%")
+
+        # Check for stable or improving operating margin
+        om_threshold = get_metric_value(self.threshold_matrix, self.SIC_code, 'operating_margin')
+        om_threshold = (om_threshold*0.5)+om_threshold
+        historical_margins = financial_line_items.operating_margin.values
+        if len(historical_margins) >= 3:
+            stable_margin = all(m > om_threshold for m in historical_margins)
+            if stable_margin:
+                moat_score += 1
+                reasoning.append(f"Stable operating margins above {om_threshold*100}% (moat indicator)")
+            else:
+                reasoning.append(f"Operating margin not consistently above {om_threshold*100}%")
+
+        # If both are stable/improving, add an extra point
+        if moat_score == 2:
+            moat_score += 1
+            reasoning.append("Both ROE and margin stability indicate a solid moat")
+
         return {
-            "intrinsic_value": None,
-            "margin_of_safety": None,
-            "details": earnings_data["details"]
+            "score": moat_score,
+            "max_score": 3,
+            "details": "; ".join(reasoning),
         }
 
-    owner_earnings = earnings_data["owner_earnings"]
+    def analyze_management_quality(self, financial_line_items: DataFrame):
+        """
+        Checks for share dilution or consistent buybacks, and some dividend track record.
+        A simplified approach:
+            - if there's net share repurchase or stable share count, it suggests management
+            might be shareholder-friendly.
+            - if there's a big new issuance, it might be a negative sign (dilution).
+        """
+        if financial_line_items.empty:
+            return {"score": 0, "max_score": 2, "details": "Insufficient data for management analysis"}
 
-    # Get current market data
-    shares_outstanding = financial_line_items.outstanding_shares.values[0]
-    market_cap = financial_line_items.market_cap.values[0]
+        reasoning = []
+        mgmt_score = 0
 
-    # Buffett's DCF assumptions (conservative approach)
-    growth_rate = 0.05  # Conservative 5% growth
-    discount_rate = 0.09  # Typical ~9% discount rate
-    terminal_multiple = 12
-    projection_years = 10
+        stock_issuance = financial_line_items.issuance_or_purchase_of_equity_shares.values[0]
+        if stock_issuance < 0:
+            # Negative means the company spent money on buybacks
+            mgmt_score += 1
+            reasoning.append("Company has been repurchasing shares (shareholder-friendly)")
+        if stock_issuance > 0:
+            # Positive issuance means new shares => possible dilution
+            reasoning.append("Recent common stock issuance (potential dilution)")
+        else:
+            reasoning.append("No significant new stock issuance detected")
 
-    # Sum of discounted future owner earnings
-    future_value = 0
-    for year in range(1, projection_years + 1):
-        future_earnings = owner_earnings * (1 + growth_rate) ** year
-        present_value = future_earnings / (1 + discount_rate) ** year
-        future_value += present_value
+        # Check for any dividends
+        dividends = financial_line_items.dividends_and_other_cash_distributions.values[0]
+        if dividends < 0:
+            mgmt_score += 1
+            reasoning.append("Company has a track record of paying dividends")
+        else:
+            reasoning.append("No or minimal dividends paid")
 
-    # Terminal value
-    terminal_value = (owner_earnings * (1 + growth_rate) ** projection_years * terminal_multiple) / ((1 + discount_rate) ** projection_years)
+        return {
+            "score": mgmt_score,
+            "max_score": 2,
+            "details": "; ".join(reasoning),
+        }
 
-    intrinsic_value = future_value + terminal_value
-    if intrinsic_value is not None and market_cap is not None and market_cap != 0:
-        margin_of_safety = (intrinsic_value - market_cap) / market_cap
-    else:
-        margin_of_safety = 0
+    def calculate_owner_earnings(self, financial_line_items: DataFrame):
+        """Calculate owner earnings (Buffett's preferred measure of true earnings power).
+        Owner Earnings = Net Income + Depreciation - Maintenance CapEx"""
+        if financial_line_items.empty or len(financial_line_items) < 1:
+            return {"owner_earnings": None, "details": ["Insufficient data for owner earnings calculation"]}
 
-    return {
-        "intrinsic_value": intrinsic_value,
-        "margin_of_safety": margin_of_safety,
-        "owner_earnings": owner_earnings,
-        "assumptions": {
-            "growth_rate": growth_rate,
-            "discount_rate": discount_rate,
-            "terminal_multiple": terminal_multiple,
-            "projection_years": projection_years,
-        },
-        "details": ["Intrinsic value calculated using DCF model with owner earnings"],
-    }
+        net_income = financial_line_items.net_income.values[0]
+        depreciation = financial_line_items.depreciation_and_amortization.values[0]
+        capex = financial_line_items.capital_expenditure.values[0]
+
+        if not net_income and not depreciation and not capex:
+            return {"owner_earnings": None, "details": ["Missing components for owner earnings calculation"]}
+
+        # Estimate maintenance capex (typically 70-80% of total capex)
+        maintenance_capex = capex * 0.75
+        owner_earnings = net_income + depreciation - maintenance_capex
+
+        return {
+            "owner_earnings": owner_earnings,
+            "components": {"net_income": net_income, "depreciation": depreciation, "maintenance_capex": maintenance_capex},
+            "details": ["Owner earnings calculated successfully"],
+        }
+
+
+    def calculate_intrinsic_value(self, financial_line_items: DataFrame):
+        """Calculate intrinsic value using DCF with owner earnings."""
+        if financial_line_items.empty:
+            return {
+                "intrinsic_value": None,
+                "margin_of_safety": None,
+                "details": ["Insufficient data for valuation"]
+            }
+
+        # Calculate owner earnings
+        earnings_data = self.calculate_owner_earnings(financial_line_items)
+        if earnings_data["owner_earnings"] is None:
+            return {
+                "intrinsic_value": None,
+                "margin_of_safety": None,
+                "details": earnings_data["details"]
+            }
+
+        owner_earnings = earnings_data["owner_earnings"]
+
+        # Get current market data
+        shares_outstanding = financial_line_items.outstanding_shares.values[0]
+        market_cap = financial_line_items.market_cap.values[0]
+
+        # Buffett's DCF assumptions (conservative approach)
+        growth_rate = 0.05  # Conservative 5% growth
+        discount_rate = 0.09  # Typical ~9% discount rate
+        terminal_multiple = 12
+        projection_years = 10
+
+        # Sum of discounted future owner earnings
+        future_value = 0
+        for year in range(1, projection_years + 1):
+            future_earnings = owner_earnings * (1 + growth_rate) ** year
+            present_value = future_earnings / (1 + discount_rate) ** year
+            future_value += present_value
+
+        # Terminal value
+        terminal_value = (owner_earnings * (1 + growth_rate) ** projection_years * terminal_multiple) / ((1 + discount_rate) ** projection_years)
+
+        intrinsic_value = future_value + terminal_value
+        if intrinsic_value is not None and market_cap is not None and market_cap != 0:
+            margin_of_safety = (intrinsic_value - market_cap) / market_cap
+        else:
+            margin_of_safety = 0
+
+        return {
+            "intrinsic_value": intrinsic_value,
+            "margin_of_safety": margin_of_safety,
+            "owner_earnings": owner_earnings,
+            "assumptions": {
+                "growth_rate": growth_rate,
+                "discount_rate": discount_rate,
+                "terminal_multiple": terminal_multiple,
+                "projection_years": projection_years,
+            },
+            "details": ["Intrinsic value calculated using DCF model with owner earnings"],
+        }

@@ -20,7 +20,8 @@ class AgentManager:
     def __init__(
         self,
         metrics: pd.DataFrame,
-        agents: Optional[List[AgentType]] = None
+        agents: Optional[List[AgentType]] = None,
+        period: Optional[str] = 'annual',
     ):
         self.tickers: List[str] = list(metrics.ticker.values)
         self.metrics: pd.DataFrame = metrics
@@ -37,6 +38,8 @@ class AgentManager:
             ValuationAgent,
             FundamentalsAgent,
         ]
+        self.period = 'Q' if period == 'quarterly' else 'FY'
+        self.limit = 4 if period == 'quarterly' else 10
 
     def _analyze_one_ticker(self, ticker: str) -> Dict[str, Any]:
         """
@@ -47,7 +50,7 @@ class AgentManager:
         for AgentCls in self.agent_classes:
             name = AgentCls.__name__
             try:
-                results[name] = AgentCls(ticker, self.metrics).analyze()
+                results[name] = AgentCls(ticker, self.metrics, analysis_period=self.period, analysis_limit=self.limit).analyze()
             except Exception as e:
                 results[name] = e
         return results
