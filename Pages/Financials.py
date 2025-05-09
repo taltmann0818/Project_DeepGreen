@@ -10,8 +10,8 @@ from Components.AgentManager import AgentManager
 ### Page parameters --------------------------------------------------------------------------------
 
 # Retrieve authenticator class with YAML credentials from SL session_state for logout widget on this page
-#if not st.experimental_user.is_logged_in:
-#    st.warning("Go to the Dashboard Page to Get Started")
+if not st.experimental_user.is_logged_in:
+    st.warning("Go to the Dashboard Page to Get Started")
 
 ### Backend functions ------------------------------------------------------------------------------  
 
@@ -98,99 +98,99 @@ def reset_analysis():
 # ---------------
 
 ## Frontend ui -----------------------------------------------------------------------------------------------------------------------------
-#if st.experimental_user.is_logged_in:
+if st.experimental_user.is_logged_in:
 
-col1, col2 = st.columns([3, 1])
-   
-with col2:
-    with st.container():
-        st.markdown("<br><br>", unsafe_allow_html=True)
-    with st.container(border=True):
-        submit = st.button("Analyze",icon=":material/query_stats:",on_click=run_analysis)
+    col1, col2 = st.columns([3, 1])
 
-        # Segmented control to toggle showing the ticker input
-        mode_selection = st.segmented_control("Mode", ["Single", "Multi"], selection_mode="single", help="Whether to analyze a single or multiple stocks.",on_change=reset_analysis)
-        if mode_selection == "Single":
-            ticker_select = st.text_input("U.S. Equity",on_change=reset_analysis)
-        elif mode_selection == "Multi":
-            ticker_select = st.multiselect("Index",list(_INDEX_CONFIG.keys()),on_change=reset_analysis)
-            sample_size_select = st.slider('Index Sample Size',1, 500)
+    with col2:
+        with st.container():
+            st.markdown("<br><br>", unsafe_allow_html=True)
+        with st.container(border=True):
+            submit = st.button("Analyze",icon=":material/query_stats:",on_click=run_analysis)
+
+            # Segmented control to toggle showing the ticker input
+            mode_selection = st.segmented_control("Mode", ["Single", "Multi"], selection_mode="single", help="Whether to analyze a single or multiple stocks.",on_change=reset_analysis)
+            if mode_selection == "Single":
+                ticker_select = st.text_input("U.S. Equity",on_change=reset_analysis)
+            elif mode_selection == "Multi":
+                ticker_select = st.multiselect("Index",list(_INDEX_CONFIG.keys()),on_change=reset_analysis)
+                sample_size_select = st.slider('Index Sample Size',1, 500)
+            else:
+                ticker_select = None
+
+            st.subheader("Settings")
+            period_select = st.pills('Period',options=['Annual','Quarterly'],default=['Annual'],on_change=reset_analysis)
+            num_workers_select = st.slider('Worker Amt.', 10, 50, 10,on_change=reset_analysis)
+            agents_select = st.multiselect("Agents",options=AGENT_LIST,default=AGENT_LIST,on_change=reset_analysis)
+
+    with col1:
+        st.subheader("Financials")
+        if st.session_state.get("analysis_done", False):
+            summary  = st.session_state.summary
+            raw_data = st.session_state.raw_data
+
+            # --- Summmary Table ---
+            with st.container(border=True):
+                st.subheader("Analysis Summary")
+                st.dataframe(summary)
+
+            # --- Agent Cards Grid ---
+            with st.container(border=True):
+                st.subheader("Agent Results Grid")
+
+                results_ticker_select = st.selectbox("Ticker", list(raw_data.keys()))
+                agents = raw_data[results_ticker_select]
+
+                cols = st.columns(3)
+                for (name, ag), col in zip(agents.items(), cols * ((len(agents)//3)+1)):
+                    try:
+                        sig = ag.get("signal", "n/a").capitalize()
+
+                        with col:
+                            st.markdown(f"### {ag['name']}")
+                            color = {"Bullish":"green","Neutral":"gray","Bearish":"red"}.get(sig, "black")
+                            st.markdown(f"<span style='color:{color};font-weight:bold'>{sig}</span>", unsafe_allow_html=True)
+
+                            # Only show a progress bar if there's a score/max_score
+                            if "score" in ag and ag.get("max_score"):
+                                pct = ag["score"] / ag["max_score"]
+                                st.progress(pct)
+
+                            # Fallback: if there's a confidence field instead
+                            elif "confidence" in ag:
+                                st.metric("Confidence", f"{ag['confidence']}%")
+                    except:
+                        st.warning(f"Oops! Couldn't get signals for {name}. This is likely an error.")
+
+                tabs = st.tabs(list(ag['name'] for ag in agents.values()))
+                for tab, (name, ag) in zip(tabs, agents.items()):
+                    with tab:
+                        left, right = st.columns((1,2))
+
+                        with left:
+                            st.metric("Signal", ag.get("signal", "N/A").capitalize())
+                            if "score" in ag and ag.get("max_score"):
+                                st.metric("Score", f"{np.round(ag['score'],2)} / {ag['max_score']}")
+                            elif "confidence" in ag:
+                                st.metric("Confidence", f"{ag['confidence']}%")
+
+                            val = ag.get("valuation_analysis", {})
+                            if "margin_of_safety" in val:
+                                mos = val["margin_of_safety"] * 100
+                                st.metric("Margin of Safety", f"{mos:.1f}%")
+
+                        with right:
+                            for key, block in ag.items():
+                                if isinstance(block, dict):
+                                    with st.expander(key.replace("_"," ").title()):
+                                        for k, v in block.items():
+                                            st.write(f"**{k.replace('_',' ').title()}:** {v}")
+
+
         else:
-            ticker_select = None
+            with st.container(border=True):
+                st.write("Enter the params and click the button to get results!")
 
-        st.subheader("Settings")
-        period_select = st.pills('Period',options=['Annual','Quarterly'],default=['Annual'],on_change=reset_analysis)
-        num_workers_select = st.slider('Worker Amt.', 10, 50, 10,on_change=reset_analysis)
-        agents_select = st.multiselect("Agents",options=AGENT_LIST,default=AGENT_LIST,on_change=reset_analysis)
-
-with col1:
-    st.subheader("Financials")
-    if st.session_state.get("analysis_done", False):
-        summary  = st.session_state.summary
-        raw_data = st.session_state.raw_data
-
-        # --- Summmary Table ---
-        with st.container(border=True):
-            st.subheader("Analysis Summary")
-            st.dataframe(summary)
-
-        # --- Agent Cards Grid ---
-        with st.container(border=True):
-            st.subheader("Agent Results Grid")
-
-            results_ticker_select = st.selectbox("Ticker", list(raw_data.keys()))
-            agents = raw_data[results_ticker_select]
-
-            cols = st.columns(3)
-            for (name, ag), col in zip(agents.items(), cols * ((len(agents)//3)+1)):
-                try:
-                    sig = ag.get("signal", "n/a").capitalize()
-                
-                    with col:
-                        st.markdown(f"### {ag['name']}")
-                        color = {"Bullish":"green","Neutral":"gray","Bearish":"red"}.get(sig, "black")
-                        st.markdown(f"<span style='color:{color};font-weight:bold'>{sig}</span>", unsafe_allow_html=True)
-                
-                        # Only show a progress bar if there's a score/max_score
-                        if "score" in ag and ag.get("max_score"):
-                            pct = ag["score"] / ag["max_score"]
-                            st.progress(pct)
-                
-                        # Fallback: if there's a confidence field instead
-                        elif "confidence" in ag:
-                            st.metric("Confidence", f"{ag['confidence']}%")
-                except:
-                    st.warning(f"Oops! Couldn't get signals for {name}. This is likely an error.")
-
-            tabs = st.tabs(list(ag['name'] for ag in agents.values()))
-            for tab, (name, ag) in zip(tabs, agents.items()):
-                with tab:
-                    left, right = st.columns((1,2))
-
-                    with left:
-                        st.metric("Signal", ag.get("signal", "N/A").capitalize())
-                        if "score" in ag and ag.get("max_score"):
-                            st.metric("Score", f"{np.round(ag['score'],2)} / {ag['max_score']}")
-                        elif "confidence" in ag:
-                            st.metric("Confidence", f"{ag['confidence']}%")
-            
-                        val = ag.get("valuation_analysis", {})
-                        if "margin_of_safety" in val:
-                            mos = val["margin_of_safety"] * 100
-                            st.metric("Margin of Safety", f"{mos:.1f}%")
-            
-                    with right:
-                        for key, block in ag.items():
-                            if isinstance(block, dict):
-                                with st.expander(key.replace("_"," ").title()):
-                                    for k, v in block.items():
-                                        st.write(f"**{k.replace('_',' ').title()}:** {v}")
-
-
-    else:
-        with st.container(border=True):
-            st.write("Enter the params and click the button to get results!")
-                
 # ---------------
 # End of the App
 # ---------------
