@@ -2,6 +2,7 @@ import math
 from pandas import DataFrame
 from Components.Fundamentals import search_line_items, get_metric_value
 import pandas as pd
+import numpy as np
 
 class BenGrahamAgent:
     """
@@ -19,9 +20,9 @@ class BenGrahamAgent:
         self.limit = kwargs.get('analysis_limit')
         self.SIC_code = self.metrics['4digit_SIC_code'][0] if self.metrics['2digit_SIC_code'][0] == '73' else self.metrics['2digit_SIC_code'][0]
         if len(self.SIC_code) > 2:
-            self.threshold_matrix = pd.read_csv('Agents/Matrices/Fundamentals Matrix - 4digit SIC 73 - Business Services.csv')
+            self.threshold_matrix = pd.read_csv(kwargs.get('threshold_matrix_path',None).get('business_services_sic'))
         else:
-            self.threshold_matrix = pd.read_csv('Agents/Matrices/Fundamentals Matrix - 2digit SIC.csv')
+            self.threshold_matrix = pd.read_csv(kwargs.get('threshold_matrix_path',None).get('two_digit_sic'))
 
         self.analysis_data = {} # Storing returned results in dict
 
@@ -158,20 +159,29 @@ class BenGrahamAgent:
             details.append("Cannot compute debt ratio (missing total_assets).")
 
         # 3. Dividend track record
-        div_periods = financial_line_items.dividends_and_other_cash_distributions.values[0] if financial_line_items.dividends_and_other_cash_distributions.values.any() else None
-        if div_periods:
-            # In many data feeds, dividend outflow is shown as a negative number
-            # (money going out to shareholders). We'll consider any negative as 'paid a dividend'.
-            div_paid_years = sum(1 for d in div_periods if d < 0)
-            if div_paid_years > 0:
-                # e.g. if at least half the periods had dividends
-                if div_paid_years >= (len(div_periods) // 2 + 1):
-                    score += 1
-                    details.append("Company paid dividends in the majority of the reported years.")
-                else:
-                    details.append("Company has some dividend payments, but not most years.")
+        raw_div = (
+            financial_line_items.dividends_and_other_cash_distributions.values[0]
+            if financial_line_items.dividends_and_other_cash_distributions.values.any()
+            else None
+        )
+        if raw_div is not None:
+            # Make sure we have an iterable of dividend values
+            if isinstance(raw_div, (list, tuple)):
+                div_periods = raw_div
+            elif hasattr(raw_div, "__len__"):   # e.g. numpy array
+                div_periods = raw_div
             else:
-                details.append("Company did not pay dividends in these periods.")
+                div_periods = [raw_div]          # wrap a single float into a list
+        
+            # Count the years with a negative cash outflow (i.e. dividends paid)
+            div_paid_years = sum(1 for d in div_periods if d < 0)
+        
+            # Now len(div_periods) is safe
+            if div_paid_years >= (len(div_periods) // 2 + 1):
+                score += 1
+                details.append("Company paid dividends in the majority of the reported years.")
+            else:
+                details.append("Company has some dividend payments, but not most years.")
         else:
             details.append("No dividend data available to assess payout consistency.")
 

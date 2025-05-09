@@ -16,9 +16,9 @@ class BillAckmanAgent:
         self.limit = kwargs.get('analysis_limit')
         self.SIC_code = self.metrics['4digit_SIC_code'][0] if self.metrics['2digit_SIC_code'][0] == '73' else self.metrics['2digit_SIC_code'][0]
         if len(self.SIC_code) > 2:
-            self.threshold_matrix = pd.read_csv('Agents/Matrices/Fundamentals Matrix - 4digit SIC 73 - Business Services.csv')
+            self.threshold_matrix = pd.read_csv(kwargs.get('threshold_matrix_path',None).get('business_services_sic'))
         else:
-            self.threshold_matrix = pd.read_csv('Agents/Matrices/Fundamentals Matrix - 2digit SIC.csv')
+            self.threshold_matrix = pd.read_csv(kwargs.get('threshold_matrix_path',None).get('two_digit_sic'))
 
         self.analysis_data = {} # Storing returned results in dict
 

@@ -145,6 +145,7 @@ class FundementalData:
     def get_fundamentals(self):
         fundementals = pd.DataFrame()
         fundementals['ticker'] = self.financial_data['ticker']
+        fundementals['company_name'] = self.financial_data['company_name']
         fundementals['2digit_SIC_code'] = self.financial_data['2digit_SIC_code']
         fundementals['4digit_SIC_code'] = self.financial_data['4digit_SIC_code']
         fundementals['filing_date'] = self.financial_data['filing_date']
