@@ -81,7 +81,7 @@ def run_analysis():
             fetch_market_cap=True
         )
         financials = data_fetcher.fetch()
-        manager = AgentManager(financials, period=period_select,streamlit_progress=True)
+        manager = AgentManager(financials, period=period_select,agents=agents_select,streamlit_progress=True)
         raw_data, summary = manager.agent_analysis()
     
         # **store** in session_state
@@ -109,7 +109,7 @@ with col2:
         submit = st.button("Analyze",icon=":material/query_stats:",on_click=run_analysis)
 
         # Segmented control to toggle showing the ticker input
-        mode_selection = st.segmented_control("Mode", ["Single", "Multi"], selection_mode="single", help="This is the mode used for backtesting.",on_change=reset_analysis)
+        mode_selection = st.segmented_control("Mode", ["Single", "Multi"], selection_mode="single", help="Whether to analyze a single or multiple stocks.",on_change=reset_analysis)
         if mode_selection == "Single":
             ticker_select = st.text_input("U.S. Equity",on_change=reset_analysis)
         elif mode_selection == "Multi":

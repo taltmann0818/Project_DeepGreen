@@ -13,37 +13,59 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
 import streamlit as st
 
-from typing import List, Optional, Type, Dict, Any
+from typing import List, Optional, Type, Union, Dict, Any
 
-AgentType = Type  # or more strictly: Type[object] if you want
+AgentType = Type  # or more strictly: Type[object]
 
 class AgentManager:
+    ALL_AGENTS: List[AgentType] = [
+        BenGrahamAgent,
+        BillAckmanAgent,
+        CathieWoodAgent,
+        CharlieMungerAgent,
+        PeterLynchAgent,
+        PhilFisherAgent,
+        StanleyDruckenmillerAgent,
+        WarrenBuffettAgent,
+        ValuationAgent,
+        FundamentalsAgent,
+    ]
+    AGENT_MAP: Dict[str, AgentType] = {cls.__name__: cls for cls in ALL_AGENTS}
+
     def __init__(
         self,
         metrics: pd.DataFrame,
-        agents: Optional[List[AgentType]] = None,
+        agents: Optional[List[Union[str, AgentType]]] = None,
         period: Optional[str] = 'Annual',
         streamlit_progress: Optional[bool] = False
     ):
         self.tickers: List[str] = list(metrics.ticker.values)
         self.metrics: pd.DataFrame = metrics
-        # allow injection or default to all agent classes
-        self.agent_classes: List[AgentType] = agents or [
-            BenGrahamAgent,
-            BillAckmanAgent,
-            CathieWoodAgent,
-            CharlieMungerAgent,
-            PeterLynchAgent,
-            PhilFisherAgent,
-            StanleyDruckenmillerAgent,
-            WarrenBuffettAgent,
-            ValuationAgent,
-            FundamentalsAgent,
-        ]
+
+        if agents is None:
+            self.agent_classes = self.ALL_AGENTS.copy()
+        else:
+            resolved: List[AgentType] = []
+            for item in agents:
+                if isinstance(item, str):
+                    if item in self.AGENT_MAP:
+                        resolved.append(self.AGENT_MAP[item])
+                    else:
+                        raise ValueError(
+                            f"Unknown agent name '{item}'. Valid names: {list(self.AGENT_MAP.keys())}"
+                        )
+                elif isinstance(item, type):
+                    resolved.append(item)
+                else:
+                    raise TypeError(
+                        f"Agent entries must be class or string, got {type(item)}"
+                    )
+            self.agent_classes = resolved
+
         self.period = 'Q' if period == 'Quarterly' else 'FY'
         self.limit = 4 if period == 'Quarterly' else 10
-        self.threshold_matrix_path = {'two_digit_sic':                ('C:/Users/taltmann/Documents/ProjectDeepGreen/Agents/Matrices/Fundamentals Matrix - 2digit SIC.csv'),
-                                      'business_services_sic':        ('C:/Users/taltmann/Documents/ProjectDeepGreen/Agents/Matrices/Fundamentals Matrix - 4digit SIC 73 - Business Services.csv')
+        self.threshold_matrix_path = {'two_digit_sic':                ('/Users/thomasaltmann/PycharmProjects/Project DeepGreen/Agents/Matrices/Fundamentals Matrix - 2digit SIC.csv'),
+                                      'business_services_sic':        ('/Users/thomasaltmann/PycharmProjects/Project DeepGreen/Agents/Matrices/Fundamentals Matrix - 4digit SIC 73 - Business Services.csv')
                                      }
         self.streamlit_progress = streamlit_progress
 
@@ -85,6 +107,7 @@ class AgentManager:
                 total_score += float(res.get('score', 0))
             rows.append({
                 'Ticker': ticker,
+                'Company Name': self.metrics[(self.metrics['ticker']==ticker)]['company_name'][0],
                 'Bullish': bullish,
                 'Bearish': bearish,
                 'Neutral': neutral,
