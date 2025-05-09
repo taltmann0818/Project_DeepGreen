@@ -64,8 +64,8 @@ class AgentManager:
 
         self.period = 'Q' if period == 'Quarterly' else 'FY'
         self.limit = 4 if period == 'Quarterly' else 10
-        self.threshold_matrix_path = {'two_digit_sic':                ('/Users/thomasaltmann/PycharmProjects/Project DeepGreen/Agents/Matrices/Fundamentals Matrix - 2digit SIC.csv'),
-                                      'business_services_sic':        ('/Users/thomasaltmann/PycharmProjects/Project DeepGreen/Agents/Matrices/Fundamentals Matrix - 4digit SIC 73 - Business Services.csv')
+        self.threshold_matrix_path = {'two_digit_sic':                ('Agents/Matrices/Fundamentals Matrix - 2digit SIC.csv'),
+                                      'business_services_sic':        ('Agents/Matrices/Fundamentals Matrix - 4digit SIC 73 - Business Services.csv')
                                      }
         self.streamlit_progress = streamlit_progress
 
