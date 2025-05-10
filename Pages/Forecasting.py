@@ -15,7 +15,7 @@ from Components.BackTesting import BackTesting
 ### Page parameters --------------------------------------------------------------------------------
 
 # Retrieve authenticator class with YAML credentials from SL session_state for logout widget on this page
-if not st.experimental_user.is_logged_in:
+if not st.user.is_logged_in:
     st.warning("Go to the Dashboard Page to Get Started")
 
 ### Backend functions ------------------------------------------------------------------------------  
@@ -66,15 +66,6 @@ def make_predictions(model, ticker, data_window, prediction_window, model_window
 
     return preds_df
 
-# Need df with company ticker, company name, sector, prediction vs actual differential, eps, p/e ratio, p/s ratio, roe, roa, d/e ratio, Price-to-Cash Flow (P/CF) Ratio, 52 week high, 52 week low
-# P/CF = Market Capitalization / Operating Cash Flow
-# EPS = Net Income / Average Outstanding Shares
-# D/E = Total Liabilities / Shareholders' Equity
-# ROE = Net Income / Shareholders' Equity
-# ROA = Net Income / Total Assets
-# P/E = Market Price per Share / Earnings per Share (EPS)​
-# P/S = Market Capitalization / Total Revenue​
-# EV/EBITDA = (Market Capitalization + Debt - Cash) / EBITDA
 def multi_forecasting(tickers, initial_capital, model, data_window, prediction_window, model_window_size, pct_change_entry, pct_change_exit,spinner_string):
 
     forecast_results = {
@@ -114,7 +105,7 @@ def multi_forecasting(tickers, initial_capital, model, data_window, prediction_w
 # ---------------
 
 ## Frontend ui -----------------------------------------------------------------------------------------------------------------------------
-if st.experimental_user.is_logged_in:
+if st.user.is_logged_in:
 
     col1, col2 = st.columns([3, 1])
         

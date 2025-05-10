@@ -1,4 +1,5 @@
 import streamlit as st
+import datetime
 
 st.set_page_config(page_title="DeepGreen",
                    layout="wide",
@@ -7,7 +8,7 @@ st.set_page_config(page_title="DeepGreen",
 
 def login():
     left, middle, right = st.columns(3)
-    if not st.experimental_user.is_logged_in:
+    if not st.user.is_logged_in:
         with middle:
             st.subheader('Welcome back')
             if st.button("Continue with Microsoft Account", icon=":material/login:"):
@@ -17,7 +18,7 @@ def login():
     st.rerun()
 
 def logout():
-    if st.experimental_user.is_logged_in:
+    if st.user.is_logged_in:
         st.logout()
         st.rerun()
 
@@ -29,9 +30,13 @@ forecasting = st.Page("Pages/Forecasting.py", title="Forecasting", icon=":materi
 backtesting = st.Page("Pages/Backtesting.py", title="Backtesting", icon=":material/candlestick_chart:")
 
 # Navigation structure
-if st.experimental_user.is_logged_in:
-    st.sidebar.markdown(f"### Hello, {st.experimental_user.name}")
-    st.sidebar.markdown(f"### Logged in as {st.experimental_user.email}")
+if st.user.is_logged_in:
+
+    # Check token issue time for early expiration
+    st.sidebar.subheader(st.user.exp)
+
+    st.sidebar.markdown(f"### Hello, {st.user.name}")
+    st.sidebar.markdown(f"### Logged in as {st.user.email}")
     pg = st.navigation(
         {
             "Account": [logout_page],

@@ -10,7 +10,7 @@ from Components.AgentManager import AgentManager
 ### Page parameters --------------------------------------------------------------------------------
 
 # Retrieve authenticator class with YAML credentials from SL session_state for logout widget on this page
-if not st.experimental_user.is_logged_in:
+if not st.user.is_logged_in:
     st.warning("Go to the Dashboard Page to Get Started")
 
 ### Backend functions ------------------------------------------------------------------------------  
@@ -98,7 +98,7 @@ def reset_analysis():
 # ---------------
 
 ## Frontend ui -----------------------------------------------------------------------------------------------------------------------------
-if st.experimental_user.is_logged_in:
+if st.user.is_logged_in:
 
     col1, col2 = st.columns([3, 1])
 

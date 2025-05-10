@@ -156,6 +156,9 @@ class FundamentalsAgent:
             "signal": overall_signal,
             "confidence": confidence,
             "reasoning": reasoning,
+            "pe_ratio": pe_ratio,
+            "pb_ratio": pb_ratio,
+            "ps_ratio": ps_ratio,
         }
 
         return self.analysis_data

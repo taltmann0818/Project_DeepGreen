@@ -105,9 +105,18 @@ class AgentManager:
                     neutral += 1
                 # assume score is numeric, defaulting to 0
                 total_score += float(res.get('score', 0))
+
+                if res.get('name') is 'Fundamentals':
+                    pe_ratio = res.get('pe_ratio', None)
+                    pb_ratio = res.get('pb_ratio', None)
+                    ps_ratio = res.get('ps_ratio', None)
+
             rows.append({
                 'Ticker': ticker,
                 'Company Name': self.metrics[(self.metrics['ticker']==ticker)]['company_name'][0],
+                'Price/Earnings': pe_ratio if pe_ratio else None,
+                'Price/Book': pb_ratio if pb_ratio else None,
+                'Price/Sales': ps_ratio if ps_ratio else None,
                 'Bullish': bullish,
                 'Bearish': bearish,
                 'Neutral': neutral,
