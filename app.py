@@ -33,7 +33,10 @@ backtesting = st.Page("Pages/Backtesting.py", title="Backtesting", icon=":materi
 if st.user.is_logged_in:
 
     # Check token issue time for early expiration
-    st.sidebar.subheader(st.user.exp)
+    issued_at = datetime.datetime.fromtimestamp(st.user.iat)
+    if datetime.datetime.now() - issued_at > datetime.timedelta(hours=1):
+        st.warning("Session expired: logging you out.")
+        st.logout()
 
     st.sidebar.markdown(f"### Hello, {st.user.name}")
     st.sidebar.markdown(f"### Logged in as {st.user.email}")

@@ -114,17 +114,18 @@ class AgentManager:
             rows.append({
                 'Ticker': ticker,
                 'Company Name': self.metrics[(self.metrics['ticker']==ticker)]['company_name'][0],
-                'Price/Earnings': pe_ratio if pe_ratio else None,
-                'Price/Book': pb_ratio if pb_ratio else None,
-                'Price/Sales': ps_ratio if ps_ratio else None,
                 'Bullish': bullish,
                 'Bearish': bearish,
                 'Neutral': neutral,
-                'Score': total_score
+                'Score': total_score,
+                'Price/Earnings': pe_ratio if pe_ratio else None,
+                'Price/Book': pb_ratio if pb_ratio else None,
+                'Price/Sales': ps_ratio if ps_ratio else None,
             })
 
         df = pd.DataFrame(rows)
         df['Signal'] = df[['Bullish', 'Bearish', 'Neutral']].idxmax(axis=1)
+        df = df[['Ticker', 'Company Name', 'Signal', 'Score', 'Bullish', 'Bearish', 'Neutral', 'Price/Earnings', 'Price/Book', 'Price/Sales']]
         return df.set_index('Ticker')
 
     def agent_analysis(self) -> Dict[str, Dict[str, Any]]:
