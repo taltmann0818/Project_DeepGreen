@@ -8,54 +8,61 @@ st.set_page_config(page_title="DeepGreen",
 
 
 def login():
-    # Inject custom CSS
+    # 1) Inject CSS up front
     st.markdown(
         """
         <style>
-        .login-card {
-            background: #fff;
+        /* CARD STYLING */
+        #login-card {
+            background: #ffffff;
             border-radius: 12px;
             box-shadow: 0 4px 20px rgba(0,0,0,0.1);
             padding: 2rem;
+            max-width: 400px;
+            margin: 2rem auto;
             text-align: center;
         }
-        .login-card h3 {
-            margin-bottom: 1.5rem;
-        }
-        .login-card button {
-            margin: 0.5rem 0;
+
+        /* BUTTONS: every stButton that follows #login-card */
+        #login-card ~ .stButton > button {
+            margin-top: 1rem;
             font-size: 1rem;
             border-radius: 6px;
+            width: 100%;
+            background-color: #0078d4;
+            color: #ffffff;
         }
-        .login-card button:hover {
-            opacity: 0.9;
+        #login-card ~ .stButton > button:hover {
+            background-color: #005a9e;
         }
         </style>
         """,
         unsafe_allow_html=True,
     )
 
-    col1, col2, col3 = st.columns([1, 2, 1])  # Responsive columns
-    with col2:
-        if not st.user.is_logged_in:  # Access user state
-            st.markdown('<div class="login-card">', unsafe_allow_html=True)
-            st.markdown("### Welcome Back!", unsafe_allow_html=True)
+    if not st.user.is_logged_in:
+        # 2) Emit an empty div with our ID — this will precede all the stButton widgets
+        st.markdown('<div id="login-card">', unsafe_allow_html=True)
 
-            # Provider buttons
-            providers = {
-                "Microsoft": "microsoft",
-                "Google": "google",
-                "GitHub": "github",
-            }
-            for name, key in providers.items():
-                if st.button(
-                        f"Continue with {name}",
-                        icon=":material/login:",
-                        use_container_width=True
-                ):
-                    st.login(key)  # Trigger OIDC flow
-            st.markdown("</div>", unsafe_allow_html=True)
-            st.stop()
+        # Title inside our card
+        st.markdown("### Welcome Back!", unsafe_allow_html=True)
+
+        # 3) Loop over your providers
+        providers = {
+            "Microsoft": "microsoft",
+            "Google":    "google",
+            "GitHub":    "github",
+            # just add more here later…
+        }
+        for name, key in providers.items():
+            if st.button(f"Continue with {name}", icon=":material/login:", key=key):
+                st.login(key)
+
+        # close our card div
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        st.stop()
+
     st.rerun()
 
 def logout():
