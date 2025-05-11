@@ -29,12 +29,12 @@ class FundamentalsAgent:
                 "revenue",
                 "earnings_per_share",
                 "book_value",
-                "book_value_per_share",
                 "current_ratio",
                 "debt_to_equity",
                 "free_cash_flow_per_share",
-                "price_to_book_ratio",
+                "outstanding_shares",
                 "market_cap",
+                "share_price",
                 "net_income",
             ],
             period=self.period,
@@ -97,7 +97,7 @@ class FundamentalsAgent:
         current_ratio = financial_line_items.current_ratio.values[0]
         debt_to_equity = financial_line_items.debt_to_equity.values[0]
         free_cash_flow_per_share = financial_line_items.free_cash_flow_per_share.values[0]
-        book_value_per_share = financial_line_items.book_value_per_share.values[0]
+        book_value_per_share = (financial_line_items.book_value.values[0] / financial_line_items.outstanding_shares.values[0])
 
         health_score = 0
         current_ratio_threshold = get_metric_value(self.threshold_matrix, self.SIC_code, 'current_ratio')
@@ -119,9 +119,9 @@ class FundamentalsAgent:
         }
         
         # 4. Price to X ratios
-        pe_ratio = financial_line_items.market_cap.values[0] / financial_line_items.net_income.values[0]
-        pb_ratio = financial_line_items.price_to_book_ratio.values[0]
-        ps_ratio = financial_line_items.market_cap.values[0] / financial_line_items.revenue.values[0]
+        pe_ratio = financial_line_items.share_price.values[0] / financial_line_items.earnings_per_share.values[0]
+        pb_ratio = financial_line_items.share_price.values[0] / (financial_line_items.book_value.values[0] / financial_line_items.outstanding_shares.values[0])
+        ps_ratio = financial_line_items.share_price.values[0] / (financial_line_items.revenue.values[0] / financial_line_items.outstanding_shares.values[0])
 
         thresholds = [
             (pe_ratio, get_metric_value(self.threshold_matrix, self.SIC_code, 'price_to_earning_ratio')),  # Reasonable P/E ratio

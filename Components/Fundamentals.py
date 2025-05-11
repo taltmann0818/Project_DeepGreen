@@ -48,11 +48,11 @@ class FundementalData:
             sic_codes = []
             for asof in financials['end_date']:
                 if self.fetch_market_cap:
-                    market_cap, sic_code = self.get_market_cap(ticker, asof)
+                    market_cap, sic_code = self.get_market_cap(ticker)
                     market_caps.append(market_cap)
                     sic_codes.append(sic_code)
                 if self.fetch_stock_price:
-                    close_prices.append(self.get_close_price(ticker, asof))
+                    close_prices.append(self.get_close_price(ticker))
             if self.fetch_market_cap:
                 financials['market_cap'] = market_caps
                 financials['4digit_SIC_code'] = sic_codes
@@ -104,7 +104,7 @@ class FundementalData:
             # compute Q4 = FY – (Q1 + Q2 + Q3)
             q4_vals = fy_vals - (q1_vals + q2_vals + q3_vals)
             new = {'ticker': ticker,'cik': fy_row['cik'],'company_name': fy_row['company_name'],'fiscal_year': year,'fiscal_period': 'Q4','end_date': fy_row['end_date'],
-                   'filing_date': fy_row['filing_date'], '2digit_SIC_code': fy_row['2digit_SIC_code'], '4digit_SIC_code': fy_row['4digit_SIC_code'], 'market_cap': fy_row['market_cap']}
+                   'filing_date': fy_row['filing_date'], '2digit_SIC_code': fy_row['2digit_SIC_code'], '4digit_SIC_code': fy_row['4digit_SIC_code'], 'market_cap': fy_row['market_cap'],'share_price': fy_row['share_price']}
             for metric, val in q4_vals.items():
                 new[metric] = val
             q4_rows.append(new)
@@ -173,11 +173,7 @@ class FundementalData:
             'income_statement.basic_average_shares.value']
         fundementals['net_margin'] = self.financial_data['income_statement.net_income_loss.value'] / self.financial_data[
             'income_statement.revenues.value']
-        fundementals['book_value'] = self.financial_data['balance_sheet.assets.value'] - self.financial_data['balance_sheet.liabilities.value']
-        self.financial_data['book_value_per_share'] = fundementals['book_value'] / self.financial_data[
-            'income_statement.basic_average_shares.value']
-        fundementals['book_value_per_share'] = self.financial_data['book_value_per_share']
-        fundementals['price_to_book_ratio'] = self.financial_data['market_cap'] / fundementals['book_value']
+        fundementals['book_value'] = self.financial_data['balance_sheet.assets.value'] - self.financial_data['balance_sheet.intangible_assets.value'] - self.financial_data['balance_sheet.liabilities.value']
         fundementals['return_on_invested_capital'] = (self.financial_data['income_statement.net_income_loss.value'] - self.financial_data[
             'income_statement.common_stock_dividends.value']) / (self.financial_data['balance_sheet.equity.value'] + self.financial_data[
             'balance_sheet.liabilities.value'])
@@ -210,8 +206,11 @@ class FundementalData:
         fundementals['depreciation_and_amortization'] = self.financial_data[
             'income_statement.depreciation_and_amortization.value']
         fundementals['earnings_per_share'] = self.financial_data['income_statement.basic_earnings_per_share.value']
-        fundementals['market_cap'] = self.financial_data['market_cap']
         fundementals['intangible_assets'] = self.financial_data['balance_sheet.intangible_assets.value']
+        if self.fetch_market_cap:
+            fundementals['market_cap'] = self.financial_data['market_cap']
+        if self.fetch_stock_price:
+            fundementals['share_price'] = self.financial_data['share_price']
 
         return fundementals.set_index('end_date')
 

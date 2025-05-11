@@ -106,10 +106,11 @@ class AgentManager:
                 # assume score is numeric, defaulting to 0
                 total_score += float(res.get('score', 0))
 
-                if res.get('name') is 'Fundamentals':
-                    pe_ratio = res.get('pe_ratio', None)
-                    pb_ratio = res.get('pb_ratio', None)
-                    ps_ratio = res.get('ps_ratio', None)
+                pe_ratio = res.get('pe_ratio', None) if res.get('name') == 'Fundamentals' else None
+                pb_ratio = res.get('pb_ratio', None) if res.get('name') == 'Fundamentals' else None
+                ps_ratio = res.get('ps_ratio', None) if res.get('name') == 'Fundamentals' else None
+
+            evEBITDA = self.metrics[(self.metrics['ticker'] == ticker)]['enterprise_value'][0] / self.metrics[(self.metrics['ticker'] == ticker)]['ebitda'][0]
 
             rows.append({
                 'Ticker': ticker,
@@ -118,14 +119,15 @@ class AgentManager:
                 'Bearish': bearish,
                 'Neutral': neutral,
                 'Score': total_score,
-                'Price/Earnings': pe_ratio if pe_ratio else None,
-                'Price/Book': pb_ratio if pb_ratio else None,
-                'Price/Sales': ps_ratio if ps_ratio else None,
+                'Price/Earnings': pe_ratio,
+                'Price/Book': pb_ratio,
+                'Price/Sales': ps_ratio,
+                'Enterprise Value/EBITDA': evEBITDA,
             })
 
         df = pd.DataFrame(rows)
         df['Signal'] = df[['Bullish', 'Bearish', 'Neutral']].idxmax(axis=1)
-        df = df[['Ticker', 'Company Name', 'Signal', 'Score', 'Bullish', 'Bearish', 'Neutral', 'Price/Earnings', 'Price/Book', 'Price/Sales']]
+        df = df[['Ticker', 'Company Name', 'Signal', 'Score', 'Bullish', 'Bearish', 'Neutral', 'Price/Earnings', 'Price/Book', 'Price/Sales', 'Enterprise Value/EBITDA']]
         return df.set_index('Ticker')
 
     def agent_analysis(self) -> Dict[str, Dict[str, Any]]:

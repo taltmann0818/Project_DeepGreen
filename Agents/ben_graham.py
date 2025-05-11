@@ -33,7 +33,7 @@ class BenGrahamAgent:
                 "earnings_per_share",
                 "revenue",
                 "net_income",
-                "book_value_per_share",
+                "book_value",
                 "debt_ratio",
                 "current_ratio",
                 "dividends_and_other_cash_distributions",
@@ -199,7 +199,7 @@ class BenGrahamAgent:
 
         total_liabilities = financial_line_items.total_liabilities.values[0] if financial_line_items.total_liabilities.values.any() else 0
         current_assets = financial_line_items.current_assets.values[0] if financial_line_items.current_assets.values.any() else 0
-        book_value_ps = financial_line_items.book_value_per_share.values[0] if financial_line_items.book_value_per_share.values.any() else 0
+        book_value = financial_line_items.book_value.values[0] if financial_line_items.book_value.values.any() else 0
         eps = financial_line_items.earnings_per_share.values[0] if financial_line_items.earnings_per_share.values.any() else 0
         shares_outstanding = financial_line_items.outstanding_shares.values[0] if financial_line_items.outstanding_shares.values.any() else 0
         market_cap = financial_line_items.market_cap.values[0] if financial_line_items.market_cap.values.any() else 0
@@ -235,6 +235,7 @@ class BenGrahamAgent:
         #   Compare the result to the current price_per_share
         #   If GrahamNumber >> price, indicates undervaluation
         graham_number = None
+        book_value_ps = book_value / shares_outstanding
         if eps > 0 and book_value_ps > 0:
             graham_number = math.sqrt(22.5 * eps * book_value_ps)
             details.append(f"Graham Number = {graham_number:.2f}")

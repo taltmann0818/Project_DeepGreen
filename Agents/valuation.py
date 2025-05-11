@@ -40,7 +40,6 @@ class ValuationAgent():
                 "ebitda",
                 "market_cap",
                 "book_value",
-                "price_to_book_ratio",
             ],
             period=self.period,
             limit=2,  # Override kwargs to ensure this is always period-over-period
@@ -94,7 +93,7 @@ class ValuationAgent():
         rim_val = calculate_residual_income_value(
             market_cap=market_cap,
             net_income=line_items.net_income.values[0],
-            price_to_book_ratio=line_items.price_to_book_ratio.values[0],
+            book_val=line_items.book_value.values[0],
             book_value_growth=book_value_growth,
         )
 
@@ -217,7 +216,6 @@ def calculate_ev_ebitda_value(financial_metrics: DataFrame):
     if not (enterprise_values[0] and enterprise_value_to_ebitda_ratio[0]) or enterprise_value_to_ebitda_ratio[0] == 0:
         return 0
 
-    ebitda_now = enterprise_values[0] / enterprise_value_to_ebitda_ratio[0]
     med_mult = median(enterprise_value_to_ebitda_ratio)
     ev_implied = med_mult * ebitdas[0]
     net_debt = (enterprise_values[0] or 0) - (financial_metrics.market_cap.values[0] or 0)
@@ -227,17 +225,16 @@ def calculate_ev_ebitda_value(financial_metrics: DataFrame):
 def calculate_residual_income_value(
         market_cap: float,
         net_income: float,
-        price_to_book_ratio: float,
+        book_val: float,
         book_value_growth: float = 0.03,
         cost_of_equity: float = 0.10,
         terminal_growth_rate: float = 0.03,
         num_years: int = 5,
 ):
     """Residual Income Model (Edwards‑Bell‑Ohlson)."""
-    if not (market_cap and net_income and price_to_book_ratio and price_to_book_ratio > 0):
+    if not (market_cap and net_income and book_val and book_val > 0):
         return 0
 
-    book_val = market_cap / price_to_book_ratio
     ri0 = net_income - cost_of_equity * book_val
     if ri0 <= 0:
         return 0

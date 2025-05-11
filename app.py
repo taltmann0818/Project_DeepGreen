@@ -37,14 +37,13 @@ def login():
     col1, col2, col3 = st.columns([1, 2, 1])  # Responsive columns
     with col2:
         if not st.user.is_logged_in:  # Access user state
-            with st.container():
+            with st.container(border=True):
                 st.markdown("### Welcome Back!", unsafe_allow_html=True)
 
                 # Provider buttons
                 providers = {
                     "Microsoft": "microsoft",
                     "Google": "google",
-                    "GitHub": "github",
                 }
                 for name, key in providers.items():
                     if st.button(
