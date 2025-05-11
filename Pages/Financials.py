@@ -77,7 +77,7 @@ def run_analysis():
         data_fetcher = FundementalData(
             tickers,
             workers=num_workers_select,
-            fetch_stock_price=False,
+            fetch_stock_price=True,
             fetch_market_cap=True
         )
         financials = data_fetcher.fetch()
