@@ -2,8 +2,8 @@ from statistics import median
 from pandas import DataFrame
 from Components.Fundamentals import search_line_items, get_metric_value
 import pandas as pd
-
-
+import numpy as np
+    
 class ValuationAgent():
     """Valuation Agent
     Implements four complementary valuation methodologies and aggregates them with
@@ -49,36 +49,36 @@ class ValuationAgent():
         # ------------------------------------------------------------------
         # Valuation models
         # ------------------------------------------------------------------
-        wc_vals = line_items.working_capital.values
-        if len(wc_vals) >= 2:
-            wc_change = wc_vals[0] - wc_vals[1]
-        else:
-            wc_change = 0  # or whatever default makes sense
+        # --- Working capital change ---
+        wc = line_items.working_capital.values
+        wc_change = (wc[0] - wc[1]) if len(wc) >= 2 else 0
 
-        earn_vals = line_items.earnings_per_share.values
-        if len(earn_vals) >= 2 and earn_vals[1] != 0:
-            earnings_growth = (earn_vals[0] - earn_vals[1]) / abs(earn_vals[1])
+        # --- EPS growth ---
+        eps = line_items.earnings_per_share.values
+        if len(eps) >= 2 and abs(eps[1]) > 0:
+            earnings_growth = (eps[0] - eps[1]) / abs(eps[1])
         else:
             earnings_growth = 0
 
-        bv_vals = line_items.book_value.values
-        if len(bv_vals) >= 2 and bv_vals[1] != 0:
-            book_value_growth = (bv_vals[0] - bv_vals[1]) / abs(bv_vals[1])
+        # --- Book value growth ---
+        bv = line_items.book_value.values
+        if len(bv) >= 2 and abs(bv[1]) > 0:
+            book_value_growth = (bv[0] - bv[1]) / abs(bv[1])
         else:
             book_value_growth = 0
 
         # Owner Earnings
         owner_val = calculate_owner_earnings_value(
-            net_income=line_items.net_income.values[0],
-            depreciation=line_items.depreciation_and_amortization.values[0],
-            capex=line_items.capital_expenditure.values[0],
+            net_income=line_items.net_income.values[0] or 0,
+            depreciation=line_items.depreciation_and_amortization.values[0] or 0,
+            capex=line_items.capital_expenditure.values[0] or 0,
             working_capital_change=wc_change,
             growth_rate=earnings_growth
         )
 
         # Discounted Cash Flow
         dcf_val = calculate_intrinsic_value(
-            free_cash_flow=line_items.free_cash_flow.values[0],
+            free_cash_flow=line_items.free_cash_flow.values[0] or 0,
             growth_rate=earnings_growth,
             discount_rate=0.10,
             terminal_growth_rate=0.03,
@@ -89,11 +89,11 @@ class ValuationAgent():
         ev_ebitda_val = calculate_ev_ebitda_value(line_items)
 
         # Residual Income Model
-        market_cap = line_items.market_cap.values[0]
+        market_cap = line_items.market_cap.values[0] or 0
         rim_val = calculate_residual_income_value(
             market_cap=market_cap,
-            net_income=line_items.net_income.values[0],
-            book_val=line_items.book_value.values[0],
+            net_income=line_items.net_income.values[0] or 0,
+            book_val=line_items.book_value.values[0] or 0,
             book_value_growth=book_value_growth,
         )
 
@@ -101,43 +101,59 @@ class ValuationAgent():
         # Aggregate & signal
         # ------------------------------------------------------------------
         method_values = {
-            "dcf": {"value": dcf_val, "weight": 0.35},
-            "owner_earnings": {"value": owner_val, "weight": 0.35},
-            "ev_ebitda": {"value": ev_ebitda_val, "weight": 0.20},
-            "residual_income": {"value": rim_val, "weight": 0.10},
+            "dcf":             {"value": dcf_val,        "weight": 0.35},
+            "owner_earnings":  {"value": owner_val,      "weight": 0.35},
+            "ev_ebitda":       {"value": ev_ebitda_val,  "weight": 0.20},
+            "residual_income": {"value": rim_val,        "weight": 0.10},
         }
 
         total_weight = sum(v["weight"] for v in method_values.values() if v["value"] > 0)
 
-        for v in method_values.values():
-            v["gap"] = (v["value"] - market_cap) / market_cap if v["value"] > 0 else None
+        # compute a “gap” only if market_cap > 0
+        for m in method_values.values():
+            val = m["value"]
+            if val > 0 and market_cap > 0:
+                m["gap"] = (val - market_cap) / market_cap
+            else:
+                m["gap"] = None
 
-        weighted_gap = sum(
-            v["weight"] * v["gap"] for v in method_values.values() if v["gap"] is not None
-        ) / total_weight
+        # if all weights were filtered out, set weighted_gap = 0
+        if total_weight > 0:
+            weighted_gap = sum(m["weight"] * m["gap"] for m in method_values.values() if m["gap"] is not None) / total_weight
+        else:
+            weighted_gap = 0
 
-        signal = "bullish" if weighted_gap > 0.15 else "bearish" if weighted_gap < -0.15 else "neutral"
+        signal = (
+            "bullish" if weighted_gap > 0.15 else
+            "bearish" if weighted_gap < -0.15 else
+            "neutral"
+        )
         confidence = round(min(abs(weighted_gap) / 0.30 * 100, 100))
 
-        reasoning = {
-            f"{m}_analysis": {
-                "signal": (
-                    "bullish" if vals["gap"] and vals["gap"] > 0.15 else
-                    "bearish" if vals["gap"] and vals["gap"] < -0.15 else "neutral"
-                ),
-                "details": (
-                    f"Value: ${vals['value']:,.2f}, Market Cap: ${market_cap:,.2f}, "
-                    f"Gap: {vals['gap']:.1%}, Weight: {vals['weight'] * 100:.0f}%"
-                ),
-            }
-            for m, vals in method_values.items() if vals["value"] > 0
-        }
+        # build reasoning, only for methods that have a gap
+        reasoning = {}
+        for name, m in method_values.items():
+            gap = m["gap"]
+            if gap is not None:
+                reasoning[f"{name}_analysis"] = {
+                    "signal": (
+                        "bullish" if gap > 0.15 else
+                        "bearish" if gap < -0.15 else
+                        "neutral"
+                    ),
+                    "details": (
+                        f"Value: ${m['value']:,.2f}, "
+                        f"Market Cap: ${market_cap:,.2f}, "
+                        f"Gap: {gap:.1%}, "
+                        f"Weight: {m['weight'] * 100:.0f}%"
+                    ),
+                }
 
         self.analysis_data = {
-            "name": self.agent_name,
-            "signal": signal,
+            "name":       self.agent_name,
+            "signal":     signal,
             "confidence": confidence,
-            "reasoning": reasoning,
+            "reasoning":  reasoning,
         }
 
         return self.analysis_data
@@ -170,15 +186,16 @@ def calculate_owner_earnings_value(
         future = owner_earnings * (1 + growth_rate) ** yr
         pv += future / (1 + required_return) ** yr
 
+    # check denominator in terminal value
     terminal_growth = min(growth_rate, 0.03)
-    term_val = (owner_earnings * (1 + growth_rate) ** num_years * (1 + terminal_growth)) / (
-            required_return - terminal_growth
-    )
+    denom = required_return - terminal_growth
+    if denom <= 0:
+        return 0
+    term_val = (owner_earnings * (1 + growth_rate) ** num_years * (1 + terminal_growth)) / denom
     pv_term = term_val / (1 + required_return) ** num_years
 
     intrinsic = pv + pv_term
     return intrinsic * (1 - margin_of_safety)
-
 
 def calculate_intrinsic_value(
         free_cash_flow: float,
@@ -188,7 +205,7 @@ def calculate_intrinsic_value(
         num_years: int = 5,
 ) -> float:
     """Classic DCF on FCF with constant growth and terminal value."""
-    if free_cash_flow is None or free_cash_flow <= 0:
+    if free_cash_flow <= 0:
         return 0
 
     pv = 0.0
@@ -196,29 +213,38 @@ def calculate_intrinsic_value(
         fcft = free_cash_flow * (1 + growth_rate) ** yr
         pv += fcft / (1 + discount_rate) ** yr
 
-    term_val = (
-                       free_cash_flow * (1 + growth_rate) ** num_years * (1 + terminal_growth_rate)
-               ) / (discount_rate - terminal_growth_rate)
+    term_val = (free_cash_flow * (1 + growth_rate) ** num_years * (1 + terminal_growth_rate)) / (discount_rate - terminal_growth_rate)
     pv_term = term_val / (1 + discount_rate) ** num_years
 
     return pv + pv_term
 
 
-def calculate_ev_ebitda_value(financial_metrics: DataFrame):
+def calculate_ev_ebitda_value(financial_metrics: DataFrame) -> float:
     """Implied equity value via median EV/EBITDA multiple."""
     if financial_metrics.empty:
         return 0
 
-    enterprise_values = financial_metrics.enterprise_value.values
-    ebitdas = financial_metrics.ebitda.values
-    enterprise_value_to_ebitda_ratio = enterprise_values / ebitdas
+    evs     = financial_metrics.enterprise_value.values.astype(float)
+    ebitdas = financial_metrics.ebitda.values.astype(float)
 
-    if not (enterprise_values[0] and enterprise_value_to_ebitda_ratio[0]) or enterprise_value_to_ebitda_ratio[0] == 0:
+    # elementwise safe division
+    ev_to_ebt = [
+        (ev / e) if e != 0 else 0
+        for ev, e in zip(evs, ebitdas)
+    ]
+
+    # nothing to do if the latest period has no ebitda
+    if ebitdas[0] == 0:
         return 0
 
-    med_mult = median(enterprise_value_to_ebitda_ratio)
-    ev_implied = med_mult * ebitdas[0]
-    net_debt = (enterprise_values[0] or 0) - (financial_metrics.market_cap.values[0] or 0)
+    # median multiple
+    try:
+        med = median(ev_to_ebt)
+    except ValueError:
+        return 0
+
+    ev_implied = med * ebitdas[0]
+    net_debt   = evs[0] - (financial_metrics.market_cap.values[0] or 0)
     return max(ev_implied - net_debt, 0)
 
 
@@ -232,7 +258,7 @@ def calculate_residual_income_value(
         num_years: int = 5,
 ):
     """Residual Income Model (Edwards‑Bell‑Ohlson)."""
-    if not (market_cap and net_income and book_val and book_val > 0):
+    if book_val <= 0 or net_income <= 0 or market_cap <= 0:
         return 0
 
     ri0 = net_income - cost_of_equity * book_val
@@ -244,9 +270,12 @@ def calculate_residual_income_value(
         ri_t = ri0 * (1 + book_value_growth) ** yr
         pv_ri += ri_t / (1 + cost_of_equity) ** yr
 
-    term_ri = ri0 * (1 + book_value_growth) ** (num_years + 1) / (
-            cost_of_equity - terminal_growth_rate
-    )
+    # guard terminal denom
+    denom = cost_of_equity - terminal_growth_rate
+    if denom <= 0:
+        return 0
+
+    term_ri = ri0 * (1 + book_value_growth) ** (num_years + 1) / denom
     pv_term = term_ri / (1 + cost_of_equity) ** num_years
 
     intrinsic = book_val + pv_ri + pv_term
