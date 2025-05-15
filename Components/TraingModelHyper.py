@@ -13,6 +13,7 @@ import pandas as pd
 from ray import tune
 from ray.tune.schedulers import ASHAScheduler
 from ray.tune import Tuner, TuneConfig, RunConfig
+from functools import partial
 
 # -- Model Definition --
 class PositionalEncoding(nn.Module):
@@ -311,8 +312,17 @@ def run_tuning(df, target='shifted_prices', num_samples=10, use_gpu=True):
     }
     scheduler = ASHAScheduler(time_attr='training_iteration', metric='val_loss', mode='min', max_t=100, grace_period=10, reduction_factor=2)
     tuner = Tuner(
-        train_tempus,
-        tune_config=TuneConfig(scheduler=scheduler, num_samples=num_samples),
+        tune.with_resources(
+            partial(
+                train_tempus,
+                train_data=None,
+            ),
+            resources={"cpu": 10, "gpu": 0}
+        ),
+        tune_config=TuneConfig(
+            scheduler=scheduler,
+            num_samples=num_samples,
+        ),
         run_config=RunConfig(name="tempus_experiment"),
         param_space=config
     )

@@ -75,15 +75,15 @@ if st.user.is_logged_in:
     if datetime.datetime.now() - issued_at > datetime.timedelta(hours=1):
         st.warning("Session expired: logging you out.")
         st.logout()
-
-    st.sidebar.markdown(f"### Hello, {st.user.name}")
-    st.sidebar.markdown(f"### Logged in as {st.user.email}")
-    pg = st.navigation(
-        {
-            "Account": [logout_page],
-            "Functions": [financials,forecasting, backtesting]
-        }
-    )
+    else:
+        st.sidebar.markdown(f"### Hello, {st.user.name}")
+        st.sidebar.markdown(f"### Logged in as {st.user.email}")
+        pg = st.navigation(
+            {
+                "Account": [logout_page],
+                "Functions": [financials, forecasting, backtesting]
+            }
+        )
 else:
     pg = st.navigation([login_page])
 

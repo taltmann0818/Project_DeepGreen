@@ -133,11 +133,12 @@ class FundementalData:
             date_np = np.datetime64(asof)
         else:
             date_np = np.datetime64(datetime.now().strftime("%Y-%m-%d"))
-        busday_np = np.busday_offset(date_np,offsets=0,roll='backward',holidays=generate_us_market_holidays(2020,2030))
+        busday_np = str(np.busday_offset(date_np,offsets=0,roll='backward',holidays=generate_us_market_holidays(2020,2030)))
         date_str = str(busday_np)
         try:
             resp = self.client.get_daily_open_close_agg(ticker, date=date_str)
-            return getattr(resp, "close", None)
+            close = getattr(resp, "close", None)
+            return close if close is not None else getattr(resp, "open", None)
         except Exception as err:
             logging.warning(f"[get_close_price] {ticker} failed for {asof}: {err}")
             return pd.DataFrame()
