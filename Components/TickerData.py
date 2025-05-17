@@ -4,7 +4,7 @@ import warnings
 import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
-from Components.MarketRegimes import MarketRegimes
+from Components.MarketRegimes import RegimeDetector
 
 try:
     from sqlalchemy import create_engine, MetaData, Table, select
@@ -27,12 +27,16 @@ class TickerData:
         self.tickers = tickers
         self.indicator_list = set(indicator_list)
         self.prediction_window = abs(prediction_window)
+        self.days = years * 365
         if years > 5:
             raise ValueError("Max years is 5 due to API limits.")
         self.start_date = kwargs.get('start_date')
         self.end_date   = kwargs.get('end_date')
+        if not self.start_date:
+            self.start_date = (datetime.now() - timedelta(days=self.days)).strftime("%Y-%m-%d")
+        if not self.end_date:
+            self.end_date = datetime.now().strftime("%Y-%m-%d")
         self.prediction_mode = kwargs.get('prediction_mode', False)
-        self.days = years * 365
 
     def get_news_for_ticker(self, ticker, start_date, end_date, full_dates, limit=1000):
         # 1) Fetch all articles in one paginated iterator
@@ -77,7 +81,7 @@ class TickerData:
 
         return daily.set_index(["date"])
 
-    def get_ohlc_for_ticker(self, ticker, start_date, end_date, multiplier=1, timespan="day", limit=50000):
+    def get_ohlc_for_ticker(self, ticker, multiplier=1, timespan="day", limit=50000):
         """
         Fetch daily OHLC bars for `ticker` in one paginated call and
         align to full_dates, filling zeros on missing days.
@@ -86,8 +90,8 @@ class TickerData:
             ticker=ticker,
             multiplier=multiplier,
             timespan=timespan,
-            from_=start_date,
-            to=end_date,
+            from_=self.start_date,
+            to=self.end_date,
             limit=limit
         )  # returns an iterator over all pages :contentReference[oaicite:4]{index=4}
 
@@ -136,10 +140,6 @@ class TickerData:
         return self.stochastic_rsi(aggs['close'], rsi_period=period, stoch_period=period)
 
     def fetch_stock_data(self, workers=20):
-        if not self.start_date:
-            self.start_date = (datetime.now() - timedelta(days=self.days)).strftime("%Y-%m-%d")
-        if not self.end_date:
-            self.end_date = datetime.now().strftime("%Y-%m-%d")
 
         full_dates = pd.date_range(start=self.start_date,end=self.end_date,freq="D",tz="America/New_York")
 
@@ -166,7 +166,7 @@ class TickerData:
             .rename(columns={"open":"Open","high":"High","low":"Low","close":"Close","volume":"Volume"})
         )
         # Merge in MarketRegimes
-        self.dataset_ex_df = MarketRegimes(self.dataset_ex_df, "hmm_model.pkl").run_regime_detection()
+        _, self.dataset_ex_df['State']  = RegimeDetector.load("Models/hmm_model_v2.pkl").predict(self.dataset_ex_df, ma=5)
         if not self.prediction_mode:
             self.dataset_ex_df['shifted_prices'] = self.dataset_ex_df['Close'].shift(self.prediction_window)
 
@@ -285,7 +285,7 @@ class TickerData:
         df = self.dataset_ex_df.copy()
 
         # — EMA (single-series via transform) —
-        for period in (20, 50, 200):
+        for period in (20, 50, 100, 200):
             name = f'ema_{period}'
             if name in self.indicator_list:
                 df[name] = (
