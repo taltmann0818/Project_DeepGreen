@@ -144,7 +144,7 @@ class TickerData:
         full_dates = pd.date_range(start=self.start_date,end=self.end_date,freq="D",tz="America/New_York")
 
         with ThreadPoolExecutor(max_workers=workers) as ex:
-            stock_dfs = ex.map(lambda t: self.get_ohlc_for_ticker(t, self.start_date, self.end_date), self.tickers)
+            stock_dfs = ex.map(lambda t: self.get_ohlc_for_ticker(t), self.tickers)
         self.stock_data = pd.concat(stock_dfs, axis=0)
 
         if 'positive' in self.indicator_list:
@@ -166,7 +166,8 @@ class TickerData:
             .rename(columns={"open":"Open","high":"High","low":"Low","close":"Close","volume":"Volume"})
         )
         # Merge in MarketRegimes
-        _, self.dataset_ex_df['State']  = RegimeDetector.load("Models/hmm_model_v2.pkl").predict(self.dataset_ex_df, ma=5)
+        if 'State' in self.indicator_list:
+            _, self.dataset_ex_df['State']  = RegimeDetector.load("Models/hmm_temp.pkl").predict(self.dataset_ex_df, ma=5)
         if not self.prediction_mode:
             self.dataset_ex_df['shifted_prices'] = self.dataset_ex_df['Close'].shift(self.prediction_window)
 

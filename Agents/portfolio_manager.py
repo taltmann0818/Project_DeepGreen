@@ -1,197 +1,192 @@
-import json
-from langchain_core.messages import HumanMessage
-from langchain_core.prompts import ChatPromptTemplate
+import pandas as pd
 
-from graph.state import AgentState, show_agent_reasoning
-from pydantic import BaseModel, Field
-from typing_extensions import Literal
-from utils.progress import progress
-from utils.llm import call_llm
+class PortfolioManagerAgent:
+    """
+    PortfolioManagerAgent computes position sizes based on daily VaR and
+    adjusts them by backtested Sharpe ratios, while ensuring sufficient
+    capital for executions, handling buy/sell/hold signals, supporting
+    fractional share sizes, and normalizing allocations to a target capital usage.
 
+    Attributes:
+        capital (float): Total capital available for risk calculations.
+        risk_fraction (float): Fraction of capital to risk per trade (e.g., 0.01 for 1%).
+        sharpe_target (float): Reference Sharpe ratio for sizing (e.g., 1.0).
+        reserve_fraction (float): Fraction of available cash to hold in reserve (e.g., 0.1 for 10%).
+        min_size (float or None): Minimum number of shares per trade.
+        max_size (float or None): Maximum number of shares per trade.
+    """
 
-class PortfolioDecision(BaseModel):
-    action: Literal["buy", "sell", "short", "cover", "hold"]
-    quantity: int = Field(description="Number of shares to trade")
-    confidence: float = Field(description="Confidence in the decision, between 0.0 and 100.0")
-    reasoning: str = Field(description="Reasoning for the decision")
+    def __init__(
+        self,
+        capital: float,
+        risk_fraction: float = 0.01,
+        sharpe_target: float = 1.0,
+        reserve_fraction: float = 0.0,
+        min_size: float = None,
+        max_size: float = None,
+    ):
+        self.capital = capital
+        self.risk_fraction = risk_fraction
+        self.sharpe_target = sharpe_target
+        self.reserve_fraction = reserve_fraction
+        self.min_size = min_size
+        self.max_size = max_size
 
+    def compute_baseline_size(self, var_daily: float, price: float) -> float:
+        """
+        Compute baseline share count based on daily VaR and price.
 
-class PortfolioManagerOutput(BaseModel):
-    decisions: dict[str, PortfolioDecision] = Field(description="Dictionary of ticker to trading decisions")
+        N_baseline = (risk_fraction * capital) / (VaR_daily * price)
+        """
+        return (self.risk_fraction * self.capital) / (var_daily * price)
 
+    def compute_adjusted_size(self, var_daily: float, price: float, sharpe: float) -> float:
+        """
+        Compute un-normalized position size (can be fractional), adjusting baseline by Sharpe ratio
+        and applying optional caps/floors.
 
-##### Portfolio Management Agent #####
-def portfolio_management_agent(state: AgentState):
-    """Makes final trading decisions and generates orders for multiple tickers"""
+        N_raw = N_baseline * (sharpe / sharpe_target)
+        """
+        baseline = self.compute_baseline_size(var_daily, price)
+        factor = sharpe / self.sharpe_target if self.sharpe_target != 0 else 0
+        size = baseline * factor
 
-    # Get the portfolio and analyst signals
-    portfolio = state["data"]["portfolio"]
-    analyst_signals = state["data"]["analyst_signals"]
-    tickers = state["data"]["tickers"]
+        if self.min_size is not None:
+            size = max(size, self.min_size)
+        if self.max_size is not None:
+            size = min(size, self.max_size)
 
-    progress.update_status("portfolio_management_agent", None, "Analyzing signals")
+        return size
 
-    # Get position limits, current prices, and signals for every ticker
-    position_limits = {}
-    current_prices = {}
-    max_shares = {}
-    signals_by_ticker = {}
-    for ticker in tickers:
-        progress.update_status("portfolio_management_agent", ticker, "Processing analyst signals")
+    def compute_buy_sizes(
+        self,
+        var_map: dict,
+        price_map: dict,
+        sharpe_map: dict,
+        available_cash: float,
+    ) -> dict:
+        """
+        Compute buy share counts (fractional) for multiple tickers.
+        Normalize across tickers so total spend = available_cash * (1 - reserve_fraction).
 
-        # Get position limits and current prices for the ticker
-        risk_data = analyst_signals.get("risk_management_agent", {}).get(ticker, {})
-        position_limits[ticker] = risk_data.get("remaining_position_limit", 0)
-        current_prices[ticker] = risk_data.get("current_price", 0)
+        Returns: {ticker: shares_to_buy (float)}
+        """
+        # Calculate raw sizes and dollar demands
+        raw_sizes = {}
+        raw_dollars = {}
+        for ticker, var in var_map.items():
+            price = price_map[ticker]
+            sharpe = sharpe_map[ticker]
+            n_raw = self.compute_adjusted_size(var, price, sharpe)
+            raw_sizes[ticker] = n_raw
+            raw_dollars[ticker] = n_raw * price
 
-        # Calculate maximum shares allowed based on position limit and price
-        if current_prices[ticker] > 0:
-            max_shares[ticker] = int(position_limits[ticker] / current_prices[ticker])
-        else:
-            max_shares[ticker] = 0
+        total_raw_dollar = sum(raw_dollars.values())
+        target_capital = available_cash * (1 - self.reserve_fraction)
 
-        # Get signals for the ticker
-        ticker_signals = {}
-        for agent, signals in analyst_signals.items():
-            if agent != "risk_management_agent" and ticker in signals:
-                ticker_signals[agent] = {"signal": signals[ticker]["signal"], "confidence": signals[ticker]["confidence"]}
-        signals_by_ticker[ticker] = ticker_signals
+        # Determine scaling factor (<=1 to not exceed target_capital)
+        scale = min(1.0, target_capital / total_raw_dollar) if total_raw_dollar > 0 else 0
 
-    progress.update_status("portfolio_management_agent", None, "Making trading decisions")
+        # Apply scaling and ensure affordability
+        sizes = {}
+        cash_used = 0.0
+        for ticker, n_raw in raw_sizes.items():
+            price = price_map[ticker]
+            n_scaled = n_raw * scale
+            # Ensure not exceeding cash by construction
+            sizes[ticker] = n_scaled
+            cash_used += n_scaled * price
 
-    # Generate the trading decision
-    result = generate_trading_decision(
-        tickers=tickers,
-        signals_by_ticker=signals_by_ticker,
-        current_prices=current_prices,
-        max_shares=max_shares,
-        portfolio=portfolio,
-        model_name=state["metadata"]["model_name"],
-        model_provider=state["metadata"]["model_provider"],
-    )
+        return sizes
 
-    # Create the portfolio management message
-    message = HumanMessage(
-        content=json.dumps({ticker: decision.model_dump() for ticker, decision in result.decisions.items()}),
-        name="portfolio_management",
-    )
+    def compute_trade_sizes(
+        self,
+        signals: dict,
+        var_map: dict,
+        price_map: dict,
+        sharpe_map: dict,
+        holdings_map: dict,
+        available_cash: float,
+    ) -> dict:
+        """
+        Compute trade sizes for buy/sell/hold signals with fractional shares.
+        Prioritize sell signals to free up cash before sizing buys.
 
-    # Print the decision if the flag is set
-    if state["metadata"]["show_reasoning"]:
-        show_agent_reasoning({ticker: decision.model_dump() for ticker, decision in result.decisions.items()}, "Portfolio Management Agent")
+        Returns: {ticker: delta_shares (float)}, positive = buy, negative = sell.
+        """
+        # === 1. Process sells first to free up cash ===
+        sell_sizes = {}
+        total_proceeds = 0.0
+        for ticker, signal in signals.items():
+            if signal.lower() == 'sell':
+                var = var_map.get(ticker, 0)
+                price = price_map.get(ticker, 0)
+                sharpe = sharpe_map.get(ticker, 0)
+                held = holdings_map.get(ticker, 0)
+                desired = self.compute_adjusted_size(var, price, sharpe)
+                size = min(desired, held)
+                sell_sizes[ticker] = size
+                total_proceeds += size * price
 
-    progress.update_status("portfolio_management_agent", None, "Done")
+        # Update cash with proceeds from sells
+        cash_after_sells = available_cash + total_proceeds
 
-    return {
-        "messages": state["messages"] + [message],
-        "data": state["data"],
-    }
+        # === 2. Process buys with updated cash ===
+        buy_signals = {t: sig for t, sig in signals.items() if sig.lower() == 'buy'}
+        buy_sizes = self.compute_buy_sizes(
+            var_map={t: var_map[t] for t in buy_signals},
+            price_map={t: price_map[t] for t in buy_signals},
+            sharpe_map={t: sharpe_map[t] for t in buy_signals},
+            available_cash=cash_after_sells
+        )
 
+        # === 3. Combine buy and sell deltas ===
+        trade_sizes = {}
+        for ticker in signals:
+            sig = signals[ticker].lower()
+            if sig == 'sell':
+                trade_sizes[ticker] = -sell_sizes.get(ticker, 0.0)
+            elif sig == 'buy':
+                trade_sizes[ticker] = buy_sizes.get(ticker, 0.0)
+            else:
+                trade_sizes[ticker] = 0.0
 
-def generate_trading_decision(
-    tickers: list[str],
-    signals_by_ticker: dict[str, dict],
-    current_prices: dict[str, float],
-    max_shares: dict[str, int],
-    portfolio: dict[str, float],
-    model_name: str,
-    model_provider: str,
-) -> PortfolioManagerOutput:
-    """Attempts to get a decision from the LLM with retry logic"""
-    # Create the prompt template
-    template = ChatPromptTemplate.from_messages(
-        [
-            (
-              "system",
-              """You are a portfolio manager making final trading decisions based on multiple tickers.
+        return trade_sizes
 
-              Trading Rules:
-              - For long positions:
-                * Only buy if you have available cash
-                * Only sell if you currently hold long shares of that ticker
-                * Sell quantity must be ≤ current long position shares
-                * Buy quantity must be ≤ max_shares for that ticker
-              
-              - For short positions:
-                * Only short if you have available margin (position value × margin requirement)
-                * Only cover if you currently have short shares of that ticker
-                * Cover quantity must be ≤ current short position shares
-                * Short quantity must respect margin requirements
-              
-              - The max_shares values are pre-calculated to respect position limits
-              - Consider both long and short opportunities based on signals
-              - Maintain appropriate risk management with both long and short exposure
+    def compute_sizes_from_series(
+            self,
+            signals: pd.Series,
+            close_prices: pd.Series,
+            var_series: pd.Series,
+            sharpe_series: pd.Series,
+            holdings: pd.Series,
+    ) -> pd.Series:
+        """
+        Convenience wrapper that accepts pandas Series inputs (indexed by ticker) for
+        signals ('buy','sell','hold'), close prices, daily VaR, Sharpe, and holdings,
+        and returns a pandas Series of trade size deltas without cash constraints.
+        """
+        # Convert Series to dictionaries
+        signals_dict = signals.to_dict()
+        price_map = close_prices.to_dict()
+        var_map = var_series.to_dict()
+        sharpe_map = sharpe_series.to_dict()
+        holdings_map = holdings.to_dict()
 
-              Available Actions:
-              - "buy": Open or add to long position
-              - "sell": Close or reduce long position
-              - "short": Open or add to short position
-              - "cover": Close or reduce short position
-              - "hold": No action
+        trade_sizes = {}
+        for ticker, signal in signals_dict.items():
+            var = var_map.get(ticker, 0.0)
+            price = price_map.get(ticker, 0.0)
+            sharpe = sharpe_map.get(ticker, 0.0)
+            held = holdings_map.get(ticker, 0.0)
+            desired = self.compute_adjusted_size(var, price, sharpe)
 
-              Inputs:
-              - signals_by_ticker: dictionary of ticker → signals
-              - max_shares: maximum shares allowed per ticker
-              - portfolio_cash: current cash in portfolio
-              - portfolio_positions: current positions (both long and short)
-              - current_prices: current prices for each ticker
-              - margin_requirement: current margin requirement for short positions (e.g., 0.5 means 50%)
-              - total_margin_used: total margin currently in use
-              """,
-            ),
-            (
-              "human",
-              """Based on the team's analysis, make your trading decisions for each ticker.
+            if signal.lower() == 'buy':
+                trade_sizes[ticker] = desired
+            elif signal.lower() == 'sell':
+                trade_sizes[ticker] = desired
+            else:
+                trade_sizes[ticker] = 0.0
 
-              Here are the signals by ticker:
-              {signals_by_ticker}
-
-              Current Prices:
-              {current_prices}
-
-              Maximum Shares Allowed For Purchases:
-              {max_shares}
-
-              Portfolio Cash: {portfolio_cash}
-              Current Positions: {portfolio_positions}
-              Current Margin Requirement: {margin_requirement}
-              Total Margin Used: {total_margin_used}
-
-              Output strictly in JSON with the following structure:
-              {{
-                "decisions": {{
-                  "TICKER1": {{
-                    "action": "buy/sell/short/cover/hold",
-                    "quantity": integer,
-                    "confidence": float between 0 and 100,
-                    "reasoning": "string"
-                  }},
-                  "TICKER2": {{
-                    ...
-                  }},
-                  ...
-                }}
-              }}
-              """,
-            ),
-        ]
-    )
-
-    # Generate the prompt
-    prompt = template.invoke(
-        {
-            "signals_by_ticker": json.dumps(signals_by_ticker, indent=2),
-            "current_prices": json.dumps(current_prices, indent=2),
-            "max_shares": json.dumps(max_shares, indent=2),
-            "portfolio_cash": f"{portfolio.get('cash', 0):.2f}",
-            "portfolio_positions": json.dumps(portfolio.get('positions', {}), indent=2),
-            "margin_requirement": f"{portfolio.get('margin_requirement', 0):.2f}",
-            "total_margin_used": f"{portfolio.get('margin_used', 0):.2f}",
-        }
-    )
-
-    # Create default factory for PortfolioManagerOutput
-    def create_default_portfolio_output():
-        return PortfolioManagerOutput(decisions={ticker: PortfolioDecision(action="hold", quantity=0, confidence=0.0, reasoning="Error in portfolio management, defaulting to hold") for ticker in tickers})
-
-    return call_llm(prompt=prompt, model_name=model_name, model_provider=model_provider, pydantic_model=PortfolioManagerOutput, agent_name="portfolio_management_agent", default_factory=create_default_portfolio_output)
+        # Return results aligned to original signals index
+        return pd.Series(trade_sizes).reindex(signals.index).fillna(0.0)

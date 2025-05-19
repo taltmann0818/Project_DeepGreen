@@ -222,3 +222,23 @@ class RegimeDetector:
             yaxis_title="Close",
             margin=dict(l=20, r=20, t=50, b=20),
         ).show()
+
+"""
+Example usage for training:
+
+raw_stock_data["Date"] = pd.to_datetime(raw_stock_data.index)
+raw_stock_data = raw_stock_data.rename(columns={"close": "Close"})
+det = RegimeDetector(
+    n_components=2,
+    covariance_type="full",
+    n_iter=100,
+    random_state=42,
+)
+det.train_feedforward(
+    df=raw_stock_data,
+    ma=5,
+    initial_train_size=100,
+    retrain_step=20,
+)
+det.save("Models/hmm_temp.pkl")
+"""

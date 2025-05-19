@@ -3,7 +3,7 @@ import pandas as pd
 import torch
 from ray import tune
 from concurrent.futures import ThreadPoolExecutor
-import quantstats as qs
+import quantstats_lumi as qs
 import statistics
 import random
 
@@ -28,7 +28,8 @@ import logging
 logging.getLogger().setLevel(logging.ERROR)  # 3. Suppress logging messages
 
 import ray
-ray.init(logging_level=logging.ERROR) 
+ray.shutdown()
+ray.init(logging_level=logging.ERROR)
 
 # ─── 1. Load the data ────────────────────────────────────
 _INDEX_CONFIG = {
@@ -75,7 +76,7 @@ if index_returns is None:
 def predict_backtest(ticker, pred_data, raw_data, index_returns, pct_change_entry, pct_change_exit):
     pred_data_t = pred_data[pred_data['Ticker']==ticker].copy()
     preds = torchscript_predict(
-        model_path="C:/Users/taltmann/Documents/ProjectDeepGreen/Models/Tempus_v2.pt",
+        model_path="/Users/thomasaltmann/PycharmProjects/Project DeepGreen/Models/Tempus_v2.0.pt",
         input_df=pred_data_t,
         device="cpu",
         window_size=10,
@@ -84,32 +85,32 @@ def predict_backtest(ticker, pred_data, raw_data, index_returns, pct_change_entr
     raw_data_t = raw_data[raw_data['Ticker']==ticker].copy()
 
     final_pred_data = pd.merge(preds, raw_data_t[['open', 'high', 'low', 'volume','close']], left_index=True, right_index=True, how='left')
-    
+
     backtester = BackTesting(final_pred_data.rename(columns={'close': 'Close'}), ticker, 1000, pct_change_entry, pct_change_exit)
     backtester.run_simulation()
-    
+
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", FutureWarning)
         metrics = np.array(qs.reports.metrics(backtester.pf.returns(), index_returns, mode='full', rf=0.0437, display=False))
-    strat_sortino = metrics[10][1]
-    strat_alpha = metrics[67][1]
+    strat_sharpe = metrics[10][1]
+    strat_alpha = metrics[57][1]
 
-    return {"ticker": ticker,"strat_sortino": strat_sortino,"strat_alpha": strat_alpha,}
+    return {"ticker": ticker,"strat_sharpe": strat_sharpe,"strat_alpha": strat_alpha,}
 
 # ─── 3. Define the Tune objective ────────────────────────────────────────────
 
 def threshold_tuner(config):
-    with ThreadPoolExecutor(max_workers=len(tickers) if len(tickers) <= 10 else 10) as ex:
-        metrics = ex.map(lambda t: predict_backtest(t, out_of_sample_data, raw_stock_data, index_returns, config["buy_threshold"], config["sell_threshold"]), tickers)
-    metrics = [metric for metric in metrics if metric is not None]
-    
-    mean_alpha = statistics.mean([float(d['strat_alpha']) for d in metrics])
-    #mean_sortino = statistics.mean([d['strat_sortino'] for d in metrics])
-    tune.report(metrics={"alpha": mean_alpha,})
+    metrics = []
+    for ticker in tickers:
+        metric = predict_backtest(ticker, out_of_sample_data, raw_stock_data, index_returns, config["buy_threshold"], config["sell_threshold"])
+        metrics.append(metric)
+
+    #mean_alpha = statistics.mean([float(d['strat_alpha']) for d in metrics])
+    mean_sharpe = statistics.mean([d['strat_sharpe'] for d in metrics])
+    tune.report(metrics={"sharpe": mean_sharpe,})
 
 
 # ─── 4. Configure search space & run ─────────────────────────────────────────
-
 search_space = {
     "buy_threshold":  tune.uniform(0.01, 0.10),   # 1% → 10%
     "sell_threshold": tune.uniform(0.01, 0.10),   # 1% → 10%
@@ -118,13 +119,13 @@ search_space = {
 analysis = tune.run(
     threshold_tuner,
     config     = search_space,
-    metric     = "alpha",
+    metric     = "sharpe",
     mode       = "max",
     num_samples= 50,        # try 50 different (buy,sell) pairs
     resources_per_trial={"cpu": 1},  # adjust GPUs/CPUs as you like
     trial_dirname_creator = lambda trial: f"{trial.trainable_name}_{trial.trial_id[:4]}"
 )
 
-best = analysis.get_best_config(metric="alpha", mode="max")
+best = analysis.get_best_config(metric="sharpe", mode="max")
 print("Best thresholds →", best)
-print("Best Alpha  →", analysis.best_result["alpha"])
+print("Best Sharpe  →", analysis.best_result["sharpe"])
