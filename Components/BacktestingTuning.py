@@ -76,7 +76,7 @@ if index_returns is None:
 def predict_backtest(ticker, pred_data, raw_data, index_returns, pct_change_entry, pct_change_exit):
     pred_data_t = pred_data[pred_data['Ticker']==ticker].copy()
     preds = torchscript_predict(
-        model_path="/Users/thomasaltmann/PycharmProjects/Project DeepGreen/Models/Tempus_v2.0.pt",
+        model_path="/Models/Decomissioned/Tempus_v2.0.pt",
         input_df=pred_data_t,
         device="cpu",
         window_size=10,
