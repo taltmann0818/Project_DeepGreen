@@ -16,16 +16,11 @@ class CharlieMungerAgent:
         self.ticker = ticker
         self.period = kwargs.get('analysis_period')
         self.limit = kwargs.get('analysis_limit')
-        self.SIC_code = self.metrics['4digit_SIC_code'][0] if self.metrics['2digit_SIC_code'][0] == '73' else self.metrics['2digit_SIC_code'][0]
-        if len(self.SIC_code) > 2:
-            self.threshold_matrix = pd.read_csv(kwargs.get('threshold_matrix_path',None).get('business_services_sic'))
-        else:
-            self.threshold_matrix = pd.read_csv(kwargs.get('threshold_matrix_path',None).get('two_digit_sic'))
-
         self.analysis_data = {} # Storing returned results in dict
-
+        self.threshold_matrix_path = kwargs.get('threshold_matrix_path',None)
+        
     def analyze(self):
-        financial_line_items = search_line_items(
+        financial_line_items, self.SIC_code = search_line_items(
             self.ticker,
             [
                 "revenue",
@@ -47,6 +42,9 @@ class CharlieMungerAgent:
             limit=self.limit,  # Munger examines long-term trends
             df=self.metrics
         )
+
+        self.threshold_matrix = pd.read_csv(self.threshold_matrix_path.get('business_services_sic')) if len(self.SIC_code) > 2 else pd.read_csv(self.threshold_matrix_path.get('two_digit_sic'))
+        
         moat_analysis = self.analyze_moat_strength(financial_line_items)
         management_analysis = self.analyze_management_quality(financial_line_items, None)
         predictability_analysis = self.analyze_predictability(financial_line_items)

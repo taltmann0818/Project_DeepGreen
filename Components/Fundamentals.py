@@ -208,6 +208,7 @@ class FundementalData:
             'income_statement.depreciation_and_amortization.value']
         fundementals['earnings_per_share'] = self.financial_data['income_statement.basic_earnings_per_share.value']
         fundementals['intangible_assets'] = self.financial_data['balance_sheet.intangible_assets.value']
+        fundementals['interest_expense'] = self.financial_data['income_statement.interest_and_debt_expense.value']
         if self.fetch_market_cap:
             fundementals['market_cap'] = self.financial_data['market_cap']
         if self.fetch_stock_price:
@@ -254,13 +255,15 @@ def search_line_items(ticker: str, line_items: list, period: str, limit: int = 5
     else:
         result = df[(df['ticker']==ticker) & (df['fiscal_period']==period)]
         result = result.sort_index(ascending=False).head(limit)
+    
+    sic_code = result['4digit_SIC_code'][0] if result['2digit_SIC_code'][0] == '73' else result['2digit_SIC_code'][0]
 
     cols = ['ticker'] + line_items
     avail = [c for c in cols if c in result.columns]
     missing = set(cols) - set(avail)
     if missing:
         print(f"Warning: Missing columns in DataFrame: {missing}")
-    return result[avail]
+    return result[avail], sic_code
 
 def get_metric_value(df: pd.DataFrame, sic_code: Union[str, int], metric: str):
     df_copy = df.copy()

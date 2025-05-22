@@ -19,21 +19,16 @@ class StanleyDruckenmillerAgent():
         self.ticker = ticker
         self.period = kwargs.get('analysis_period')
         self.limit = kwargs.get('analysis_limit')
-        self.SIC_code = self.metrics['4digit_SIC_code'][0] if self.metrics['2digit_SIC_code'][0] == '73' else self.metrics['2digit_SIC_code'][0]
-        if len(self.SIC_code) > 2:
-            self.threshold_matrix = pd.read_csv(kwargs.get('threshold_matrix_path',None).get('business_services_sic'))
-        else:
-            self.threshold_matrix = pd.read_csv(kwargs.get('threshold_matrix_path',None).get('two_digit_sic'))
-
         self.analysis_data = {} # Storing returned results in dict
-
+        self.threshold_matrix_path = kwargs.get('threshold_matrix_path',None)
+        
     def analyze(self):
         # Include relevant line items for Stan Druckenmiller's approach:
         #   - Growth & momentum: revenue, EPS, operating_income, ...
         #   - Valuation: net_income, free_cash_flow, ebit, ebitda
         #   - Leverage: total_debt, shareholders_equity
         #   - Liquidity: cash_and_equivalents
-        financial_line_items = search_line_items(
+        financial_line_items, self.SIC_code = search_line_items(
             self.ticker,
             [
                 "revenue",
@@ -58,6 +53,9 @@ class StanleyDruckenmillerAgent():
             limit=self.limit,
             df=self.metrics
         )
+
+        self.threshold_matrix = pd.read_csv(self.threshold_matrix_path.get('business_services_sic')) if len(self.SIC_code) > 2 else pd.read_csv(self.threshold_matrix_path.get('two_digit_sic'))
+        
         growth_momentum_analysis = self.analyze_growth_and_momentum(financial_line_items)
         sentiment_analysis = self.analyze_sentiment(DataFrame())
         insider_activity = self.analyze_insider_activity(DataFrame())

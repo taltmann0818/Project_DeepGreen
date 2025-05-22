@@ -22,8 +22,8 @@ class BackTesting:
             self.data = data[data['Ticker'] == ticker]
 
             # Ensure the signals are correctly set
-            self.data['entry_signal'] = ((self.data['Predicted'] - self.data['Close']) / self.data['Close']*100) >= self.pct_change_entry
-            self.data['exit_signal'] = ((self.data['Predicted'] - self.data['Close']) / self.data['Close']*100) <= self.pct_change_exit
+            self.data['entry_signal'] = ((self.data['Predicted'] - self.data['Close']) / self.data['Close']) >= self.pct_change_entry
+            self.data['exit_signal'] = ((self.data['Predicted'] - self.data['Close']) / self.data['Close']) <= self.pct_change_exit
 
             self.data['signal'] = 'hold'
             self.data.loc[self.data['entry_signal'], 'signal'] = 'buy'
@@ -60,6 +60,7 @@ class BackTesting:
             allow_partial=self.use_fractional_shares,
             size=size,
             size_type=SizeType.Amount,
+            direction='both',
             accumulate=True
         )
 
