@@ -18,16 +18,11 @@ class BenGrahamAgent:
         self.ticker = ticker
         self.period = kwargs.get('analysis_period')
         self.limit = kwargs.get('analysis_limit')
-        self.SIC_code = self.metrics['4digit_SIC_code'][0] if self.metrics['2digit_SIC_code'][0] == '73' else self.metrics['2digit_SIC_code'][0]
-        if len(self.SIC_code) > 2:
-            self.threshold_matrix = pd.read_csv(kwargs.get('threshold_matrix_path',None).get('business_services_sic'))
-        else:
-            self.threshold_matrix = pd.read_csv(kwargs.get('threshold_matrix_path',None).get('two_digit_sic'))
-
+        self.threshold_matrix_path = kwargs.get('threshold_matrix_path',None)
         self.analysis_data = {} # Storing returned results in dict
 
     def analyze(self):
-        financial_line_items = search_line_items(
+        financial_line_items, self.SIC_code = search_line_items(
             self.ticker, 
             [
                 "earnings_per_share",
@@ -47,12 +42,14 @@ class BenGrahamAgent:
             df=self.metrics
         )
 
-        # Perform sub-analyses
+        self.threshold_matrix = pd.read_csv(self.threshold_matrix_path.get('business_services_sic')) if len(self.SIC_code) > 2 else pd.read_csv(self.threshold_matrix_path.get('two_digit_sic'))
+
+        # ─── Analyses ───────────────────────────────────────────────────────────
         earnings_analysis = self.analyze_earnings_stability(financial_line_items)
         strength_analysis = self.analyze_financial_strength(financial_line_items)
         valuation_analysis = self.analyze_valuation_graham(financial_line_items)
 
-        # Aggregate scoring
+        # ─── Score ──────────────────────────────────────────
         total_score = earnings_analysis["score"] + strength_analysis["score"] + valuation_analysis["score"]
         max_possible_score = 15  # total possible from the three analysis functions
 
@@ -63,7 +60,8 @@ class BenGrahamAgent:
             signal = "bearish"
         else:
             signal = "neutral"
-
+            
+        # ─── Push data back to manager ──────────────────────────────────────
         self.analysis_data = {
             "name": self.agent_name,
             "signal": signal,
@@ -76,6 +74,9 @@ class BenGrahamAgent:
 
         return self.analysis_data
 
+    # ────────────────────────────────────────────────────────────────────────────────
+    # Helper analyses
+    # ────────────────────────────────────────────────────────────────────────────────
     def analyze_earnings_stability(self, financial_line_items: DataFrame):
         """
         Graham wants at least several years of consistently positive earnings (ideally 5+).

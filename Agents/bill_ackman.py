@@ -14,18 +14,13 @@ class BillAckmanAgent:
         self.ticker = ticker
         self.period = kwargs.get('analysis_period')
         self.limit = kwargs.get('analysis_limit')
-        self.SIC_code = self.metrics['4digit_SIC_code'][0] if self.metrics['2digit_SIC_code'][0] == '73' else self.metrics['2digit_SIC_code'][0]
-        if len(self.SIC_code) > 2:
-            self.threshold_matrix = pd.read_csv(kwargs.get('threshold_matrix_path',None).get('business_services_sic'))
-        else:
-            self.threshold_matrix = pd.read_csv(kwargs.get('threshold_matrix_path',None).get('two_digit_sic'))
-
+        self.threshold_matrix_path = kwargs.get('threshold_matrix_path',None)
         self.analysis_data = {} # Storing returned results in dict
 
     def analyze(self):
         #metrics = get_financial_metrics(ticker, end_date, period="annual", limit=5)
         # Request multiple periods of data (annual or TTM) for a more robust long-term view.
-        financial_line_items = search_line_items(
+        financial_line_items, self.SIC_code = search_line_items(
             self.ticker,
             [
                 "revenue",
@@ -45,6 +40,9 @@ class BillAckmanAgent:
             limit=self.limit,
             df=self.metrics
         )
+        
+        self.threshold_matrix = pd.read_csv(self.threshold_matrix_path.get('business_services_sic')) if len(self.SIC_code) > 2 else pd.read_csv(self.threshold_matrix_path.get('two_digit_sic'))
+        
         quality_analysis = self.analyze_business_quality(financial_line_items)
         balance_sheet_analysis = self.analyze_financial_discipline(financial_line_items)
         activism_analysis = self.analyze_activism_potential(financial_line_items)

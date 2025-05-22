@@ -106,28 +106,29 @@ class AgentManager:
                 # assume score is numeric, defaulting to 0
                 total_score += float(res.get('score', 0))
 
-                pe_ratio = res.get('pe_ratio', None) if res.get('name') == 'Fundamentals' else None
-                pb_ratio = res.get('pb_ratio', None) if res.get('name') == 'Fundamentals' else None
-                ps_ratio = res.get('ps_ratio', None) if res.get('name') == 'Fundamentals' else None
+                #pe_ratio = res.get('pe_ratio', None) if res.get('name') == 'Fundamentals' else None
+                #pb_ratio = res.get('pb_ratio', None) if res.get('name') == 'Fundamentals' else None
+                #ps_ratio = res.get('ps_ratio', None) if res.get('name') == 'Fundamentals' else None
 
-            evEBITDA = self.metrics[(self.metrics['ticker'] == ticker)]['enterprise_value'][0] / self.metrics[(self.metrics['ticker'] == ticker)]['ebitda'][0]
+            filtered = self.metrics[self.metrics['ticker'] == ticker]
+            #evEBITDA = filtered['enterprise_value'].iloc[0] / filtered['ebitda'].iloc[0]
 
             rows.append({
                 'Ticker': ticker,
-                'Company Name': self.metrics[(self.metrics['ticker']==ticker)]['company_name'][0],
+                'Company Name': filtered['company_name'].iloc[0],
                 'Bullish': bullish,
                 'Bearish': bearish,
                 'Neutral': neutral,
                 'Score': total_score,
-                'Price/Earnings': pe_ratio,
-                'Price/Book': pb_ratio,
-                'Price/Sales': ps_ratio,
-                'Enterprise Value/EBITDA': evEBITDA,
+                #'Price/Earnings': pe_ratio,
+                #'Price/Book': pb_ratio,
+                #'Price/Sales': ps_ratio,
+                #'Enterprise Value/EBITDA': evEBITDA,
             })
 
         df = pd.DataFrame(rows)
         df['Signal'] = df[['Bullish', 'Bearish', 'Neutral']].idxmax(axis=1)
-        df = df[['Ticker', 'Company Name', 'Signal', 'Score', 'Bullish', 'Bearish', 'Neutral', 'Price/Earnings', 'Price/Book', 'Price/Sales', 'Enterprise Value/EBITDA']]
+        df = df[['Ticker', 'Company Name', 'Signal', 'Score', 'Bullish', 'Bearish', 'Neutral']]#, 'Price/Earnings', 'Price/Book', 'Price/Sales', 'Enterprise Value/EBITDA']]
         return df.set_index('Ticker')
 
     def agent_analysis(self) -> Dict[str, Dict[str, Any]]:

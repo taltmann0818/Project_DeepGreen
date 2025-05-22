@@ -21,21 +21,16 @@ class PhilFisherAgent():
         self.ticker = ticker
         self.period = kwargs.get('analysis_period')
         self.limit = kwargs.get('analysis_limit')
-        self.SIC_code = self.metrics['4digit_SIC_code'][0] if self.metrics['2digit_SIC_code'][0] == '73' else self.metrics['2digit_SIC_code'][0]
-        if len(self.SIC_code) > 2:
-            self.threshold_matrix = pd.read_csv(kwargs.get('threshold_matrix_path',None).get('business_services_sic'))
-        else:
-            self.threshold_matrix = pd.read_csv(kwargs.get('threshold_matrix_path',None).get('two_digit_sic'))
-
         self.analysis_data = {} # Storing returned results in dict
-
+        self.threshold_matrix_path = kwargs.get('threshold_matrix_path',None)
+        
     def analyze(self):
         # Include relevant line items for Phil Fisher's approach:
         #   - Growth & Quality: revenue, net_income, earnings_per_share, R&D expense
         #   - Margins & Stability: operating_income, operating_margin, gross_margin
         #   - Management Efficiency & Leverage: total_debt, shareholders_equity, free_cash_flow
         #   - Valuation: net_income, free_cash_flow (for P/E, P/FCF), ebit, ebitda
-        financial_line_items = search_line_items(
+        financial_line_items, self.SIC_code = search_line_items(
             self.ticker,
             [
                 "revenue",
@@ -59,6 +54,8 @@ class PhilFisherAgent():
             limit=self.limit,
             df=self.metrics
         )
+
+        self.threshold_matrix = pd.read_csv(self.threshold_matrix_path.get('business_services_sic')) if len(self.SIC_code) > 2 else pd.read_csv(self.threshold_matrix_path.get('two_digit_sic'))
         
         # Perform sub-analyses
         growth_quality = self.analyze_fisher_growth_quality(financial_line_items)

@@ -16,18 +16,12 @@ class ValuationAgent():
         self.ticker = ticker
         self.period = kwargs.get('analysis_period')
         self.limit = kwargs.get('analysis_limit')
-        self.SIC_code = self.metrics['4digit_SIC_code'][0] if self.metrics['2digit_SIC_code'][0] == '73' else \
-        self.metrics['2digit_SIC_code'][0]
-        if len(self.SIC_code) > 2:
-            self.threshold_matrix = pd.read_csv(kwargs.get('threshold_matrix_path', None).get('business_services_sic'))
-        else:
-            self.threshold_matrix = pd.read_csv(kwargs.get('threshold_matrix_path', None).get('two_digit_sic'))
-
         self.analysis_data = {}  # Storing returned results in dict
+        self.threshold_matrix_path = kwargs.get('threshold_matrix_path',None)
 
     def analyze(self):
         # --- Fine‑grained line‑items (need two periods to calc WC change) ---
-        line_items = search_line_items(
+        line_items, self.SIC_code = search_line_items(
             ticker=self.ticker,
             line_items=[
                 "free_cash_flow",
@@ -45,6 +39,8 @@ class ValuationAgent():
             limit=2,  # Override kwargs to ensure this is always period-over-period
             df=self.metrics
         )
+        
+        self.threshold_matrix = pd.read_csv(self.threshold_matrix_path.get('business_services_sic')) if len(self.SIC_code) > 2 else pd.read_csv(self.threshold_matrix_path.get('two_digit_sic'))
 
         # ------------------------------------------------------------------
         # Valuation models
