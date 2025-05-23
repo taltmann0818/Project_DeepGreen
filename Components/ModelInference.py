@@ -2,10 +2,16 @@ import onnxruntime as ort
 import numpy as np
 import pandas as pd
 
+# Built for Tempus v3.0
 def onnx_predict(model_path, input_df, window_size):
     # Load the ONNX model
     session = ort.InferenceSession(model_path)
     input_name = session.get_inputs()[0].name
+
+    if model_path == 'Models/Tempus_v3.onnx':
+        input_df = input_df[['Ticker','bullish_engulfing', 'bearish_engulfing', 'b_percent', 'ema_50','volume_momentum', 
+                             'State', 'keltner_lower','price_momentum','positive','Close','ema_200','keltner_upper',
+                             'negative','ema_20','stoch_rsi14','macd']]
 
     predictions = []
     tickers = []
