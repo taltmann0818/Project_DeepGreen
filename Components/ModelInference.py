@@ -21,7 +21,7 @@ def onnx_predict(model_path, input_df, window_size):
         input_window = np.expand_dims(input_window, axis=0)
 
         output = session.run(None, {input_name: input_window})
-        predictions.append(float(output[0].squeeze()))
+        predictions.append(float(output[0][0][0]))
         tickers.append(ticker)
         dates.append(date)
 
