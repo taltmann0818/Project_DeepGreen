@@ -1,3 +1,4 @@
+from Agents.aswath_damodaran import AswathDamodaranAgent
 from Agents.ben_graham import BenGrahamAgent
 from Agents.bill_ackman import BillAckmanAgent
 from Agents.cathie_wood import CathieWoodAgent
@@ -19,6 +20,7 @@ AgentType = Type  # or more strictly: Type[object]
 
 class AgentManager:
     ALL_AGENTS: List[AgentType] = [
+        AswathDamodaranAgent,
         BenGrahamAgent,
         BillAckmanAgent,
         CathieWoodAgent,

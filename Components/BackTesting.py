@@ -19,7 +19,7 @@ class BackTesting:
 
         if type(ticker) == str:
             # Prepare data
-            self.data = data[data['Ticker'] == ticker]
+            self.data = data
 
             # Ensure the signals are correctly set
             self.data['entry_signal'] = ((self.data['Predicted'] - self.data['Close']) / self.data['Close']) >= self.pct_change_entry
@@ -38,7 +38,7 @@ class BackTesting:
             size_df['var_series'] = 0.05
             size_df['holdings'] = 0.0
 
-            self.position_size = PortfolioManagerAgent(capital=200_000).compute_sizes_from_series(size_df['signal'],
+            self.position_size = PortfolioManagerAgent(capital=self.initial_cash).compute_sizes_from_series(size_df['signal'],
                                                               size_df['Close'],
                                                               size_df['var_series'],
                                                               size_df['sharpe_series'],
@@ -65,7 +65,6 @@ class BackTesting:
         )
 
         return portfolio
-        
 
     def run_simulation(self):
         #print(f"Running vectorbt backtest for {self.ticker}")

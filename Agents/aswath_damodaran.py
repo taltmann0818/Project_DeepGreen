@@ -64,12 +64,14 @@ class AswathDamodaranAgent():
         max_score = growth_analysis["max_score"] + risk_analysis["max_score"] + relative_val_analysis["max_score"]
 
         intrinsic_value = intrinsic_val_analysis["intrinsic_value"]
+        market_cap = financial_line_items.market_cap.values[0]
         margin_of_safety = (
             (intrinsic_value - market_cap) / market_cap if intrinsic_value and market_cap else None
         )
 
         # Decision rules (Damodaran tends to act with ~20‑25 % MOS)
-        if margin_of_safety is not None and margin_of_safety >= 0.25:
+        max_possible_score = 8
+        if margin_of_safety is not None and margin_of_safety >= 0.25 and (total_score >= 0.5 * max_possible_score):
             signal = "bullish"
         elif margin_of_safety is not None and margin_of_safety <= -0.25:
             signal = "bearish"
@@ -90,8 +92,7 @@ class AswathDamodaranAgent():
         }
 
         return self.analysis_data
-    
-    
+
     # ────────────────────────────────────────────────────────────────────────────────
     # Helper analyses
     # ────────────────────────────────────────────────────────────────────────────────
@@ -119,10 +120,10 @@ class AswathDamodaranAgent():
         if cagr is not None:
             if cagr > 0.08:
                 score += 2
-                details.append(f"Revenue CAGR {cagr:.1%} (> 8 %)")
+                details.append(f"Revenue CAGR {cagr:.1%} (>0.08%)")
             elif cagr > 0.03:
                 score += 1
-                details.append(f"Revenue CAGR {cagr:.1%} (> 3 %)")
+                details.append(f"Revenue CAGR {cagr:.1%} (>0.03%)")
             else:
                 details.append(f"Sluggish revenue CAGR {cagr:.1%}")
         else:
@@ -141,10 +142,9 @@ class AswathDamodaranAgent():
         roic_threshold = get_metric_value(self.threshold_matrix, self.SIC_code, 'return_on_invested_capital')
         if latest_roic and latest_roic > roic_threshold:
             score += 1
-            details.append(f"ROIC {latest_roic:.1%} ( > {roic_threshold}% )")
+            details.append(f"ROIC {latest_roic:.1%} ( >{roic_threshold}% )")
     
         return {"score": score, "max_score": max_score, "details": "; ".join(details)}
-    
     
     def analyze_risk_profile(self, financial_line_items: DataFrame):
         """
@@ -188,9 +188,9 @@ class AswathDamodaranAgent():
             coverage = ebit / abs(interest)
             if coverage > 3:
                 score += 1
-                details.append(f"Interest coverage × {coverage:.1f}")
+                details.append(f"Interest coverage {coverage:.1f}")
             else:
-                details.append(f"Weak coverage × {coverage:.1f}")
+                details.append(f"Weak coverage {coverage:.1f}")
         else:
             details.append("Interest coverage NA")
     
@@ -201,7 +201,6 @@ class AswathDamodaranAgent():
             "beta": beta,
         }
     
-    
     def analyze_relative_valuation(self, financial_line_items: DataFrame):
         """
         Simple PE check vs. historical median (proxy since sector comps unavailable):
@@ -210,11 +209,11 @@ class AswathDamodaranAgent():
           ‑1 if >130 %
         """
         max_score = 1
-        if not financial_line_items.empty or len(financial_line_items) < 4:
+        if financial_line_items.empty or len(financial_line_items) < 3:
             return {"score": 0, "max_score": max_score, "details": "Insufficient P/E history"}
     
         pes = financial_line_items.share_price.values / financial_line_items.earnings_per_share.values
-        if len(pes) < 4:
+        if len(pes) < 3:
             return {"score": 0, "max_score": max_score, "details": "P/E data sparse"}
     
         ttm_pe = pes[0]
@@ -222,10 +221,10 @@ class AswathDamodaranAgent():
     
         if ttm_pe < 0.7 * median_pe:
             score, desc = 1, f"P/E {ttm_pe:.1f} vs. median {median_pe:.1f} (cheap)"
-        elif ttm_pe > 1.3 * median_pe:
+        elif ttm_pe > 1.3 * median_pe and ttm_pe >= 30:
             score, desc = -1, f"P/E {ttm_pe:.1f} vs. median {median_pe:.1f} (expensive)"
         else:
-            score, desc = 0, f"P/E inline with history"
+            score, desc = 0, f"P/E is neither cheap nor too expensive"
     
         return {"score": score, "max_score": max_score, "details": desc}
     
@@ -240,19 +239,18 @@ class AswathDamodaranAgent():
           • Fade linearly to terminal growth 2.5 % by year 10
           • Discount @ cost of equity (no debt split given data limitations)
         """
-        if not metrics or len(metrics) < 2 or not line_items:
+        if financial_line_items.empty or len(financial_line_items) < 2:
             return {"intrinsic_value": None, "details": ["Insufficient data"]}
-    
-        latest_m = metrics[0]
-        fcff0 = getattr(latest_m, "free_cash_flow", None)
-        shares = getattr(line_items[0], "outstanding_shares", None)
+
+        fcff0 = financial_line_items.free_cash_flow.values[0]
+        shares = financial_line_items.outstanding_shares.values[0]
         if not fcff0 or not shares:
             return {"intrinsic_value": None, "details": ["Missing FCFF or share count"]}
     
         # Growth assumptions
-        revs = [m.revenue for m in reversed(metrics) if m.revenue]
-        if len(revs) >= 2 and revs[0] > 0:
-            base_growth = min((revs[-1] / revs[0]) ** (1 / (len(revs) - 1)) - 1, 0.12)
+        revs = financial_line_items.revenue.values
+        if len(revs) >= 2 and revs[-1] != 0:
+            base_growth = min((revs[0] / revs[-1]) ** (1 / (len(revs) - 1)) - 1, 0.12)
         else:
             base_growth = 0.04  # fallback
     
@@ -260,7 +258,7 @@ class AswathDamodaranAgent():
         years = 10
     
         # Discount rate
-        discount = estimate_cost_of_equity(1)
+        discount = self.estimate_cost_of_equity(1)
     
         # Project FCFF and discount
         pv_sum = 0.0
@@ -295,9 +293,8 @@ class AswathDamodaranAgent():
             },
             "details": ["FCFF DCF completed"],
         }
-    
-    
-    def estimate_cost_of_equity(beta: float | None) -> float:
+
+    def estimate_cost_of_equity(self, beta: float) -> float:
         """CAPM: r_e = r_f + β × ERP (use Damodaran’s long‑term averages)."""
         risk_free = 0.04          # 10‑yr US Treasury proxy
         erp = 0.05                # long‑run US equity risk premium

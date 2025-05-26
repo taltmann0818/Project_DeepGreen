@@ -208,7 +208,7 @@ class FundementalData:
             'income_statement.depreciation_and_amortization.value']
         fundementals['earnings_per_share'] = self.financial_data['income_statement.basic_earnings_per_share.value']
         fundementals['intangible_assets'] = self.financial_data['balance_sheet.intangible_assets.value']
-        fundementals['interest_expense'] = self.financial_data['income_statement.interest_and_debt_expense.value']
+        fundementals['interest_expense'] = self.financial_data['income_statement.interest_expense_operating.value']
         if self.fetch_market_cap:
             fundementals['market_cap'] = self.financial_data['market_cap']
         if self.fetch_stock_price:

@@ -26,7 +26,7 @@ class TickerData:
         self.client = RESTClient(os.environ["POLYGON_API_KEY"])
         self.tickers = tickers
         self.indicator_list = set(indicator_list)
-        self.prediction_window = abs(prediction_window)
+        self.prediction_window = -abs(prediction_window)
         self.days = years * 365
         if years > 5:
             raise ValueError("Max years is 5 due to API limits.")
@@ -73,7 +73,7 @@ class TickerData:
             .reset_index()
         )
 
-        for col in ['bearish', 'bullish', 'hold', 'mixed']:
+        for col in ['bearish', 'bullish', 'hold', 'mixed', 'negative', 'positive','neutral']:
             if col not in daily.columns:
                 daily[col] = 0
 
@@ -167,7 +167,7 @@ class TickerData:
         )
         # Merge in MarketRegimes
         if 'State' in self.indicator_list:
-            _, self.dataset_ex_df['State']  = RegimeDetector.load("Models/hmm_temp.pkl").predict(self.dataset_ex_df, ma=5)
+            _, self.dataset_ex_df['State']  = RegimeDetector.load("Models/hmm_v2.pkl").predict(self.dataset_ex_df, ma=5)
         if not self.prediction_mode:
             self.dataset_ex_df['shifted_prices'] = self.dataset_ex_df['Close'].shift(self.prediction_window)
 
@@ -400,7 +400,7 @@ class TickerData:
             cols += list(self.indicator_list)
         else:
             cols += ['shifted_prices'] + list(self.indicator_list)
-        self.final_df = self.dataset_ex_df[cols].dropna()
+        self.final_df = self.dataset_ex_df[cols]#.dropna()
         return self.final_df
 
     def process_all(self):
@@ -408,60 +408,3 @@ class TickerData:
         self.preprocess_data()
         self.add_technical_indicators()
         return self.merge_data(), self.stock_data
-
-def upload_data_sql(data_to_upload, table_name,chunksize=100):
-    try:
-        # Get connection string from environment variables
-        connection_string = os.environ["AZURE_SQL_CONNECTIONSTRING"]
-        engine = create_engine(f"mssql+pyodbc:///?odbc_connect={urllib.parse.quote_plus(connection_string)}")
-
-        data_to_upload = data_to_upload.reset_index().rename(columns={'index': 'Date'})
-        data_to_upload = data_to_upload[['Date', 'Ticker', 'Open', 'High', 'Low', 'Close', 'Volume']]
-        # Convert Date column to a SQL-compatible format (remove timezone information)
-        if pd.api.types.is_datetime64_any_dtype(data_to_upload['Date']):
-            data_to_upload['Date'] = data_to_upload['Date'].dt.tz_localize(None)
-
-        print("Sample data to be uploaded:")
-        print(data_to_upload.head()) # Print a small sample of the data for verification
-
-        # Upload the dataframe to SQL
-        data_to_upload.to_sql(
-            name=table_name,
-            con=engine,
-            if_exists='append',  # 'replace' if you want to overwrite, 'append' to add to existing
-            index=False,
-            chunksize=chunksize
-        )
-
-        print(f"Successfully uploaded {len(data_to_upload)} records to {table_name} table")
-
-    except Exception as e:
-        print(f"Error uploading data: {str(e)}")
-
-        # Provide additional debugging information
-        if 'data_to_upload' in locals():
-            print("Data sample at the time of error:")
-            print(data_to_upload.head())
-
-
-def fetch_sql_data(table_name):
-    try:
-        # Get connection string from environment variables
-        connection_string = os.environ["AZURE_SQL_CONNECTIONSTRING"]
-        engine = create_engine(f"mssql+pyodbc:///?odbc_connect={urllib.parse.quote_plus(connection_string)}")
-
-        # Establish connection
-        with engine.connect() as connection:
-            # Prepare base SELECT query
-            metadata = MetaData()
-            table = Table(table_name, metadata, autoload_with=engine)
-
-            # Execute query and fetch results into a pandas DataFrame
-            result = connection.execute(select(table))
-            data = pd.DataFrame(result.fetchall(), columns=result.keys())
-
-        return data
-
-    except Exception as e:
-        print(f"Error fetching data: {str(e)}")
-        return pd.DataFrame()  # Return an empty DataFrame in case of error

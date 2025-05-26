@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 from hmmlearn.hmm import GaussianHMM
 import plotly.graph_objects as go
+from typing import List
 
 warnings.filterwarnings("ignore")
 
@@ -72,7 +73,7 @@ class RegimeDetector:
         return X_all, tickers, lengths, idx_maps
 
     @staticmethod
-    def _truncated_lengths(lengths: list[int], upto: int):
+    def _truncated_lengths(lengths: List[int], upto: int):
         """
         For a cut‐off index `upto`, compute how many obs per ticker lie in [0, upto).
         """
@@ -85,7 +86,7 @@ class RegimeDetector:
         return out
 
     @staticmethod
-    def _split_states(states_all: np.ndarray, tickers: list[str], lengths: list[int]):
+    def _split_states(states_all: np.ndarray, tickers: List[str], lengths: List[int]):
         """
         Un‐stack a flat state array back into per‐ticker sequences.
         """
