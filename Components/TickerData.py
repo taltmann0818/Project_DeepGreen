@@ -3,20 +3,16 @@ from polygon import RESTClient
 import warnings
 import numpy as np
 import pandas as pd
+import pywt
+import antropy as ant
+from pyts.decomposition import SingularSpectrumAnalysis
+from pydmd import DMD
+from hurst import compute_Hc
+
 from datetime import datetime, timedelta
-from Components.MarketRegimes import RegimeDetector
-
-try:
-    from sqlalchemy import create_engine, MetaData, Table, select
-except ImportError:
-    create_engine = None
-    MetaData = None
-    Table = None
-    select = None
-
-import pandas as pd
-import urllib.parse
 import os
+
+from Components.MarketRegimes import RegimeDetector
 
 class TickerData:
     def __init__(self, tickers, indicator_list, years=1, prediction_window=5,**kwargs):
@@ -166,10 +162,15 @@ class TickerData:
             .rename(columns={"open":"Open","high":"High","low":"Low","close":"Close","volume":"Volume"})
         )
         # Merge in MarketRegimes
-        if 'State' in self.indicator_list:
-            _, self.dataset_ex_df['State']  = RegimeDetector.load("Models/hmm_v2.pkl").predict(self.dataset_ex_df, ma=5)
+        if 'hmm_state' in self.indicator_list:
+            _, self.dataset_ex_df['hmm_state']  = RegimeDetector.load("Models/hmm_v2.pkl").predict(self.dataset_ex_df, ma=5)
         if not self.prediction_mode:
-            self.dataset_ex_df['shifted_prices'] = self.dataset_ex_df['Close'].shift(self.prediction_window)
+            self.dataset_ex_df = self.dataset_ex_df.sort_values(['Ticker', 'Date'])
+            self.dataset_ex_df['shifted_prices'] = (
+                self.dataset_ex_df
+                .groupby('Ticker')['Close']
+                .shift(self.prediction_window)
+            )
 
         # Merge in news data if requested
         if self.news_data is not None:
@@ -200,12 +201,6 @@ class TickerData:
         return np.where(ema_8  > ema_21, 1, 0), np.where(ema_21 > ema_55, 1, 0)
 
     @staticmethod
-    def z_score(series, period=50):
-        ma_50 = series.rolling(window=period).mean()
-        std_50 = series.rolling(window=period).std()
-        return (series - ma_50) / std_50
-
-    @staticmethod
     def stochastic_rsi(series, rsi_period=14, stoch_period=14):
         delta = series.diff()
         gain = delta.clip(lower=0)
@@ -218,12 +213,29 @@ class TickerData:
     def macd(series, fast_period=12, slow_period=26, signal_period=9):
         fast = series.ewm(span=fast_period, adjust=False).mean()
         slow = series.ewm(span=slow_period, adjust=False).mean()
+
         return fast - slow
 
     @staticmethod
-    def atr(close, high, low, period=14):
-        true_range = pd.concat([high - low, abs(high - close.shift()), abs(low - close.shift())], axis=1).max(axis=1)
-        return true_range.rolling(period).mean()
+    def compute_cmf(data, period=20):
+        close, low, high, volume = data.Close, data.Low, data.High, data.Volume
+        mfm = ((close - low) - (high - close)) / (high - low)  # money flow multiplier
+        mfm = mfm.fillna(0)
+        mfv = mfm * volume  # money flow volume
+        mfv_sum = mfv.rolling(period).sum()
+        vol_sum = volume.rolling(period).sum()
+        cmf = mfv_sum / vol_sum  # Chaikin Money Flow = sum(MFV)/sum(Volume) over period
+        return cmf
+
+    @staticmethod
+    def compute_cci(data, period=20):
+        close, low, high = data.Close, data.Low, data.High
+        tp = (high + low + close) / 3.0  # typical price each day
+        sma_tp = tp.rolling(period).mean()  # simple moving average of typical price
+        mad = tp.rolling(period).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True)  # mean absolute deviation
+        cci = (tp - sma_tp) / (0.015 * mad) # Compute CCI with the 0.015 scaling factor
+
+        return cci
 
     @staticmethod
     def momentum_signals(close, volume):
@@ -251,35 +263,92 @@ class TickerData:
         return center + multiplier * atr, center - multiplier * atr
 
     @staticmethod
-    def adx(high, low, close, period=14, smoothing=14):
-        tr = pd.concat([
-            high - low,
-            (high - close.shift()).abs(),
-            (low - close.shift()).abs()
-        ], axis=1).max(axis=1)
-        atr = tr.rolling(smoothing).mean()
-        up = high.diff().clip(lower=0)
-        down = (-low.diff()).clip(lower=0)
-        pos = 100 * up.rolling(smoothing).mean() / atr
-        neg = 100 * down.rolling(smoothing).mean() / atr
-        dx = 100 * (pos - neg).abs() / (pos + neg)
-        return dx.rolling(period).mean()
+    def compute_parabolic_sar(data, step=0.02, max_step=0.2):
+        # step: acceleration factor increment (usually 0.02), max_step: max AF (usually 0.2)
+        close, low, high = data.Close, data.Low, data.High
+
+        length = len(close)
+        sar = [0.0] * length
+        # Initialization: Start with first trend assumption (e.g., assume first period is an uptrend)
+        # Typically initialize SAR as previous period's extreme.
+        # We'll start by assuming an uptrend from first day to second for initialization:
+        sar[0] = low.iloc[0]  # initial SAR at first low (for uptrend start)
+        bull = True  # start as bullish trend
+        af = step
+        ep = high.iloc[0]  # extreme price (highest high in uptrend)
+        for i in range(1, length):
+            prev_sar = sar[i - 1]
+            if bull:
+                # Uptrend: SAR = prev SAR + AF * (EP - prev SAR)
+                sar[i] = prev_sar + af * (ep - prev_sar)
+                # Ensure SAR is below the last two lows (cannot rise above actual price lows in uptrend)
+                sar[i] = min(sar[i], low.iloc[i - 1], low.iloc[i])
+                # Update extreme point and acceleration factor if new high made
+                if high.iloc[i] > ep:
+                    ep = high.iloc[i]
+                    af = min(af + step, max_step)
+                # Check for trend reversal
+                if close.iloc[i] < sar[i]:
+                    # flip to downtrend
+                    bull = False
+                    sar[i] = ep  # on reversal, SAR starts at last EP (last high)
+                    af = step
+                    ep = low.iloc[i]  # reset extreme to current low
+            else:
+                # Downtrend: SAR = prev SAR - AF * (prev SAR - EP)
+                sar[i] = prev_sar - af * (prev_sar - ep)
+                # Ensure SAR is above the last two highs
+                sar[i] = max(sar[i], high.iloc[i - 1], high.iloc[i])
+                # Update extreme point if new low made
+                if low.iloc[i] < ep:
+                    ep = low.iloc[i]
+                    af = min(af + step, max_step)
+                # Check for reversal
+                if close.iloc[i] > sar[i]:
+                    bull = True
+                    sar[i] = ep  # on reversal, SAR starts at last EP (last low)
+                    af = step
+                    ep = high.iloc[i]
+        return pd.Series(sar, index=close.index)
 
     @staticmethod
-    def engulfing_patterns(open_, close):
-        cur_b = close > open_
-        prev_b = close.shift() > open_.shift()
-        cur_body = (close - open_).abs()
-        prev_body = (close.shift() - open_.shift()).abs()
-        bull = ( cur_b & ~prev_b & (open_ <= close.shift()) & (close >= open_.shift()) & (cur_body > prev_body) )
-        bear = (~cur_b &  prev_b & (open_ >= close.shift()) & (close <= open_.shift()) & (cur_body > prev_body) )
-        return bull.astype(int), bear.astype(int)
+    def dmd_prediction(series, modes=2):
+        dmd = DMD(svd_rank=modes)
+        dmd.fit(series.values.reshape(1, -1))
+        reconstruction = dmd.reconstructed_data.real.flatten()
+        return pd.Series(reconstruction, index=series.index)
 
     @staticmethod
-    def williams_r(high, low, close, period=14):
-        hh = high.rolling(period).max()
-        ll = low.rolling(period).min()
-        return (hh - close) / (hh - ll) * -1
+    def ssa_trend(series, window_size=20):
+        # groups = [[0]] means “only reconstruct component 0 (the one with the largest singular value)”
+        ssa = SingularSpectrumAnalysis(window_size=window_size, groups=[[0]])
+        X = series.values.reshape(1, -1)  # shape (1, n_timestamps)
+        reconstructed = ssa.fit_transform(X)  # now shape (1, 1, n_timestamps)
+        trend = reconstructed.squeeze()  # collapse to shape (n_timestamps,)
+        return pd.Series(trend, index=series.index)
+
+    @staticmethod
+    def wavelet_denoise(series, wavelet='db4', level=1):
+        # Perform discrete wavelet transform
+        coeffs = pywt.wavedec(series.values, wavelet, level=level)
+        # Zero-out the highest detail coefficients to remove noise
+        coeffs[-1] = np.zeros_like(coeffs[-1])
+        # Reconstruct the series from modified coefficients
+        reconstructed = pywt.waverec(coeffs, wavelet)
+        # Ensure the reconstructed series has the same length
+        reconstructed = reconstructed[:len(series)]
+        return pd.Series(reconstructed, index=series.index)
+
+    @staticmethod
+    def hurst_window(x):
+        # x is a 1-D NumPy array of length WINDOW
+        H, c, data = compute_Hc(x, kind='price', simplified=True)
+        return H
+
+    @staticmethod
+    def perm_entropy_window(x):
+        # x is the window array
+        return ant.perm_entropy(x, order=3, normalize=True)
 
     # ——— Core Refactored Indicator Loop ———
     def add_technical_indicators(self):
@@ -305,58 +374,47 @@ class TickerData:
                 )
 
         # — Single-series indicators —
-        if 'macd' in self.indicator_list:
-            df['macd'] = df.groupby('Ticker')['Close'].transform(self.macd)
-
         if 'b_percent' in self.indicator_list:
             df['b_percent'] = df.groupby('Ticker')['Close'].transform(self.bollinger_percent_b)
 
-        if 'z_score' in self.indicator_list:
-            df['z_score'] = df.groupby('Ticker')['Close'].transform(self.z_score)
+        if 'macd' in self.indicator_list:
+            df['macd'] = df.groupby('Ticker')['Close'].transform(self.macd)
 
-        # — Single-series but need multiple of OHLC —
-        if 'adx' in self.indicator_list:
-            adx_series = (
+        if 'ssa_trend' in self.indicator_list:
+            df['ssa_trend'] = df.groupby('Ticker')['Close'].apply(self.ssa_trend).reset_index(level=0, drop=True)
+
+        if 'dmd' in self.indicator_list:
+            df['dmd'] = df.groupby('Ticker')['Close'].apply(self.dmd_prediction).reset_index(level=0, drop=True)
+
+        if 'close_denoised_L1' in self.indicator_list:
+            df['close_denoised_L1'] = df.groupby('Ticker')['Close'].apply(self.wavelet_denoise).reset_index(level=0, drop=True)
+
+        if 'cmf' in self.indicator_list:
+            df['cmf'] = df.groupby('Ticker')[['High','Low','Close','Volume']].apply(self.compute_cmf).reset_index(level=0, drop=True)
+
+        if 'cci' in self.indicator_list:
+            df['cci'] = df.groupby('Ticker')[['High','Low','Close','Volume']].apply(self.compute_cci).reset_index(level=0, drop=True)
+
+        if 'parabolic_sar' in self.indicator_list:
+            df['parabolic_sar'] = df.groupby('Ticker')[['High','Low','Close']].apply(self.compute_parabolic_sar).reset_index(level=0, drop=True)
+
+        if 'hurst_100' in self.indicator_list:
+            df['hurst_100'] = (
                 df
-                .groupby('Ticker')
-                .apply(lambda g: self.adx(g['High'], g['Low'], g['Close']))
+                .groupby('Ticker')['Close']
+                .apply(lambda s: s.rolling(100)
+                       .apply(self.hurst_window, raw=True))
                 .reset_index(level=0, drop=True)
             )
-            df['adx'] = adx_series
 
-        if 'williams_r' in self.indicator_list:
-            wr_series = (
+        if 'perm_entropy_50' in self.indicator_list:
+            df['perm_entropy_50'] = (
                 df
-                .groupby('Ticker')
-                .apply(lambda g: self.williams_r(g['High'], g['Low'], g['Close']))
+                .groupby('Ticker')['Close']
+                .apply(lambda s: s.rolling(50)
+                       .apply(self.perm_entropy_window, raw=True))
                 .reset_index(level=0, drop=True)
             )
-            df['williams_r'] = wr_series
-
-        if 'atr' in self.indicator_list:
-            atr_series = (
-                df
-                .groupby('Ticker')
-                .apply(lambda g: self.atr(g['Close'], g['High'], g['Low']))
-                .reset_index(level=0, drop=True)
-            )
-            df['atr'] = atr_series
-
-        # — Engulfing patterns (two outputs: bullish & bearish) —
-        if {'bullish_engulfing', 'bearish_engulfing'} & set(self.indicator_list):
-            eng = (
-                df
-                .groupby('Ticker')
-                .apply(lambda g: pd.DataFrame({
-                    'bullish_engulfing': self.engulfing_patterns(g['Open'], g['Close'])[0],
-                    'bearish_engulfing': self.engulfing_patterns(g['Open'], g['Close'])[1],
-                }, index=g.index))
-                .reset_index(level=0, drop=True)
-            )
-            if 'bullish_engulfing' in self.indicator_list:
-                df['bullish_engulfing'] = eng['bullish_engulfing']
-            if 'bearish_engulfing' in self.indicator_list:
-                df['bearish_engulfing'] = eng['bearish_engulfing']
 
         # — Keltner Channel (two outputs: upper & lower) —
         if {'keltner_upper', 'keltner_lower'} & set(self.indicator_list):
@@ -391,6 +449,7 @@ class TickerData:
                 df['volume_momentum'] = momentum['volume_momentum']
 
         self.dataset_ex_df = df
+
         return df
 
     # ——— Final Merge Based on indicators & mode ———
@@ -408,3 +467,5 @@ class TickerData:
         self.preprocess_data()
         self.add_technical_indicators()
         return self.merge_data(), self.stock_data
+
+#indicators = ['ema_20', 'ema_50', 'ema_100', 'stoch_rsi14', 'macd', 'b_percent', 'hmm_state', 'ssa_trend', 'dmd', 'hurst_100','perm_entropy_50','close_denoised_L1', 'Close']
