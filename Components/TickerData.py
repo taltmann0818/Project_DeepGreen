@@ -23,6 +23,7 @@ class TickerData:
         self.tickers = tickers
         self.indicator_list = set(indicator_list)
         self.prediction_window = -abs(prediction_window)
+        self.years = years
         self.days = years * 365
         if years > 5:
             raise ValueError("Max years is 5 due to API limits.")
@@ -118,22 +119,10 @@ class TickerData:
 
         return daily[["Ticker", "open", "high", "low", "close", "volume"]]
 
-    def get_index_vol(self, period=14, multiplier=1, timespan="day", limit=50000):
-        aggs_iter = self.client.list_aggs(
-            ticker='I:NDX',
-            multiplier=multiplier,
-            timespan=timespan,
-            from_=self.start_date,
-            to=self.end_date,
-            limit=limit
-        )  # returns an iterator over all pages :contentReference[oaicite:4]{index=4}
-        aggs = pd.DataFrame(aggs_iter)
-        dt_utc = pd.to_datetime(aggs['timestamp'], unit="ms", utc=True) \
-            .dt.tz_convert('America/New_York')  # convert TZ :contentReference[oaicite:5]{index=5}
-        aggs['date'] = dt_utc.dt.normalize()
-        aggs.set_index("date")
+    def get_index_data(self):
+        nasdaq_close = TickerData('I:NDX', [], years=self.years).get_ohlc_for_ticker('I:NDX')
 
-        return self.stochastic_rsi(aggs['close'], rsi_period=period, stoch_period=period)
+        return nasdaq_close
 
     def fetch_stock_data(self, workers=20):
 
@@ -151,9 +140,6 @@ class TickerData:
             self.news_data = None
 
         return self.stock_data, self.news_data
-
-    def get_fundamentals(self):
-        pass
 
     # ——— Preprocessing (unchanged) ———
     def preprocess_data(self):
@@ -350,6 +336,17 @@ class TickerData:
         # x is the window array
         return ant.perm_entropy(x, order=3, normalize=True)
 
+    @staticmethod
+    def fractal(x):
+        # x is a 1-D NumPy array
+        # choose m (embedding dim) and r (tolerance), e.g. m=2, r=0.2*std
+        return ant.higuchi_fd(x)
+
+    @staticmethod
+    def sampen_window(x):
+        # x is a 1-D NumPy array
+        return ant.sample_entropy(x, order=2, metric='chebyshev')
+
     # ——— Core Refactored Indicator Loop ———
     def add_technical_indicators(self):
         df = self.dataset_ex_df.copy()
@@ -390,7 +387,10 @@ class TickerData:
             df['close_denoised_L1'] = df.groupby('Ticker')['Close'].apply(self.wavelet_denoise).reset_index(level=0, drop=True)
 
         if 'cmf' in self.indicator_list:
-            df['cmf'] = df.groupby('Ticker')[['High','Low','Close','Volume']].apply(self.compute_cmf).reset_index(level=0, drop=True)
+            df['cmf'] = df.groupby('Ticker')[['High', 'Low', 'Close', 'Volume']].apply(
+                lambda x: self.compute_cmf(x)['cmf'] if isinstance(self.compute_cmf(x),
+                                                                   pd.DataFrame) else self.compute_cmf(x)
+            ).reset_index(level=0, drop=True)
 
         if 'cci' in self.indicator_list:
             df['cci'] = df.groupby('Ticker')[['High','Low','Close','Volume']].apply(self.compute_cci).reset_index(level=0, drop=True)
@@ -413,6 +413,24 @@ class TickerData:
                 .groupby('Ticker')['Close']
                 .apply(lambda s: s.rolling(50)
                        .apply(self.perm_entropy_window, raw=True))
+                .reset_index(level=0, drop=True)
+            )
+
+        if 'sampen_50' in self.indicator_list:
+            df['sampen_50'] = (
+                df
+                .groupby('Ticker')['Close']
+                .apply(lambda s: s.rolling(50)
+                       .apply(self.sampen_window, raw=True))
+                .reset_index(level=0, drop=True)
+            )
+
+        if 'fractal_50' in self.indicator_list:
+            df['fractal_50'] = (
+                df
+                .groupby('Ticker')['Close']
+                .apply(lambda s: s.rolling(50)
+                       .apply(self.fractal, raw=True))
                 .reset_index(level=0, drop=True)
             )
 
@@ -448,6 +466,16 @@ class TickerData:
             if 'volume_momentum' in self.indicator_list:
                 df['volume_momentum'] = momentum['volume_momentum']
 
+        if 'nasdaq_rsi' or 'nasdaq_returns' in self.indicator_list:
+            nasdaq_close = self.get_index_data()
+            if 'nasdaq_rsi' in self.indicator_list:
+                nasdaq_rsi = self.stochastic_rsi(nasdaq_close['close']).rename('nasdaq_rsi')
+                df = df.merge(nasdaq_rsi.to_frame(), left_index=True, right_index=True)
+
+            if 'nasdaq_returns' in self.indicator_list:
+                nasdaq_returns = nasdaq_close['close'].pct_change().rename('nasdaq_returns')
+                df = df.merge(nasdaq_returns.to_frame(), left_index=True, right_index=True)
+
         self.dataset_ex_df = df
 
         return df
@@ -459,7 +487,7 @@ class TickerData:
             cols += list(self.indicator_list)
         else:
             cols += ['shifted_prices'] + list(self.indicator_list)
-        self.final_df = self.dataset_ex_df[cols]#.dropna()
+        self.final_df = self.dataset_ex_df[cols].dropna()
         return self.final_df
 
     def process_all(self):
@@ -468,4 +496,4 @@ class TickerData:
         self.add_technical_indicators()
         return self.merge_data(), self.stock_data
 
-#indicators = ['ema_20', 'ema_50', 'ema_100', 'stoch_rsi14', 'macd', 'b_percent', 'hmm_state', 'ssa_trend', 'dmd', 'hurst_100','perm_entropy_50','close_denoised_L1', 'Close']
+#indicators = ['ema_20', 'ema_50', 'ema_100', 'stoch_rsi14', 'macd', 'b_percent', 'hmm_state', 'ssa_trend', 'dmd', 'hurst_100','perm_entropy_50','close_denoised_L1', 'Close','fractal_50','sampen_50','cci','cmf','parabolic_sar','keltner_upper','keltner_lower','nasdaq_rsi','nasdaq_returns']
