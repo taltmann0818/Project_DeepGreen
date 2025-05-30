@@ -2,6 +2,7 @@ import os
 import urllib
 import pandas as pd
 from sqlalchemy import create_engine, MetaData, Table, select, text
+from sqlalchemy.exc import OperationalError, TimeoutError, DBAPIError
 import time
 from sqlalchemy.exc import OperationalError
 
@@ -35,31 +36,78 @@ def upload_data_sql(data_to_upload, table_name, chunksize=100):
             print(data_to_upload.head())
 
 
-def fetch_sql_data(table_name, max_retries: int = 12, delay_seconds: int = 60):
-    try:
-        # Get connection string from environment variables
-        #connection_string = os.environ["AZURE_SQL_CONNECTIONSTRING"]
-        connection_string = "Driver={ODBC Driver 18 for SQL Server};Server=tcp:deepgreen.database.windows.net,1433;Database=DeepGreen;Uid=taltmann;Pwd=Ta750007717!0818;Encrypt=yes;TrustServerCertificate=no;Connection Timeout=30;"
-        engine = create_engine(f"mssql+pyodbc:///?odbc_connect={urllib.parse.quote_plus(connection_string)}", connect_args={"timeout": delay_seconds})
+def fetch_sql_data(
+    table_name: str,
+    max_retries: int = 12,
+    initial_delay: int = 10,
+    backoff_factor: float = 1.5
+) -> pd.DataFrame:
+    """
+    Fetch all rows from `table_name`, retrying on cold-start or not-available errors.
+    Raises RuntimeError if final attempt still fails.
+    """
+    # 1. Build (or read) your connection string
+    conn_str = os.environ.get(
+        "AZURE_SQL_CONNECTIONSTRING",
+        "Driver={ODBC Driver 18 for SQL Server};"
+        "Server=tcp:deepgreen.database.windows.net,1433;"
+        "Database=DeepGreen;"
+        "Uid=taltmann;Pwd=Ta750007717!0818;"
+        "Encrypt=yes;TrustServerCertificate=no;"
+        "ConnectRetryCount=3;ConnectRetryInterval=10;"
+        "Connection Timeout=30;"
+    )
+    quoted = urllib.parse.quote_plus(conn_str)
 
-        # Establish connection
-        for attempt in range(1, max_retries + 1):
-            try:
-                with engine.connect() as connection:
-                    # Prepare base SELECT query
-                    metadata = MetaData()
-                    table = Table(table_name, metadata, autoload_with=engine)
+    delay = initial_delay
+    for attempt in range(1, max_retries + 1):
+        try:
+            engine = create_engine(
+                f"mssql+pyodbc:///?odbc_connect={quoted}",
+                connect_args={"timeout": 30},
+                pool_pre_ping=True,
+                pool_recycle=25 * 60
+            )
+            metadata = MetaData()
+            table = Table(table_name, metadata, autoload_with=engine)
 
-                    # Execute query and fetch results into a pandas DataFrame
-                    result = connection.execute(select(table))
-                    data = pd.DataFrame(result.fetchall(), columns=result.keys())
+            with engine.connect() as conn:
+                result = conn.execute(select(table))
+                df = pd.DataFrame(result.fetchall(), columns=result.keys())
+                return df
 
-            except OperationalError as e:
-                print(f"⚠️  Attempt {attempt} failed: {e}.  Retrying in {delay_seconds}s …")
-                time.sleep(delay_seconds)
+        except (OperationalError, TimeoutError, DBAPIError) as e:
+            # If it's a DBAPIError, try to extract the tracing ID for your logs
+            tracing_id = None
+            if hasattr(e, "orig") and getattr(e.orig, "args", None):
+                # e.orig.args might be a tuple like (sqlstate, message)
+                msg = e.orig.args[1] if len(e.orig.args) > 1 else str(e.orig)
+                if "session tracing ID" in msg:
+                    # crude parse for the GUID in braces
+                    start = msg.find("{")
+                    end = msg.find("}", start)
+                    tracing_id = msg[start : end + 1] if start != -1 and end != -1 else None
 
-    except Exception as e:
-        print(f"Error fetching data: {str(e)}")
+            print(
+                "Attempt %d/%d failed (%s)%s. Retrying in %ds…",
+                attempt,
+                max_retries,
+                e,
+                f" [tracing_id={tracing_id}]" if tracing_id else "",
+                delay
+            )
 
-    return data
+            if attempt == max_retries:
+                raise RuntimeError(
+                    f"Unable to fetch '{table_name}' after {max_retries} attempts"
+                ) from e
+
+            # Dispose pool to clear any dead connections, then wait
+            engine.dispose()
+            time.sleep(delay)
+            delay = int(delay * backoff_factor)
+
+    # Should never reach here
+    raise RuntimeError("Unexpected exit from retry loop")
+
 
