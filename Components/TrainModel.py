@@ -4,11 +4,15 @@ import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
-#from torch.cuda.amp import autocast, GradScaler
+from torch.cuda.amp import autocast, GradScaler
+#from transformer_engine.common.recipe import Format, DelayedScaling
+#import transformer_engine.pytorch as te
+import copy
+
 import numpy as np
 import pandas as pd
 import math
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, ConcatDataset
 from sklearn.preprocessing import StandardScaler
 from tqdm.auto import tqdm
 
@@ -68,22 +72,6 @@ class TEMPUS(nn.Module):
             self.register_buffer("mean", torch.tensor(scaler.mean_, dtype=torch.float32))
             self.register_buffer("scale", torch.tensor(scaler.scale_, dtype=torch.float32))
 
-        # ——— sanity check for zero / near-zero scales ———
-        with torch.no_grad():
-            # eps threshold you consider “too small”
-            eps = 1e-6
-            zero_mask = (self.scale == 0)
-            near_zero_mask = (self.scale.abs() < eps)
-    
-            if zero_mask.any():
-                idxs = zero_mask.nonzero(as_tuple=False).view(-1).tolist()
-                print(f"[WARN] scaler.scale_ has EXACT zeros at indices: {idxs}")
-    
-            if near_zero_mask.any():
-                idxs = near_zero_mask.nonzero(as_tuple=False).view(-1).tolist()
-                mins = self.scale[near_zero_mask]
-                print(f"[WARN] scaler.scale_ has near-zero (<{eps}) at indices {idxs}, values: {mins.tolist()}")
-
         # Multiple Temporal Resolutions of LSTM with layer normalization
         self.lstm_short = nn.LSTM(
             input_size=self.input_size,
@@ -126,7 +114,7 @@ class TEMPUS(nn.Module):
                 nn.Conv1d(self.hidden_size, self.hidden_size, kernel_size=k_size,
                           padding=padding, dilation=dilation, stride=1),
                 nn.BatchNorm1d(self.hidden_size),
-                nn.GELU() # Switching from ReLU to GELU
+                nn.ReLU() # Switching from ReLU to GELU
             ))
         self.tcn_fusion = nn.Linear(self.hidden_size * len(self.tcn_kernel_sizes), self.hidden_size * 2)
         self.tcn_fusion_norm = nn.LayerNorm(self.hidden_size * 2)
@@ -226,10 +214,8 @@ class TEMPUS(nn.Module):
         # Add positional encoding for transformer
         fused_features = self.pos_encoder(fused_features)
 
-        # Apply transformer encoder (replacing custom attention)
         attended_features = self.transformer_encoder(fused_features)
 
-        # Final output layers with layer normalization
         x = F.relu(self.fc1(attended_features))
         x = self.fc1_norm(x)
         x = self.dropout_layer(x)
@@ -249,34 +235,27 @@ class TEMPUS(nn.Module):
         # Define loss function and optimizer with weight decay
         criterion = nn.MSELoss()
         optimizer = AdamW(self.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay)
-        #grad_scaler = GradScaler()
-
-        # Learning rate scheduler
         scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
 
-        # Hybrid: E4M3 forward, E5M2 backward
-        fp8_recipe = DelayedScaling(fp8_format=Format.HYBRID, amax_history_len=16)
-
         # Early stopping variables
-        best_val_loss = float('inf')
-        best_model_state = None
+        best_val_mape = float('inf')
         patience_counter = 0
+        best_model_state = None
 
         self.history = {
             'train_loss': [], 'val_loss': [], 'test_loss': [],
-            'train_rmse': [], 'val_rmse': [], 'test_rmse': [],
-            'train_mape': [], 'val_mape': [], 'test_mape': []
+            'val_rmse': [], 'test_rmse': [],
+            'val_mape': [], 'test_mape': []
         }
 
         epoch_progress = tqdm(range(num_epochs), desc="Training Epochs")
         for epoch in epoch_progress:
             # Training phase
-            self.train()
-            train_loss, train_rmse, train_mape = self._train_epoch(train_loader, criterion, optimizer, fp8)
+            train_loss = self._train_epoch(train_loader, criterion, optimizer)
             # Validation phase
-            val_loss, val_rmse, val_mape = self.evaluate(val_loader, criterion, fp8)
+            val_loss, val_rmse, val_mape = self.evaluate(val_loader, criterion)
             # Test phase
-            test_loss, test_rmse, test_mape = self.evaluate(test_loader, criterion, fp8)
+            test_loss, test_rmse, test_mape = self.evaluate(test_loader, criterion)
             # Update learning rate
             scheduler.step(val_loss)
 
@@ -284,10 +263,8 @@ class TEMPUS(nn.Module):
             self.history['train_loss'].append(train_loss)
             self.history['val_loss'].append(val_loss)
             self.history['test_loss'].append(test_loss)
-            self.history['train_rmse'].append(train_rmse)
             self.history['val_rmse'].append(val_rmse)
             self.history['test_rmse'].append(test_rmse)
-            self.history['train_mape'].append(train_mape)
             self.history['val_mape'].append(val_mape)
             self.history['test_mape'].append(test_mape)
 
@@ -300,9 +277,9 @@ class TEMPUS(nn.Module):
             })
 
             # Model selection and early stopping
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                best_model_state = self.state_dict()
+            if val_mape < best_val_mape:
+                best_val_mape = val_mape
+                best_model_state = copy.deepcopy(self.state_dict())
                 patience_counter = 0
             else:
                 patience_counter += 1
@@ -310,8 +287,9 @@ class TEMPUS(nn.Module):
                     print(f"Early stopping triggered after {epoch + 1} epochs")
                     break
 
-            # Load the best model state
+        # Load the best model state
         if best_model_state is not None:
+            print("Loading the best model state...")
             self.load_state_dict(best_model_state)
 
             # Final evaluation
@@ -321,106 +299,52 @@ class TEMPUS(nn.Module):
 
         return self.history
 
-    def _train_epoch(self, train_loader, criterion, optimizer, fp8=None, grad_scaler=None):
+    def _train_epoch(self, train_loader, criterion, optimizer):
         """Helper method for training a single epoch"""
         self.train()
         total_loss = 0
-        all_predictions = []
-        all_targets = []
 
         for batch_idx, (inputs, targets) in enumerate(train_loader):
             inputs, targets = inputs.to(self.device), targets.to(self.device)
             optimizer.zero_grad()
-            
-            # ——— forward with fp8 precision + loss ———
-            with te.fp8_autocast(enabled=True, fp8_recipe=fp8):
-                outputs = self(inputs)
-                # Squeeze the last dimension if it exists
-                if outputs.dim() > 1:
-                    outputs = outputs[:, -1, 0] if outputs.size(1) > 1 and outputs.size(2) > 0 else outputs.squeeze()
-                loss = criterion(outputs, targets)
-
-            # ——— detect NaN loss BEFORE backward ———
-            if torch.isnan(loss) or torch.isinf(loss):
-                # compute output range
-                out_min, out_max = outputs.min().item(), outputs.max().item()
-                print(f"\n[ERROR] NaN/Inf loss at batch {batch_idx}")
-                print(f"  loss = {loss.item()}")
-                print(f"  outputs range = ({out_min:.6f}, {out_max:.6f})")
-
-                # compute gradient norm BEFORE scaling/clipping
-                # (need a dummy backward to get grads)
-                loss_clone = loss.clone().detach().requires_grad_(True)
-                loss_clone.backward(retain_graph=True)
-                total_norm = 0.0
-                for p in self.parameters():
-                    if p.grad is not None:
-                        param_norm = p.grad.data.norm(2).item()
-                        total_norm += param_norm**2
-                total_norm = math.sqrt(total_norm)
-                print(f"  grad_norm (pre-clip) = {total_norm:.6f}")
-
-                raise RuntimeError("Stopping training due to NaN/Inf loss")
-
+            outputs = self(inputs)
+            if outputs.dim() > 1:
+                outputs = outputs[:, -1, 0] if outputs.size(1) > 1 and outputs.size(2) > 0 else outputs.squeeze()
+            loss = criterion(outputs, targets)
             # ——— backward + step ———
-            #grad_scaler.scale(loss).backward()
             loss.backward()
-            #grad_scaler.unscale_(optimizer)
             nn.utils.clip_grad_norm_(self.parameters(), max_norm=self.clip_size)
-            #grad_scaler.step(optimizer)
-            #grad_scaler.update()
             optimizer.step()
 
             total_loss += loss.item() * inputs.size(0)
-            all_predictions.append(outputs.detach().cpu().numpy())
-            all_targets.append(targets.cpu().numpy())
 
         # Calculate metrics
-        all_predictions = np.concatenate(all_predictions, axis=0)
-        all_targets = np.concatenate(all_targets, axis=0)
-
         avg_loss = total_loss / len(train_loader.dataset)
-        rmse = np.sqrt(np.mean((all_predictions - all_targets) ** 2))
 
-        # MAPE calculation to handle near-zero values
-        epsilon = 1e-6  # Larger epsilon for numerical stability
-        abs_percentage_errors = np.abs((all_targets - all_predictions) / np.maximum(np.abs(all_targets), epsilon))
-        # Clip extreme values
-        abs_percentage_errors = np.clip(abs_percentage_errors, 0, 10)  # Cap at 1000%
-        mape = np.mean(abs_percentage_errors) * 100
+        return avg_loss
 
-        return avg_loss, rmse, mape
-
-    def evaluate(self, data_loader, criterion, fp8=None, grad_scaler=None):
+    def evaluate(self, data_loader, criterion, fp8=None):
         """Evaluate the model with improved metrics"""
         self.eval()
         total_loss = 0
-        all_predictions = []
-        all_targets = []
+        all_predictions, all_targets = [], []
 
         with torch.no_grad():
             for inputs, targets in data_loader:
                 inputs, targets = inputs.to(self.device), targets.to(self.device)
-                
-                with te.fp8_autocast(enabled=True, fp8_recipe=fp8):
-                    outputs = self(inputs)
-                    # Squeeze the last dimension if it exists
-                    if outputs.dim() > 1:
-                        outputs = outputs[:, -1, 0] if outputs.size(1) > 1 and outputs.size(2) > 0 else outputs.squeeze()
-                    loss = criterion(outputs, targets)
-
+                outputs = self(inputs)
+                if outputs.dim() > 1:
+                    outputs = outputs[:, -1, 0] if outputs.size(1) > 1 and outputs.size(2) > 0 else outputs.squeeze()
+                loss = criterion(outputs, targets)
                 total_loss += loss.item() * inputs.size(0)
                 all_predictions.append(outputs.cpu().numpy())
                 all_targets.append(targets.cpu().numpy())
-
         all_predictions = np.concatenate(all_predictions, axis=0)
         all_targets = np.concatenate(all_targets, axis=0)
 
         # Calculate metrics
         avg_loss = total_loss / len(data_loader.dataset)
         rmse = np.sqrt(np.mean((all_predictions - all_targets) ** 2))
-
-        # Improved MAPE calculation
         epsilon = 1e-6
         abs_percentage_errors = np.abs((all_targets - all_predictions) / np.maximum(np.abs(all_targets), epsilon))
         abs_percentage_errors = np.clip(abs_percentage_errors, 0, 10)
@@ -445,8 +369,6 @@ class TEMPUS(nn.Module):
             fig.update_yaxes(title_text="Loss", row=1, col=1)
 
             # Plot MAPE
-            fig.add_trace(go.Scatter(y=self.history['train_mape'], name='Train MAPE', line=dict(color='blue')),
-                          row=1, col=2)
             fig.add_trace(go.Scatter(y=self.history['test_mape'], name='Test MAPE', line=dict(color='green')),
                           row=1, col=2)
             fig.add_trace(go.Scatter(y=self.history['val_mape'], name='Validation MAPE', line=dict(color='orange')),
@@ -470,11 +392,14 @@ class TEMPUS(nn.Module):
     def export_model_to_torchscript(self, save_path, data_loader, device):
         try:
             self.eval()
+            self.to(device)
+            self.device = device
             # Fetch a sample input tensor from DataLoader
             example_inputs, _ = next(iter(data_loader))
 
             # Export model to TorchScript using tracing
-            scripted_model = torch.jit.trace(self.to(device), example_inputs.to(device))
+            with torch.no_grad():
+                scripted_model = torch.jit.trace(self.to(device), example_inputs.to(device))
 
             # Save the TorchScript model
             torch.jit.save(scripted_model, save_path)
@@ -487,14 +412,9 @@ class TEMPUS(nn.Module):
             return None
 
 class PositionalEncoding(nn.Module):
-    """
-    Positional encoding for the transformer model.
-    Adds information about the position of tokens in the sequence.
-    """
     def __init__(self, d_model, dropout=0.1, max_len=5000):
-        super(PositionalEncoding, self).__init__()
+        super().__init__()
         self.dropout = nn.Dropout(p=dropout)
-
         position = torch.arange(max_len).unsqueeze(1)
         div_term = torch.exp(torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model))
         pe = torch.zeros(max_len, d_model)
@@ -503,12 +423,7 @@ class PositionalEncoding(nn.Module):
         self.register_buffer('pe', pe)
 
     def forward(self, x):
-        """
-        Args:
-            x: Tensor, shape [batch_size, seq_len, embedding_dim]
-        """
-        x = x + self.pe[:x.size(1), :]
-        return self.dropout(x)
+        return self.dropout(x + self.pe[:x.size(1)])
 
 def torchscript_predict(model_path, input_df, device, window_size, target_col='shifted_prices', prediction_mode=False):
     # Load the TorchScript model
@@ -566,122 +481,91 @@ def torchscript_predict(model_path, input_df, device, window_size, target_col='s
 
     return preds_df
 
-from torch.utils.data import Dataset, DataLoader
-from sklearn.preprocessing import StandardScaler
-
 class DataModule:
-    def __init__(self, data, window_size=20, batch_size=32, val_size=0.1, test_size=0.1,
-                 random_state=42, target_col='shifted_prices', padding_strategy='zero'):
-        if 'Ticker' in data.columns:
-            self.data = data.drop(columns=['Ticker'])
-        elif data.columns[0] == 'Ticker':
-            # Drop the first column by index
-            self.data = data.iloc[:, 1:]
-        else:
-            self.data = data
-
+    def __init__(
+        self,
+        data,
+        window_size=20,
+        batch_size=32,
+        val_size=0.1,
+        test_size=0.1,
+        target_col='shifted_prices',
+    ):
+        # Keep raw data (including Ticker) for grouping
+        self.data = data.copy()
         self.window_size = window_size
         self.batch_size = batch_size
         self.val_size = val_size
         self.test_size = test_size
-        self.random_state = random_state
         self.target_col = target_col
-        self.padding_strategy = padding_strategy
-
         self.setup()
 
     def setup(self):
-        # Get datetime index from the data
+        # Verify index is DatetimeIndex
         if not isinstance(self.data.index, pd.DatetimeIndex):
-            raise ValueError("Data index must be a DatetimeIndex for year-based splitting")
+            raise ValueError("Data index must be a DatetimeIndex for splitting")
 
-        # Ensure data is sorted chronologically
-        length = len(self.data)
-        # Calculate the number of days in each split
-        test_days = int(length * self.test_size)
-        val_days = int(length * self.val_size)
-        train_days = length - test_days - val_days
+        # Determine global split dates for walk-forward chronological splits
+        all_dates = pd.Series(self.data.index.unique()).sort_values()
+        n = len(all_dates)
+        train_cut = int(n * (1 - self.val_size - self.test_size))
+        val_cut = int(n * (1 - self.test_size))
+        train_date = all_dates.iloc[train_cut]
+        val_date = all_dates.iloc[val_cut]
 
-        # Split the data chronologically
-        self.df_train = self.data[:train_days]
-        self.df_val = self.data[train_days:train_days + val_days]
-        self.df_test = self.data[train_days + val_days:]
+        # Split per ticker using global date boundaries
+        train_dfs, val_dfs, test_dfs = [], [], []
+        for ticker, df in self.data.groupby('Ticker'):
+            df = df.sort_index()
+            train_dfs.append(df[df.index <= train_date])
+            val_dfs.append(df[(df.index > train_date) & (df.index <= val_date)])
+            test_dfs.append(df[df.index > val_date])
+        # Concatenate splits
+        self.df_train = pd.concat(train_dfs)
+        self.df_val = pd.concat(val_dfs)
+        self.df_test = pd.concat(test_dfs)
 
-        # Create datasets and data loaders
-        feature_cols = [col for col in self.data.columns if col != self.target_col]
+        # Determine feature columns (exclude target and ticker)
+        feature_cols = [c for c in self.df_train.columns if c not in [self.target_col, 'Ticker']]
         self.num_features = len(feature_cols)
 
-         # Handle infinite values before scaling
-        self.df_train[feature_cols] = self.df_train[feature_cols].replace([np.inf, -np.inf], np.nan)
-        self.df_val[feature_cols] = self.df_val[feature_cols].replace([np.inf, -np.inf], np.nan)
-        self.df_test[feature_cols] = self.df_test[feature_cols].replace([np.inf, -np.inf], np.nan)
-
-        # Fill NaN values with appropriate method (median is generally robust)
-        for col in feature_cols:
-            median_val = self.df_train[col].median()
-            self.df_train[col] = self.df_train[col].fillna(median_val)
-            self.df_val[col] = self.df_val[col].fillna(median_val)
-            self.df_test[col] = self.df_test[col].fillna(median_val)
-
-        # Data Scaler
+        # Fit and apply scaler
         self.scaler = StandardScaler()
-        train_features = self.df_train[feature_cols]
-        self.scaler.fit(train_features)
+        self.scaler.fit(self.df_train[feature_cols])
+        for df in [self.df_train, self.df_val, self.df_test]:
+            df[feature_cols] = self.scaler.transform(df[feature_cols])
 
-        # Create datasets with an improved padding strategy
-        self.train_dataset = SequenceDataset(
-            self.df_train, target=self.target_col, features=feature_cols,
-            window_size=self.window_size, padding_strategy=self.padding_strategy
-        )
-        self.val_dataset = SequenceDataset(
-            self.df_val, target=self.target_col, features=feature_cols,
-            window_size=self.window_size, padding_strategy=self.padding_strategy
-        )
-        self.test_dataset = SequenceDataset(
-            self.df_test, target=self.target_col, features=feature_cols,
-            window_size=self.window_size, padding_strategy=self.padding_strategy
-        )
+        # Build per-ticker SequenceDatasets to prevent sequence bleed
+        self.train_dataset = ConcatDataset([SequenceDataset(df.drop(columns=['Ticker']), self.target_col, feature_cols, self.window_size) for df in train_dfs])
+        self.val_dataset = ConcatDataset([SequenceDataset(df.drop(columns=['Ticker']), self.target_col, feature_cols, self.window_size) for df in val_dfs])
+        self.test_dataset = ConcatDataset([SequenceDataset(df.drop(columns=['Ticker']),self.target_col, feature_cols, self.window_size) for df in test_dfs])
 
         # Create data loaders
         self.train_loader = DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True)
         self.val_loader = DataLoader(self.val_dataset, batch_size=self.batch_size, shuffle=False)
         self.test_loader = DataLoader(self.test_dataset, batch_size=self.batch_size, shuffle=False)
 
+
 class SequenceDataset(Dataset):
-    def __init__(self, dataframe, target, features, window_size, padding_strategy='zero'):
+    def __init__(self,dataframe,target, features,window_size):
         self.features = features
         self.target = target
         self.window_size = window_size
-        self.padding_strategy = padding_strategy
         self.y = torch.tensor(dataframe[target].values).float()
         self.X = torch.tensor(dataframe[features].values).float()
 
     def __len__(self):
-        return self.X.shape[0]
+        return len(self.y)
 
-    def __getitem__(self, i):
-        if i >= self.window_size - 1:
-            i_start = i - self.window_size + 1
-            x = self.X[i_start:(i + 1), :]
+    def __getitem__(self, idx):
+        if idx >= self.window_size - 1:
+            start = idx - self.window_size + 1
+            x = self.X[start:idx + 1]
         else:
-            # Improved padding strategy
-            if self.padding_strategy == 'zero':
-                # Zero padding
-                padding = torch.zeros(self.window_size - i - 1, self.X.shape[1])
-            elif self.padding_strategy == 'mean':
-                # Mean padding
-                padding = torch.mean(self.X[:i+1], dim=0).unsqueeze(0).repeat(self.window_size - i - 1, 1)
-            elif self.padding_strategy == 'repeat':
-                # Repeat first value (original strategy)
-                padding = self.X[0].repeat(self.window_size - i - 1, 1)
-            else:
-                # Default to zero padding
-                padding = torch.zeros(self.window_size - i - 1, self.X.shape[1])
-
-            x = self.X[0:(i + 1), :]
-            x = torch.cat((padding, x), 0)
-
-        return x, self.y[i]
+            pad_len = self.window_size - idx - 1
+            pad = torch.zeros(pad_len, self.X.shape[1])
+            x = torch.cat([pad, self.X[:idx+1]], dim=0)
+        return x, self.y[idx]
 
 
 class EchoStateNetwork(nn.Module):

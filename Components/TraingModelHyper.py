@@ -1,19 +1,25 @@
 import os
 import math
+
+import optuna.samplers
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import ReduceLROnPlateau
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, ConcatDataset
 from sklearn.preprocessing import StandardScaler
 import numpy as np
 import pandas as pd
 
+import ray
 from ray import tune
 from ray.tune.schedulers import ASHAScheduler
+from ray.tune.search.optuna import OptunaSearch
+from ray.tune import Stopper
 from ray.tune import Tuner, TuneConfig, RunConfig
-from functools import partial
+
+from Components.TickerData import TickerData
 
 # -- Model Definition --
 class PositionalEncoding(nn.Module):
@@ -207,53 +213,80 @@ class TEMPUS(nn.Module):
 
         return outputs
 
-# -- DataModule --
 class SequenceDataset(Dataset):
-    def __init__(self, df, feature_cols, target_col, window_size):
-        self.X = df[feature_cols].values.astype(np.float32)
-        self.y = df[target_col].values.astype(np.float32)
-        self.window = window_size
+    def __init__(self,dataframe,target, features,window_size):
+        self.features = features
+        self.target = target
+        self.window_size = window_size
+        self.y = torch.tensor(dataframe[target].values).float()
+        self.X = torch.tensor(dataframe[features].values).float()
+
     def __len__(self):
         return len(self.y)
+
     def __getitem__(self, idx):
-        start = max(0, idx - self.window + 1)
-        seq = self.X[start:idx+1]
-        if seq.shape[0] < self.window:
-            pad = np.zeros((self.window-seq.shape[0], self.X.shape[1]), dtype=np.float32)
-            seq = np.vstack([pad, seq])
-        return torch.from_numpy(seq), torch.tensor(self.y[idx])
+        if idx >= self.window_size - 1:
+            start = idx - self.window_size + 1
+            x = self.X[start:idx + 1]
+        else:
+            pad_len = self.window_size - idx - 1
+            pad = torch.zeros(pad_len, self.X.shape[1])
+            x = torch.cat([pad, self.X[:idx+1]], dim=0)
+        return x, self.y[idx]
 
 class DataModule:
-    def __init__(self, df, target_col, window_size, batch_size, val_ratio, test_ratio):
-        n = len(df)
-        t = int(n * test_ratio)
-        v = int(n * val_ratio)
+    def __init__(self, data, target_col, window_size, batch_size, val_size, test_size):
+        # Verify index is DatetimeIndex
+        if not isinstance(data.index, pd.DatetimeIndex):
+            raise ValueError("Data index must be a DatetimeIndex for splitting")
 
-        if 'Ticker' in df.columns:
-            df = df.drop(columns=['Ticker'])
-        elif df.columns[0] == 'Ticker':
-            # Drop the first column by index
-            df = df.iloc[:, 1:]
+        # Determine global split dates for walk-forward chronological splits
+        all_dates = pd.Series(data.index.unique()).sort_values()
+        n = len(all_dates)
+        train_cut = int(n * (1 - val_size - test_size))
+        val_cut = int(n * (1 - test_size))
+        train_date = all_dates.iloc[train_cut]
+        val_date = all_dates.iloc[val_cut]
 
-        self.train_df = df[:n - v - t]
-        self.val_df = df[n - v - t:n - t]
-        self.test_df = df[n - t:]
-        self.feature_cols = [c for c in df.columns if c != target_col]
-        self.target_col = target_col
-        scaler = StandardScaler().fit(self.train_df[self.feature_cols])
-        for split_df in (self.train_df, self.val_df, self.test_df):
-            split_df[self.feature_cols] = scaler.transform(split_df[self.feature_cols])
-        self.train_loader = DataLoader(SequenceDataset(self.train_df, self.feature_cols, self.target_col, window_size), batch_size=batch_size, shuffle=True)
-        self.val_loader   = DataLoader(SequenceDataset(self.val_df,   self.feature_cols, self.target_col, window_size), batch_size=batch_size, shuffle=False)
-        self.test_loader  = DataLoader(SequenceDataset(self.test_df,  self.feature_cols, self.target_col, window_size), batch_size=batch_size, shuffle=False)
+        # Split per ticker using global date boundaries
+        train_dfs, val_dfs, test_dfs = [], [], []
+        for ticker, df in data.groupby('Ticker'):
+            df = df.sort_index()
+            train_dfs.append(df[df.index <= train_date])
+            val_dfs.append(df[(df.index > train_date) & (df.index <= val_date)])
+            test_dfs.append(df[df.index > val_date])
+        # Concatenate splits
+        self.df_train = pd.concat(train_dfs)
+        self.df_val = pd.concat(val_dfs)
+        self.df_test = pd.concat(test_dfs)
+
+        # Determine feature columns (exclude target and ticker)
+        feature_cols = [c for c in self.df_train.columns if c not in [target_col, 'Ticker']]
+        self.num_features = len(feature_cols)
+
+        # Fit and apply scaler
+        self.scaler = StandardScaler()
+        self.scaler.fit(self.df_train[feature_cols])
+        for df in [self.df_train, self.df_val, self.df_test]:
+            df[feature_cols] = self.scaler.transform(df[feature_cols])
+
+        # Build per-ticker SequenceDatasets to prevent sequence bleed
+        self.train_dataset = ConcatDataset([SequenceDataset(df.drop(columns=['Ticker']), target_col, feature_cols, window_size) for df in train_dfs])
+        self.val_dataset = ConcatDataset([SequenceDataset(df.drop(columns=['Ticker']), target_col, feature_cols, window_size) for df in val_dfs])
+        self.test_dataset = ConcatDataset([SequenceDataset(df.drop(columns=['Ticker']),target_col, feature_cols, window_size) for df in test_dfs])
+
+        # Create data loaders
+        self.train_loader = DataLoader(self.train_dataset, batch_size=batch_size, shuffle=True)
+        self.val_loader = DataLoader(self.val_dataset, batch_size=batch_size, shuffle=False)
+        self.test_loader = DataLoader(self.test_dataset, batch_size=batch_size, shuffle=False)
 
 # -- Trainable function --
 def train_tempus(config):
     # Create data module first
     dm = DataModule(config['dataframe'], config['target'], config['window_size'], config['batch_size'], config['val_ratio'], config['test_ratio'])
     # Ensure model input_size matches actual feature count
-    config['input_size'] = len(dm.feature_cols)
-    device = 'mps'
+    config['input_size'] = dm.num_features
+    device = 'cuda' if torch.cuda.is_available() and config['use_gpu'] else 'cpu'
     config['device'] = device
     model = TEMPUS(config).to(device)
     criterion = nn.MSELoss()
@@ -275,10 +308,11 @@ def train_tempus(config):
             nn.utils.clip_grad_norm_(model.parameters(), config['clip_size'])
             optimizer.step()
             total_train += loss.item() * y.size(0)
-        train_loss = total_train / len(dm.train_loader.dataset)
+        train_loss = total_train / len(dm.train_dataset)
         # Validation loop
         total_val = 0
         model.eval()
+        preds, targets = [], []
         with torch.no_grad():
             for X, y in dm.val_loader:
                 X, y = X.to(device), y.to(device)
@@ -286,19 +320,47 @@ def train_tempus(config):
                 if out.dim() > 1:
                     out = out[:, -1, 0] if out.size(1) > 1 else out.squeeze()
                 total_val += criterion(out, y).item() * y.size(0)
-        val_loss = total_val / len(dm.val_loader.dataset)
+                preds.append(out.squeeze().cpu().numpy())
+                targets.append(y.cpu().numpy())
+        val_loss = total_val / len(dm.val_dataset)
+        preds = np.concatenate(preds, axis=0)
+        targets = np.concatenate(targets, axis=0)
+
+        rmse = np.sqrt(np.mean((preds - targets) ** 2))
+
+        epsilon = 1e-6
+        abs_percentage_errors = np.abs((targets - preds) / np.maximum(np.abs(targets), epsilon))
+        abs_percentage_errors = np.clip(abs_percentage_errors, 0, 10)
+        mape = np.mean(abs_percentage_errors) * 100
+
         scheduler.step(val_loss)
-        tune.report(metrics={"train_loss": train_loss, "val_loss": val_loss})
+        tune.report(metrics={"train_loss": train_loss, "val_loss": val_loss, "val_rmse": rmse, "val_mape": mape})
+
+class ThresholdStopper(Stopper):
+    def __init__(self, metric, threshold):
+        self.metric = metric
+        self.threshold = threshold
+
+    def __call__(self, trial_id, result):
+        # Stop trial if metric > threshold on first iteration
+        return (
+            result.get("training_iteration", 0) == 1
+            and result.get(self.metric, float("inf")) > self.threshold
+        )
+
+    def stop_all(self):
+        # Never stop the entire experiment
+        return False
 
 # -- Hyperparameter tuning entrypoint --
-def run_tuning(df, target='shifted_prices', num_samples=10, use_gpu=True):
+def run_tuning(df, target='shifted_prices', num_samples=50, use_gpu=True):
     config = {
         'hidden_size': tune.choice([32, 64, 128]),
         'num_layers': tune.choice([1, 2]),
         'dropout': tune.uniform(0.1, 0.5),
         'clip_size': tune.choice([0.5, 1.0, 2.0]),
         'tcn_kernel_sizes': [3, 5, 7],
-        'attention_heads': tune.choice([2, 4]),
+        'attention_heads': tune.choice([4, 8, 16]),
         'lr': tune.loguniform(1e-4, 1e-2),
         'weight_decay': tune.loguniform(1e-5, 1e-2),
         'batch_size': tune.choice([16, 32]),
@@ -310,28 +372,29 @@ def run_tuning(df, target='shifted_prices', num_samples=10, use_gpu=True):
         'dataframe': df,
         'use_gpu': use_gpu
     }
-    scheduler = ASHAScheduler(time_attr='training_iteration', metric='val_loss', mode='min', max_t=100, grace_period=10, reduction_factor=2)
+
+    search_alg = OptunaSearch(metric="val_mape",mode="min")
+    scheduler = ASHAScheduler(time_attr='training_iteration', metric='val_mape', mode='min', max_t=100, grace_period=10,reduction_factor=2)
+    stopper = ThresholdStopper(metric="val_mape", threshold=40.0)
+
+    ray.shutdown()
+    ray.init(num_cpus=6, num_gpus=1)
     tuner = Tuner(
-        tune.with_resources(
-            partial(
-                train_tempus,
-                train_data=None,
-            ),
-            resources={"cpu": 10, "gpu": 0}
-        ),
-        tune_config=TuneConfig(
-            scheduler=scheduler,
-            num_samples=num_samples,
-        ),
-        run_config=RunConfig(name="tempus_experiment"),
-        param_space=config
+        train_tempus,
+        tune_config=TuneConfig(scheduler=scheduler,
+                               search_alg=search_alg,
+                               num_samples=num_samples,
+                               trial_dirname_creator=lambda trial: f"{trial.trainable_name}_{trial.trial_id[:4]}"),
+        run_config=RunConfig(name="tempus_experiment",stop=stopper),
+        param_space=config,
     )
     results = tuner.fit()
-    best = results.get_best_result(metric='val_loss', mode='min')
+    best = results.get_best_result(metric='val_mape', mode='min')
     print('Best config:', best.config)
-    print('Best val_loss:', best.metrics['val_loss'])
+    print('Best val_mape:', best.metrics['val_mape'])
     return best
 
 if __name__ == '__main__':
-    df = pd.read_csv('training_data.csv', index_col=0)
-    best = run_tuning(df)
+    training_data = pd.read_csv('training_data.csv')
+    training_data = training_data.set_index(pd.DatetimeIndex(training_data.index)).drop(columns=['date'])
+    best = run_tuning(training_data)
