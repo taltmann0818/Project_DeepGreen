@@ -22,33 +22,31 @@ from plotly.subplots import make_subplots
 
 class TEMPUS(nn.Module):
     """
-    TEMPUS is a neural network model designed to process and analyze temporal data
-    by combining multiple aspects of time-series modeling.
-    It incorporates LSTMs with multiple temporal resolutions, Temporal Convolutional Networks (TCNs),
-    and Transformer encoders for temporal attention.
+    TEMPUS is a streamlined neural network model designed for efficient temporal data processing.
+    It combines a single bidirectional LSTM with a Temporal Convolutional Network (TCN) and
+    a multi-head attention mechanism for capturing temporal dependencies at different scales.
 
-    The model integrates several functionalities with layer normalization and
-    residual connections for efficient feature extraction, fusion, and sequence
-    processing. It is primarily used for regression tasks on temporal data.
+    The architecture is optimized for Ada Lovelace hardware with tensor cores, using
+    mixed precision training and efficient tensor operations.
 
     :ivar device: The device to execute the model on (e.g., 'cpu', 'cuda').
     :ivar hidden_size: Number of hidden units used in LSTM and other layers.
-    :ivar num_layers: Number of layers in both LSTM modules.
+    :ivar num_layers: Number of layers in the LSTM module.
     :ivar input_size: Number of input features per timestep.
     :ivar dropout: Dropout probability for regularization.
     :ivar clip_size: Gradient clipping threshold to prevent exploding gradients.
-    :ivar tcn_kernel_sizes: List of kernel sizes for TCN layers.
-    :ivar attention_heads: Number of attention heads used in the Transformer encoder.
+    :ivar tcn_kernel_size: Kernel size for the TCN layer.
+    :ivar attention_heads: Number of attention heads used in the multi-head attention.
     :ivar learning_rate: Learning rate for the optimizer.
     :ivar weight_decay: Weight decay for L2 regularization in the optimizer.
     :ivar scaler: Feature scaler for the input data (optional).
     :type device: Str
     :type hidden_size: int
     :type num_layers: int
-    :type input_size:
+    :type input_size: int
     :type dropout: Float
     :type clip_size: float
-    :type tcn_kernel_sizes: list[int]
+    :type tcn_kernel_size: int
     :type attention_heads: int
     :type learning_rate: float
     :type weight_decay: float
@@ -57,31 +55,24 @@ class TEMPUS(nn.Module):
     def __init__(self, config, scaler=None):
         super(TEMPUS, self).__init__()
         self.device = config.get("device", "cpu")
-        self.hidden_size = config.get("hidden_size", 64)
+        self.hidden_size = config.get("hidden_size", 128)  # Increased default size for better representation
         self.num_layers = config.get("num_layers", 2)
         self.input_size = config.get("input_size", 10)
         self.dropout = config.get("dropout", 0.2)
         self.clip_size = config.get("clip_size", 1.0)
-        self.tcn_kernel_sizes = config.get("tcn_kernel_sizes", [3, 5, 7])
-        self.attention_heads = config.get("attention_heads", 4)
+        self.tcn_kernel_size = config.get("tcn_kernel_size", 5)  # Single kernel size for efficiency
+        self.attention_heads = config.get("attention_heads", 8)  # Increased heads for better attention
         self.learning_rate = config.get("learning_rate", 0.001)
         self.weight_decay = config.get("weight_decay", 0.01)
+        self.use_amp = config.get("use_amp", True)  # Enable automatic mixed precision by default
 
         if scaler is not None:
             self.scaler = scaler
             self.register_buffer("mean", torch.tensor(scaler.mean_, dtype=torch.float32))
             self.register_buffer("scale", torch.tensor(scaler.scale_, dtype=torch.float32))
 
-        # Multiple Temporal Resolutions of LSTM with layer normalization
-        self.lstm_short = nn.LSTM(
-            input_size=self.input_size,
-            hidden_size=self.hidden_size,
-            num_layers=self.num_layers,
-            batch_first=True,
-            dropout=self.dropout if self.num_layers > 1 else 0,
-            bidirectional=True
-        )
-        self.lstm_medium = nn.LSTM(
+        # Single efficient bidirectional LSTM
+        self.lstm = nn.LSTM(
             input_size=self.input_size,
             hidden_size=self.hidden_size,
             num_layers=self.num_layers,
@@ -90,60 +81,45 @@ class TEMPUS(nn.Module):
             bidirectional=True
         )
 
-        # Layer normalization for LSTM outputs
-        self.lstm_short_norm = nn.LayerNorm(self.hidden_size * 2)
-        self.lstm_medium_norm = nn.LayerNorm(self.hidden_size * 2)
+        # Layer normalization for LSTM output
+        self.lstm_norm = nn.LayerNorm(self.hidden_size * 2)
 
-        # Fusion layer for temporal resolutions with residual connection
-        self.temporal_fusion = nn.Linear(self.hidden_size * 4, self.hidden_size * 2)
-        self.temporal_fusion_norm = nn.LayerNorm(self.hidden_size * 2)
-
-        # Projection layer for residual connections when dimensions don't match
+        # Projection layer for residual connections
         self.residual_proj = nn.Linear(self.input_size, self.hidden_size * 2)
 
-        # Temporal Convolutional Network (TCN) with layer normalization 
-        self.tcn_modules = nn.ModuleList()
-        for i, k_size in enumerate(self.tcn_kernel_sizes):
-            dilation = 2 ** i  # Exponentially increasing dilation
-            padding = ((k_size - 1) * dilation) // 2  # Adjusted padding for dilation
-            self.tcn_modules.append(nn.Sequential(
-                nn.Conv1d(self.input_size, self.hidden_size, kernel_size=k_size,
-                          padding=padding, dilation=dilation, stride=1),
-                nn.BatchNorm1d(self.hidden_size),
-                nn.GELU(), # Switching from ReLU to GELU
-                nn.Conv1d(self.hidden_size, self.hidden_size, kernel_size=k_size,
-                          padding=padding, dilation=dilation, stride=1),
-                nn.BatchNorm1d(self.hidden_size),
-                nn.ReLU() # Switching from ReLU to GELU
-            ))
-        self.tcn_fusion = nn.Linear(self.hidden_size * len(self.tcn_kernel_sizes), self.hidden_size * 2)
-        self.tcn_fusion_norm = nn.LayerNorm(self.hidden_size * 2)
+        # Efficient TCN with single kernel size and dilation
+        self.tcn = nn.Sequential(
+            nn.Conv1d(self.input_size, self.hidden_size * 2, 
+                      kernel_size=self.tcn_kernel_size,
+                      padding=(self.tcn_kernel_size - 1) // 2, 
+                      stride=1),
+            nn.BatchNorm1d(self.hidden_size * 2),
+            nn.GELU()  # GELU activation for better gradient flow
+        )
 
-        # Combine TCN and LSTM features
-        self.feature_fusion = nn.Linear(self.hidden_size * 4, self.hidden_size * 2)
-        self.feature_fusion_norm = nn.LayerNorm(self.hidden_size * 2)
-
-        # Transformer encoder for temporal attention (replacing custom attention)
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=self.hidden_size * 2,
-            nhead=self.attention_heads,
-            dim_feedforward=self.hidden_size * 4,
+        # Multi-head attention for temporal relationships
+        self.attention = nn.MultiheadAttention(
+            embed_dim=self.hidden_size * 2,
+            num_heads=self.attention_heads,
             dropout=self.dropout,
-            activation='gelu',
             batch_first=True
         )
-        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=2)
 
-        # Positional encoding for transformer
+        # Positional encoding for attention
         self.pos_encoder = PositionalEncoding(self.hidden_size * 2, self.dropout)
 
-        # Fully connected layers with dropout and layer normalization
-        self.fc1 = nn.Linear(self.hidden_size * 2, self.hidden_size)
-        self.fc1_norm = nn.LayerNorm(self.hidden_size)
-        self.fc2 = nn.Linear(self.hidden_size, self.hidden_size // 2)
-        self.fc2_norm = nn.LayerNorm(self.hidden_size // 2)
-        self.regression_head = nn.Linear(self.hidden_size // 2, 1)
-        self.dropout_layer = nn.Dropout(self.dropout)
+        # Streamlined fully connected layers
+        self.fc = nn.Sequential(
+            nn.Linear(self.hidden_size * 2, self.hidden_size),
+            nn.LayerNorm(self.hidden_size),
+            nn.GELU(),
+            nn.Dropout(self.dropout),
+            nn.Linear(self.hidden_size, self.hidden_size // 2),
+            nn.LayerNorm(self.hidden_size // 2),
+            nn.GELU(),
+            nn.Dropout(self.dropout),
+            nn.Linear(self.hidden_size // 2, 1)
+        )
 
     def downsample_sequence(self, x, factor):
         """Downsample time sequence by average pooling"""
@@ -161,81 +137,85 @@ class TEMPUS(nn.Module):
         return x
 
     def forward(self, x):
-        if self.scaler is not None:
+        """
+        Forward pass through the TEMPUS model.
+
+        Args:
+            x (torch.Tensor): Input tensor of shape (batch_size, seq_len, input_size)
+
+        Returns:
+            torch.Tensor: Output predictions of shape (batch_size, seq_len, 1)
+        """
+        # Apply scaling if available
+        if hasattr(self, 'scaler') and self.scaler is not None:
             x = (x - self.mean) / self.scale
 
         batch_size, seq_len, features = x.size()
-        #time_features = torch.linspace(0, 1, seq_len).unsqueeze(0).unsqueeze(2).repeat(batch_size, 1, 1).to(x.device)
+
+        # Create time features for positional information
+        time_features = torch.linspace(0, 1, seq_len, device=x.device).unsqueeze(0).unsqueeze(2).repeat(batch_size, 1, 1)
 
         # Process with TCN
-        tcn_outputs = []
         x_tcn = x.transpose(1, 2)  # TCN expects (batch, channels, seq_len)
-        for tcn_module in self.tcn_modules:
-            tcn_out = tcn_module(x_tcn)
-            tcn_outputs.append(tcn_out)
+        tcn_features = self.tcn(x_tcn)
+        tcn_features = tcn_features.transpose(1, 2)  # Back to (batch, seq, features)
 
-        # Concatenate TCN outputs
-        tcn_combined = torch.cat(tcn_outputs, dim=1)
-        tcn_combined = tcn_combined.transpose(1, 2)  # Back to (batch, seq, features)
-        tcn_features = self.tcn_fusion(tcn_combined)
-        tcn_features = self.tcn_fusion_norm(tcn_features)
+        # Process with LSTM
+        lstm_out, _ = self.lstm(x)
+        lstm_features = self.lstm_norm(lstm_out)
 
-        # Multiple Temporal Resolutions
-        # Original sequence for short-term patterns
-        lstm_short_out, _ = self.lstm_short(x)
-        lstm_short_out = self.lstm_short_norm(lstm_short_out)
-
-        # Downsampled sequence for medium-term patterns
-        x_medium = self.downsample_sequence(x, 2)
-        lstm_medium_out, _ = self.lstm_medium(x_medium)
-
-        # Upsample medium resolution back to original sequence length
-        lstm_medium_out = F.interpolate(
-            lstm_medium_out.transpose(1, 2).to('cpu'),
-            size=seq_len,
-            mode='linear'
-        ).transpose(1, 2).to(self.device)
-        lstm_medium_out = self.lstm_medium_norm(lstm_medium_out)
-
-        # Combine temporal resolutions
-        lstm_combined = torch.cat([lstm_short_out, lstm_medium_out], dim=2)
-        lstm_features = self.temporal_fusion(lstm_combined)
-        lstm_features = self.temporal_fusion_norm(lstm_features)
-
-        # Add residual connection with projection if needed
+        # Add residual connection
         x_residual = self.residual_proj(x)
-        lstm_features = lstm_features + x_residual
+        features = lstm_features + x_residual
 
-        # Combine LSTM and TCN features
-        combined_features = torch.cat([lstm_features, tcn_features], dim=2)
-        fused_features = self.feature_fusion(combined_features)
-        fused_features = self.feature_fusion_norm(fused_features)
+        # Add positional encoding for attention
+        features = self.pos_encoder(features)
 
-        # Add positional encoding for transformer
-        fused_features = self.pos_encoder(fused_features)
+        # Apply multi-head attention
+        attn_output, _ = self.attention(
+            query=features,
+            key=features,
+            value=features
+        )
 
-        attended_features = self.transformer_encoder(fused_features)
+        # Combine with TCN features through residual connection
+        combined_features = attn_output + tcn_features
 
-        x = F.relu(self.fc1(attended_features))
-        x = self.fc1_norm(x)
-        x = self.dropout_layer(x)
-        x = F.relu(self.fc2(x))
-        x = self.fc2_norm(x)
-        x = self.dropout_layer(x)
-        outputs = self.regression_head(x)
+        # Pass through final fully connected layers
+        outputs = self.fc(combined_features)
 
         return outputs
 
     def train_model(self, train_loader, val_loader, test_loader, num_epochs=100, patience=10):
         """
-        Train the model with a regression task
+        Train the model with a regression task using automatic mixed precision for Ada Lovelace hardware.
+
+        Args:
+            train_loader: DataLoader for training data
+            val_loader: DataLoader for validation data
+            test_loader: DataLoader for test data
+            num_epochs: Maximum number of training epochs
+            patience: Number of epochs to wait for improvement before early stopping
+
+        Returns:
+            dict: Training history with metrics
         """
         self.to(self.device)
 
         # Define loss function and optimizer with weight decay
         criterion = nn.MSELoss()
         optimizer = AdamW(self.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay)
-        scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
+
+        # Learning rate scheduler with cosine annealing for better convergence
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+            optimizer, 
+            T_0=10,  # Restart every 10 epochs
+            T_mult=2,  # Double the restart period after each restart
+            eta_min=1e-6  # Minimum learning rate
+        )
+
+        # Initialize gradient scaler for mixed precision training
+        scaler = GradScaler(enabled=self.use_amp and self.device != 'cpu')
 
         # Early stopping variables
         best_val_mape = float('inf')
@@ -245,19 +225,24 @@ class TEMPUS(nn.Module):
         self.history = {
             'train_loss': [], 'val_loss': [], 'test_loss': [],
             'val_rmse': [], 'test_rmse': [],
-            'val_mape': [], 'test_mape': []
+            'val_mape': [], 'test_mape': [],
+            'learning_rates': []
         }
 
         epoch_progress = tqdm(range(num_epochs), desc="Training Epochs")
         for epoch in epoch_progress:
-            # Training phase
-            train_loss = self._train_epoch(train_loader, criterion, optimizer)
+            # Training phase with mixed precision
+            train_loss = self._train_epoch(train_loader, criterion, optimizer, scaler)
+
             # Validation phase
             val_loss, val_rmse, val_mape = self.evaluate(val_loader, criterion)
+
             # Test phase
             test_loss, test_rmse, test_mape = self.evaluate(test_loader, criterion)
+
             # Update learning rate
-            scheduler.step(val_loss)
+            scheduler.step()
+            current_lr = optimizer.param_groups[0]['lr']
 
             # Store history
             self.history['train_loss'].append(train_loss)
@@ -267,13 +252,15 @@ class TEMPUS(nn.Module):
             self.history['test_rmse'].append(test_rmse)
             self.history['val_mape'].append(val_mape)
             self.history['test_mape'].append(test_mape)
+            self.history['learning_rates'].append(current_lr)
 
             # Update progress
             epoch_progress.set_postfix({
                 'Train Loss': f'{train_loss:.4f}',
-                'Test Loss': f'{test_loss:.4f}',
+                'Val Loss': f'{val_loss:.4f}',
                 'RMSE': f'{test_rmse:.4f}',
-                'MAPE': f'{test_mape:.2f}%'
+                'MAPE': f'{test_mape:.2f}%',
+                'LR': f'{current_lr:.6f}'
             })
 
             # Model selection and early stopping
@@ -292,29 +279,55 @@ class TEMPUS(nn.Module):
             print("Loading the best model state...")
             self.load_state_dict(best_model_state)
 
-            # Final evaluation
+        # Final evaluation
         final_test_loss, final_test_rmse, final_test_mape = self.evaluate(test_loader, criterion)
-        print(
-            f"\nFinal Test Results | Loss: {final_test_loss:.4f}, RMSE: {final_test_rmse:.4f}, MAPE: {final_test_mape:.2f}%")
+        print(f"\nFinal Test Results | Loss: {final_test_loss:.4f}, RMSE: {final_test_rmse:.4f}, MAPE: {final_test_mape:.2f}%")
 
         return self.history
 
-    def _train_epoch(self, train_loader, criterion, optimizer):
-        """Helper method for training a single epoch"""
+    def _train_epoch(self, train_loader, criterion, optimizer, scaler=None):
+        """
+        Helper method for training a single epoch with optional mixed precision.
+
+        Args:
+            train_loader: DataLoader for training data
+            criterion: Loss function
+            optimizer: Optimizer
+            scaler: GradScaler for mixed precision training
+
+        Returns:
+            float: Average training loss for the epoch
+        """
         self.train()
         total_loss = 0
 
         for batch_idx, (inputs, targets) in enumerate(train_loader):
             inputs, targets = inputs.to(self.device), targets.to(self.device)
             optimizer.zero_grad()
-            outputs = self(inputs)
-            if outputs.dim() > 1:
-                outputs = outputs[:, -1, 0] if outputs.size(1) > 1 and outputs.size(2) > 0 else outputs.squeeze()
-            loss = criterion(outputs, targets)
-            # ——— backward + step ———
-            loss.backward()
-            nn.utils.clip_grad_norm_(self.parameters(), max_norm=self.clip_size)
-            optimizer.step()
+
+            # Use mixed precision for forward pass if scaler is provided
+            if scaler is not None and self.use_amp and self.device != 'cpu':
+                with autocast():
+                    outputs = self(inputs)
+                    if outputs.dim() > 1:
+                        outputs = outputs[:, -1, 0] if outputs.size(1) > 1 and outputs.size(2) > 0 else outputs.squeeze()
+                    loss = criterion(outputs, targets)
+
+                # Scale gradients and optimize with mixed precision
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+                nn.utils.clip_grad_norm_(self.parameters(), max_norm=self.clip_size)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                # Standard precision training
+                outputs = self(inputs)
+                if outputs.dim() > 1:
+                    outputs = outputs[:, -1, 0] if outputs.size(1) > 1 and outputs.size(2) > 0 else outputs.squeeze()
+                loss = criterion(outputs, targets)
+                loss.backward()
+                nn.utils.clip_grad_norm_(self.parameters(), max_norm=self.clip_size)
+                optimizer.step()
 
             total_loss += loss.item() * inputs.size(0)
 
@@ -323,30 +336,61 @@ class TEMPUS(nn.Module):
 
         return avg_loss
 
-    def evaluate(self, data_loader, criterion, fp8=None):
-        """Evaluate the model with improved metrics"""
+    def evaluate(self, data_loader, criterion, use_amp=None):
+        """
+        Evaluate the model with improved metrics and optional mixed precision.
+
+        Args:
+            data_loader: DataLoader for evaluation data
+            criterion: Loss function
+            use_amp: Whether to use automatic mixed precision (defaults to self.use_amp)
+
+        Returns:
+            tuple: (average loss, RMSE, MAPE)
+        """
         self.eval()
         total_loss = 0
         all_predictions, all_targets = [], []
 
+        # Default to model's use_amp setting if not specified
+        if use_amp is None:
+            use_amp = getattr(self, 'use_amp', False)
+
+        # Only use mixed precision if on GPU
+        use_amp = use_amp and self.device != 'cpu'
+
         with torch.no_grad():
             for inputs, targets in data_loader:
                 inputs, targets = inputs.to(self.device), targets.to(self.device)
-                outputs = self(inputs)
-                if outputs.dim() > 1:
-                    outputs = outputs[:, -1, 0] if outputs.size(1) > 1 and outputs.size(2) > 0 else outputs.squeeze()
-                loss = criterion(outputs, targets)
+
+                # Use mixed precision for inference if enabled
+                if use_amp:
+                    with autocast():
+                        outputs = self(inputs)
+                        if outputs.dim() > 1:
+                            outputs = outputs[:, -1, 0] if outputs.size(1) > 1 and outputs.size(2) > 0 else outputs.squeeze()
+                        loss = criterion(outputs, targets)
+                else:
+                    outputs = self(inputs)
+                    if outputs.dim() > 1:
+                        outputs = outputs[:, -1, 0] if outputs.size(1) > 1 and outputs.size(2) > 0 else outputs.squeeze()
+                    loss = criterion(outputs, targets)
+
                 total_loss += loss.item() * inputs.size(0)
                 all_predictions.append(outputs.cpu().numpy())
                 all_targets.append(targets.cpu().numpy())
+
         all_predictions = np.concatenate(all_predictions, axis=0)
         all_targets = np.concatenate(all_targets, axis=0)
 
         # Calculate metrics
         avg_loss = total_loss / len(data_loader.dataset)
         rmse = np.sqrt(np.mean((all_predictions - all_targets) ** 2))
+
+        # Improved MAPE calculation with epsilon to avoid division by zero
         epsilon = 1e-6
         abs_percentage_errors = np.abs((all_targets - all_predictions) / np.maximum(np.abs(all_targets), epsilon))
+        # Clip extreme values for more stable MAPE
         abs_percentage_errors = np.clip(abs_percentage_errors, 0, 10)
         mape = np.mean(abs_percentage_errors) * 100
 
@@ -390,25 +434,99 @@ class TEMPUS(nn.Module):
             return
 
     def export_model_to_torchscript(self, save_path, data_loader, device):
+        """
+        Export the model to TorchScript format for deployment.
+
+        Args:
+            save_path: Path to save the exported model
+            data_loader: DataLoader to get example inputs
+            device: Device to use for export
+
+        Returns:
+            str: Path to the saved model or None if export failed
+        """
         try:
             self.eval()
             self.to(device)
             self.device = device
+
             # Fetch a sample input tensor from DataLoader
             example_inputs, _ = next(iter(data_loader))
+            example_inputs = example_inputs.to(device)
 
-            # Export model to TorchScript using tracing
+            # Export model to TorchScript using tracing with optimization
             with torch.no_grad():
-                scripted_model = torch.jit.trace(self.to(device), example_inputs.to(device))
+                # Use torch.jit.optimize_for_inference for better performance
+                scripted_model = torch.jit.trace(self, example_inputs)
+                optimized_model = torch.jit.optimize_for_inference(scripted_model)
 
-            # Save the TorchScript model
-            torch.jit.save(scripted_model, save_path)
+            # Save the optimized TorchScript model
+            torch.jit.save(optimized_model, save_path)
 
             print(f"Model successfully exported and saved to {save_path}")
             return save_path
 
         except Exception as e:
             print(f"Error exporting model to TorchScript: {str(e)}")
+            return None
+
+    def export_model_to_onnx(self, save_path, data_loader, device, opset_version=13):
+        """
+        Export the model to ONNX format for deployment on Ada Lovelace hardware.
+
+        ONNX format provides better optimization for tensor cores on Ada Lovelace GPUs
+        through TensorRT integration.
+
+        Args:
+            save_path: Path to save the exported model
+            data_loader: DataLoader to get example inputs
+            device: Device to use for export
+            opset_version: ONNX opset version to use
+
+        Returns:
+            str: Path to the saved model or None if export failed
+        """
+        try:
+            self.eval()
+            self.to(device)
+            self.device = device
+
+            # Fetch a sample input tensor from DataLoader
+            example_inputs, _ = next(iter(data_loader))
+            example_inputs = example_inputs.to(device)
+
+            # Set dynamic axes for variable batch size and sequence length
+            dynamic_axes = {
+                'input': {0: 'batch_size', 1: 'sequence_length'},
+                'output': {0: 'batch_size', 1: 'sequence_length'}
+            }
+
+            # Export to ONNX with optimization flags
+            torch.onnx.export(
+                self,                                      # model being run
+                example_inputs,                            # model input
+                save_path,                                 # where to save the model
+                export_params=True,                        # store the trained parameter weights inside the model file
+                opset_version=opset_version,               # the ONNX version to export the model to
+                do_constant_folding=True,                  # whether to execute constant folding for optimization
+                input_names=['input'],                     # the model's input names
+                output_names=['output'],                   # the model's output names
+                dynamic_axes=dynamic_axes,                 # variable length axes
+                verbose=False
+            )
+
+            print(f"Model successfully exported to ONNX and saved to {save_path}")
+
+            # Verify the ONNX model
+            import onnx
+            onnx_model = onnx.load(save_path)
+            onnx.checker.check_model(onnx_model)
+            print("ONNX model verified successfully")
+
+            return save_path
+
+        except Exception as e:
+            print(f"Error exporting model to ONNX: {str(e)}")
             return None
 
 class PositionalEncoding(nn.Module):
