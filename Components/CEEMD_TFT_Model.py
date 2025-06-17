@@ -1,3 +1,5 @@
+import multiprocessing
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -9,8 +11,9 @@ from sklearn.preprocessing import StandardScaler
 from tqdm.auto import tqdm
 import math
 import copy
-import PyEMD
 from PyEMD import CEEMDAN
+from PyEMD import EMD
+import warnings
 
 class DirectionalMSELoss(nn.Module):
     """
@@ -73,7 +76,8 @@ class CEEMD_Decomposer:
     Class for performing CompleteEnsemble Empirical Mode Decomposition (CEEMD) on time series data.
     CEEMD decomposes a signal into multiple Intrinsic Mode Functions (IMFs) representing different frequency components.
     """
-    def __init__(self, noise_std=0.05, trials=100, max_imfs=10):
+
+    def __init__(self, noise_std=0.05, trials=100, max_imfs=10, min_data_points=50):
         """
         Initialize the CEEMD decomposer.
 
@@ -81,11 +85,49 @@ class CEEMD_Decomposer:
             noise_std (float): Standard deviation of the added noise
             trials (int): Number of trials/realizations for the ensemble
             max_imfs (int): Maximum number of IMFs to extract
+            min_data_points (int): Minimum number of data points required for decomposition
         """
+        self.cores = max(1, multiprocessing.cpu_count() - 1)
         self.noise_std = noise_std
         self.trials = trials
         self.max_imfs = max_imfs
-        self.ceemdan = CEEMDAN(trials=trials)
+        self.min_data_points = min_data_points
+        self.emd = EMD(DTYPE=np.float64, spline_kind='cubic', max_imfs=max_imfs)
+        self.ceemdan = CEEMDAN(trials=trials, ext_EMD=self.emd, parallel=True, processes=max(1, multiprocessing.cpu_count() - 1))
+
+    def _validate_series(self, series):
+        """
+        Validate the input series for decomposition.
+
+        Args:
+            series (numpy.ndarray): The time series to validate
+
+        Returns:
+            tuple: (is_valid, processed_series, error_message)
+        """
+        if len(series) < self.min_data_points:
+            return False, None, f"Series too short: {len(series)} < {self.min_data_points}"
+
+        # Check for NaN or infinite values
+        if not np.all(np.isfinite(series)):
+            # Try to interpolate missing values
+            mask = np.isfinite(series)
+            if np.sum(mask) < self.min_data_points:
+                return False, None, "Too many NaN/infinite values"
+
+            # Linear interpolation for missing values
+            indices = np.arange(len(series))
+            series = np.interp(indices, indices[mask], series[mask])
+
+        # Check for constant series
+        if np.std(series) == 0:
+            return False, None, "Series is constant"
+
+        # Check for near-constant series (very small variance)
+        if np.std(series) < 1e-10:
+            return False, None, "Series has very small variance"
+
+        return True, series, None
 
     def decompose(self, series):
         """
@@ -95,22 +137,37 @@ class CEEMD_Decomposer:
             series (numpy.ndarray or pandas.Series): The time series to decompose
 
         Returns:
-            numpy.ndarray: Array of shape (n_imfs, n_samples) containing the IMFs
+            numpy.ndarray or None: Array of shape (n_imfs, n_samples) containing the IMFs,
+                                  or None if decomposition fails
         """
         if isinstance(series, pd.Series):
             series = series.values
 
-        # Normalize the series to improve decomposition stability
-        series = (series - np.mean(series)) / np.std(series)
+        # Validate the series
+        is_valid, processed_series, error_msg = self._validate_series(series)
+        if not is_valid:
+            warnings.warn(f"Decomposition failed: {error_msg}")
+            return None
 
-        # Perform CEEMD decomposition
-        imfs = self.ceemdan(series)
+        try:
+            # Normalize the series to improve decomposition stability
+            mean_val = np.mean(processed_series)
+            std_val = np.std(processed_series)
+            normalized_series = (processed_series - mean_val) / std_val
 
-        # Limit the number of IMFs if needed
-        if len(imfs) > self.max_imfs:
-            imfs = imfs[:self.max_imfs]
+            # Perform CEEMD decomposition with error handling
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                imfs = self.ceemdan(normalized_series)
 
-        return imfs
+            # Denormalize the IMFs
+            imfs = imfs * std_val
+
+            return imfs
+
+        except Exception as e:
+            warnings.warn(f"CEEMDAN decomposition failed: {str(e)}")
+            return None
 
     def batch_decompose(self, df, column='Close', group_col='Ticker'):
         """
@@ -126,16 +183,71 @@ class CEEMD_Decomposer:
         """
         result_df = df.copy()
 
-        # Process each group separately
+        # Check if required columns exist
+        if column not in df.columns:
+            raise ValueError(f"Column '{column}' not found in DataFrame")
+        if group_col not in df.columns:
+            raise ValueError(f"Group column '{group_col}' not found in DataFrame")
+
+        max_imfs_found = 0
+        successful_groups = []
+        failed_groups = []
+
+        # First pass: determine maximum number of IMFs across all groups
+        print("Analyzing groups and determining maximum IMFs...")
         for name, group in df.groupby(group_col):
+            if len(group) < self.min_data_points:
+                failed_groups.append(name)
+                print(f"Skipping group '{name}': insufficient data points ({len(group)} < {self.min_data_points})")
+                continue
+
             series = group[column].values
             imfs = self.decompose(series)
 
-            # Add IMFs as new columns
-            for i, imf in enumerate(imfs):
-                result_df.loc[group.index, f'IMF_{i+1}'] = imf
+            if imfs is not None:
+                max_imfs_found = max(max_imfs_found, len(imfs))
+                successful_groups.append(name)
+                print(f"Group '{name}': {len(imfs)} IMFs found")
+            else:
+                failed_groups.append(name)
+                print(f"Group '{name}': decomposition failed")
+
+        if max_imfs_found == 0:
+            raise ValueError("No groups could be successfully decomposed")
+
+        # Initialize IMF columns
+        for i in range(max_imfs_found):
+            result_df[f'IMF_{i + 1}'] = np.nan
+
+        # Process each successful group
+        print(f"\nProcessing {len(successful_groups)} successful groups...")
+        for name in successful_groups:
+            group = df[df[group_col] == name]
+            series = group[column].values
+            imfs = self.decompose(series)
+
+            if imfs is not None:
+                # Get the actual indices for this group
+                group_indices = group.index.tolist()
+
+                # Add IMFs as new columns with proper index alignment
+                for i, imf in enumerate(imfs):
+                    if len(imf) == len(group_indices):
+                        for j, idx in enumerate(group_indices):
+                            result_df.at[idx, f'IMF_{i + 1}'] = imf[j]
+                    else:
+                        print(f"Warning: IMF {i + 1} length mismatch for group {name}")
+
+        # Add residual column (last IMF is typically the residual/trend)
+        if max_imfs_found > 0:
+            result_df['Residual'] = result_df[f'IMF_{max_imfs_found}']
+
+        print(f"\nDecomposition complete. {len(successful_groups)} groups processed successfully.")
+        if failed_groups:
+            print(f"Failed groups: {failed_groups}")
 
         return result_df
+
 
 class GatedResidualNetwork(nn.Module):
     """

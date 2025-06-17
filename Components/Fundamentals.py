@@ -15,7 +15,7 @@ class FundementalData:
         """
         Initialize the FundamentalData class with a ticker symbol and number of past days to fetch.
         """
-        self.client = RESTClient("XizU4KyrwjCA6bxHrR5_eQnUxwFFUnI2")
+        self.client = RESTClient("XizU4KyrwjCA6bxHrR5_eQnUxwFFUnI2",num_pools=40)
         self.tickers = tickers
 
         self.current_date = kwargs.get('end_date', datetime.today())

@@ -10,10 +10,10 @@ def onnx_predict(model_path, input_df, window_size):
 
     if model_path == 'Models/Tempus_v3.onnx':
         input_df = input_df[['Ticker','bullish_engulfing', 'bearish_engulfing', 'b_percent', 'ema_50','volume_momentum',
-                             'State', 'keltner_lower','price_momentum','positive','Close','ema_200','keltner_upper',
+                             'hmm_state', 'keltner_lower','price_momentum','positive','Close','ema_200','keltner_upper',
                              'negative','ema_20','stoch_rsi14','macd']]
     elif model_path == 'Models/Tempus_v2.onnx':
-        input_df = input_df[['Ticker', 'ema_20', 'ema_50', 'ema_100', 'stoch_rsi14', 'macd', 'State', 'Close']]
+        input_df = input_df[['Ticker', 'ema_20', 'ema_50', 'ema_100', 'stoch_rsi14', 'macd', 'hmm_state', 'Close']]
 
     predictions = []
     tickers = []

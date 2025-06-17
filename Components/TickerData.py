@@ -15,12 +15,34 @@ import os
 from Components.MarketRegimes import RegimeDetector
 
 class TickerData:
-    def __init__(self, tickers, indicator_list, years=1, prediction_window=5,**kwargs):
+    def __init__(self, data, indicator_list, years=1, prediction_window=5, **kwargs):
         """
         Initialize the StockAnalyzer with a ticker symbol and number of past days to fetch.
+
+        Parameters:
+        -----------
+        data : str or DataFrame
+            Ticker symbol or DataFrame containing stock data
+        indicator_list : list
+            List of technical indicators to calculate
+        years : int, default=1
+            Number of years of historical data to fetch
+        prediction_window : int, default=5
+            Window size for prediction
+        **kwargs : dict
+            Additional keyword arguments:
+            - start_date : str, optional
+                Start date for data fetching (format: 'YYYY-MM-DD')
+            - end_date : str, optional
+                End date for data fetching (format: 'YYYY-MM-DD')
+            - prediction_mode : bool, default=False
+                Whether to run in prediction mode
+            - max_workers : int, default=None
+                Maximum number of worker threads for parallel processing
+                If None, uses min(32, os.cpu_count() + 4)
         """
-        self.client = RESTClient(os.environ["POLYGON_API_KEY"])
-        self.tickers = tickers
+        self.client = RESTClient('XizU4KyrwjCA6bxHrR5_eQnUxwFFUnI2')
+        self.data = data
         self.indicator_list = set(indicator_list)
         self.prediction_window = -abs(prediction_window)
         self.years = years
@@ -34,6 +56,7 @@ class TickerData:
         if not self.end_date:
             self.end_date = datetime.now().strftime("%Y-%m-%d")
         self.prediction_mode = kwargs.get('prediction_mode', False)
+        self.max_workers = kwargs.get('max_workers', None)
 
     def get_news_for_ticker(self, ticker, start_date, end_date, full_dates, limit=1000):
         # 1) Fetch all articles in one paginated iterator
@@ -143,36 +166,17 @@ class TickerData:
 
     # ——— Preprocessing (unchanged) ———
     def preprocess_data(self):
-        self.dataset_ex_df = (
-            self.stock_data
-            .rename(columns={"open":"Open","high":"High","low":"Low","close":"Close","volume":"Volume"})
-        )
+        self.dataset_ex_df = self.data
         # Merge in MarketRegimes
         if 'hmm_state' in self.indicator_list:
             _, self.dataset_ex_df['hmm_state']  = RegimeDetector.load("Models/hmm_v2.pkl").predict(self.dataset_ex_df, ma=5)
         if not self.prediction_mode:
-            self.dataset_ex_df = self.dataset_ex_df.sort_values(['Ticker', 'Date'])
+            self.dataset_ex_df = self.dataset_ex_df.sort_values(['Ticker', 'date'])
             self.dataset_ex_df['shifted_prices'] = (
                 self.dataset_ex_df
                 .groupby('Ticker')['Close']
                 .shift(self.prediction_window)
             )
-
-        # Merge in news data if requested
-        if self.news_data is not None:
-            # bring 'date' back as a column in both
-            df_stocks = self.dataset_ex_df.reset_index()  # date→ column
-            df_news = self.news_data.reset_index()  # date→ column
-
-            # perform the merge on date + Ticker
-            merged = pd.merge(
-                df_stocks,
-                df_news,
-                on=['date', 'Ticker'],
-                how='left'
-            ).fillna(0)
-            # restore date as the index
-            self.dataset_ex_df = merged.set_index('date')
 
         return self.dataset_ex_df
 
@@ -218,9 +222,16 @@ class TickerData:
         close, low, high = data.Close, data.Low, data.High
         tp = (high + low + close) / 3.0  # typical price each day
         sma_tp = tp.rolling(period).mean()  # simple moving average of typical price
-        mad = tp.rolling(period).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True)  # mean absolute deviation
-        cci = (tp - sma_tp) / (0.015 * mad) # Compute CCI with the 0.015 scaling factor
 
+        # Vectorized calculation of mean absolute deviation
+        # First calculate the rolling mean
+        rolling_mean = tp.rolling(period).mean()
+        # Then calculate the absolute deviation from the mean
+        abs_dev = np.abs(tp - rolling_mean.shift(0))
+        # Finally calculate the mean of the absolute deviations
+        mad = abs_dev.rolling(period).mean()
+
+        cci = (tp - sma_tp) / (0.015 * mad) # Compute CCI with the 0.015 scaling factor
         return cci
 
     @staticmethod
@@ -241,7 +252,7 @@ class TickerData:
         upper = sma + std_dev * std
         lower = sma - std_dev * std
         return (series - lower) / (upper - lower)
-        
+
     @staticmethod
     def keltner_channel(high, low, close, ema_period=20, atr_period=10, multiplier=2):
         center = close.ewm(span=ema_period).mean()
@@ -251,51 +262,63 @@ class TickerData:
     @staticmethod
     def compute_parabolic_sar(data, step=0.02, max_step=0.2):
         # step: acceleration factor increment (usually 0.02), max_step: max AF (usually 0.2)
-        close, low, high = data.Close, data.Low, data.High
+        close = data.Close.values  # Convert to numpy arrays for faster access
+        low = data.Low.values
+        high = data.High.values
+        index = data.Close.index  # Save index for later
 
         length = len(close)
-        sar = [0.0] * length
+        sar = np.zeros(length)
         # Initialization: Start with first trend assumption (e.g., assume first period is an uptrend)
-        # Typically initialize SAR as previous period's extreme.
-        # We'll start by assuming an uptrend from first day to second for initialization:
-        sar[0] = low.iloc[0]  # initial SAR at first low (for uptrend start)
+        sar[0] = low[0]  # initial SAR at first low (for uptrend start)
         bull = True  # start as bullish trend
         af = step
-        ep = high.iloc[0]  # extreme price (highest high in uptrend)
+        ep = high[0]  # extreme price (highest high in uptrend)
+
+        # Pre-allocate arrays for trend tracking
+        is_bull = np.ones(length, dtype=bool)
+        is_bull[0] = bull
+
         for i in range(1, length):
             prev_sar = sar[i - 1]
             if bull:
                 # Uptrend: SAR = prev SAR + AF * (EP - prev SAR)
                 sar[i] = prev_sar + af * (ep - prev_sar)
                 # Ensure SAR is below the last two lows (cannot rise above actual price lows in uptrend)
-                sar[i] = min(sar[i], low.iloc[i - 1], low.iloc[i])
+                sar[i] = min(sar[i], low[i - 1], low[i])
                 # Update extreme point and acceleration factor if new high made
-                if high.iloc[i] > ep:
-                    ep = high.iloc[i]
+                if high[i] > ep:
+                    ep = high[i]
                     af = min(af + step, max_step)
                 # Check for trend reversal
-                if close.iloc[i] < sar[i]:
+                if close[i] < sar[i]:
                     # flip to downtrend
                     bull = False
+                    is_bull[i] = False
                     sar[i] = ep  # on reversal, SAR starts at last EP (last high)
                     af = step
-                    ep = low.iloc[i]  # reset extreme to current low
+                    ep = low[i]  # reset extreme to current low
             else:
                 # Downtrend: SAR = prev SAR - AF * (prev SAR - EP)
                 sar[i] = prev_sar - af * (prev_sar - ep)
                 # Ensure SAR is above the last two highs
-                sar[i] = max(sar[i], high.iloc[i - 1], high.iloc[i])
+                sar[i] = max(sar[i], high[i - 1], high[i])
                 # Update extreme point if new low made
-                if low.iloc[i] < ep:
-                    ep = low.iloc[i]
+                if low[i] < ep:
+                    ep = low[i]
                     af = min(af + step, max_step)
                 # Check for reversal
-                if close.iloc[i] > sar[i]:
+                if close[i] > sar[i]:
                     bull = True
+                    is_bull[i] = True
                     sar[i] = ep  # on reversal, SAR starts at last EP (last low)
                     af = step
-                    ep = high.iloc[i]
-        return pd.Series(sar, index=close.index)
+                    ep = high[i]
+
+            # Store current trend state
+            is_bull[i] = bull
+
+        return pd.Series(sar, index=index)
 
     @staticmethod
     def dmd_prediction(series, modes=2):
@@ -327,9 +350,23 @@ class TickerData:
 
     @staticmethod
     def hurst_window(x):
-        # x is a 1-D NumPy array of length WINDOW
-        H, c, data = compute_Hc(x, kind='price', simplified=True)
-        return H
+        # Convert to ndarray and drop NaNs created by the rolling window
+        x = np.asarray(x, dtype=float)
+        x = x[~np.isnan(x)]
+        # Too few points → not enough information
+        if x.size < 20:
+            return np.nan
+        # Constant series → variance = 0 → RS statistic undefined
+        if np.allclose(x, x[0]):
+            return np.nan
+        try:
+            # Ignore benign warnings inside the called routine
+            with np.errstate(all="ignore"):
+                H, _, _ = compute_Hc(x, kind="price", simplified=True)
+            return H if np.isfinite(H) else np.nan
+        except (FloatingPointError, ValueError):
+            # Any numerical issue ⇒ treat window as invalid
+            return np.nan
 
     @staticmethod
     def perm_entropy_window(x):
@@ -347,137 +384,193 @@ class TickerData:
         # x is a 1-D NumPy array
         return ant.sample_entropy(x, order=2, metric='chebyshev')
 
-    # ——— Core Refactored Indicator Loop ———
+    @staticmethod
+    def engulfing_patterns(open_, close):
+        cur_b = close > open_
+        prev_b = close.shift() > open_.shift()
+        cur_body = (close - open_).abs()
+        prev_body = (close.shift() - open_.shift()).abs()
+        bull = ( cur_b & ~prev_b & (open_ <= close.shift()) & (close >= open_.shift()) & (cur_body > prev_body) )
+        bear = (~cur_b &  prev_b & (open_ >= close.shift()) & (close <= open_.shift()) & (cur_body > prev_body) )
+        return bull.astype(int), bear.astype(int)
+
+    @staticmethod
+    def atr(close, high, low, period=14):
+        true_range = pd.concat([high - low, abs(high - close.shift()), abs(low - close.shift())], axis=1).max(axis=1)
+        return true_range.rolling(period).mean()
+
+    # ——— Optimized Core Indicator Loop ———
     def add_technical_indicators(self):
+        self.dataset_ex_df.index = pd.to_datetime(self.dataset_ex_df.index).tz_localize(None)
         df = self.dataset_ex_df.copy()
 
-        # — EMA (single-series via transform) —
-        for period in (20, 50, 100, 200):
-            name = f'ema_{period}'
-            if name in self.indicator_list:
-                df[name] = (
-                    df
-                    .groupby('Ticker')['Close']
-                    .transform(lambda s: self.ema(s, period))
-                )
-        # — Stochastic RSI (single-series via transform) —
-        for period in (14, 28):
-            name = f'stoch_rsi{period}'
-            if name in self.indicator_list:
-                df[name] = (
-                    df
-                    .groupby('Ticker')['Close']
-                    .transform(lambda s: self.stochastic_rsi(s, period))
-                )
+        # Group tickers once to avoid redundant groupby operations
+        ticker_groups = {ticker: group for ticker, group in df.groupby('Ticker')}
 
-        # — Single-series indicators —
-        if 'b_percent' in self.indicator_list:
-            df['b_percent'] = df.groupby('Ticker')['Close'].transform(self.bollinger_percent_b)
+        # Function to process indicators for a single ticker
+        def process_ticker_indicators(ticker_data):
+            ticker, data = ticker_data
+            result = {}
 
-        if 'macd' in self.indicator_list:
-            df['macd'] = df.groupby('Ticker')['Close'].transform(self.macd)
+            # Process EMA indicators
+            for period in (20, 50, 100, 200):
+                name = f'ema_{period}'
+                if name in self.indicator_list:
+                    result[name] = self.ema(data['Close'], period)
 
-        if 'ssa_trend' in self.indicator_list:
-            df['ssa_trend'] = df.groupby('Ticker')['Close'].apply(self.ssa_trend).reset_index(level=0, drop=True)
+            # Process Stochastic RSI indicators
+            for period in (14, 28):
+                name = f'stoch_rsi{period}'
+                if name in self.indicator_list:
+                    result[name] = self.stochastic_rsi(data['Close'], period)
 
-        if 'dmd' in self.indicator_list:
-            df['dmd'] = df.groupby('Ticker')['Close'].apply(self.dmd_prediction).reset_index(level=0, drop=True)
+            # Process single-series indicators
+            if 'b_percent' in self.indicator_list:
+                result['b_percent'] = self.bollinger_percent_b(data['Close'])
 
-        if 'close_denoised_L1' in self.indicator_list:
-            df['close_denoised_L1'] = df.groupby('Ticker')['Close'].apply(self.wavelet_denoise).reset_index(level=0, drop=True)
+            if 'macd' in self.indicator_list:
+                result['macd'] = self.macd(data['Close'])
 
-        if 'cmf' in self.indicator_list:
-            df['cmf'] = df.groupby('Ticker')[['High', 'Low', 'Close', 'Volume']].apply(
-                lambda x: self.compute_cmf(x)['cmf'] if isinstance(self.compute_cmf(x),
-                                                                   pd.DataFrame) else self.compute_cmf(x)
-            ).reset_index(level=0, drop=True)
+            if 'ssa_trend' in self.indicator_list:
+                result['ssa_trend'] = self.ssa_trend(data['Close'])
 
-        if 'cci' in self.indicator_list:
-            df['cci'] = df.groupby('Ticker')[['High','Low','Close','Volume']].apply(self.compute_cci).reset_index(level=0, drop=True)
+            if 'dmd' in self.indicator_list:
+                result['dmd'] = self.dmd_prediction(data['Close'])
 
-        if 'parabolic_sar' in self.indicator_list:
-            df['parabolic_sar'] = df.groupby('Ticker')[['High','Low','Close']].apply(self.compute_parabolic_sar).reset_index(level=0, drop=True)
+            if 'close_denoised_L1' in self.indicator_list:
+                result['close_denoised_L1'] = self.wavelet_denoise(data['Close'])
 
-        if 'hurst_100' in self.indicator_list:
-            df['hurst_100'] = (
-                df
-                .groupby('Ticker')['Close']
-                .apply(lambda s: s.rolling(100)
-                       .apply(self.hurst_window, raw=True))
-                .reset_index(level=0, drop=True)
-            )
+            if 'cmf' in self.indicator_list:
+                cmf_result = self.compute_cmf(data[['High', 'Low', 'Close', 'Volume']])
+                result['cmf'] = cmf_result['cmf'] if isinstance(cmf_result, pd.DataFrame) else cmf_result
 
-        if 'perm_entropy_50' in self.indicator_list:
-            df['perm_entropy_50'] = (
-                df
-                .groupby('Ticker')['Close']
-                .apply(lambda s: s.rolling(50)
-                       .apply(self.perm_entropy_window, raw=True))
-                .reset_index(level=0, drop=True)
-            )
+            if 'cci' in self.indicator_list:
+                result['cci'] = self.compute_cci(data[['High', 'Low', 'Close', 'Volume']])
 
-        if 'sampen_50' in self.indicator_list:
-            df['sampen_50'] = (
-                df
-                .groupby('Ticker')['Close']
-                .apply(lambda s: s.rolling(50)
-                       .apply(self.sampen_window, raw=True))
-                .reset_index(level=0, drop=True)
-            )
+            if 'parabolic_sar' in self.indicator_list:
+                result['parabolic_sar'] = self.compute_parabolic_sar(data[['High', 'Low', 'Close']])
 
-        if 'fractal_50' in self.indicator_list:
-            df['fractal_50'] = (
-                df
-                .groupby('Ticker')['Close']
-                .apply(lambda s: s.rolling(50)
-                       .apply(self.fractal, raw=True))
-                .reset_index(level=0, drop=True)
-            )
+            # Process rolling window calculations more efficiently
+            close_values = data['Close'].values
+            close_index = data['Close'].index
 
-        # — Keltner Channel (two outputs: upper & lower) —
-        if {'keltner_upper', 'keltner_lower'} & set(self.indicator_list):
-            kc = (
-                df
-                .groupby('Ticker')
-                .apply(lambda g: pd.DataFrame({
-                    'keltner_upper': self.keltner_channel(g['High'], g['Low'], g['Close'])[0],
-                    'keltner_lower': self.keltner_channel(g['High'], g['Low'], g['Close'])[1],
-                }, index=g.index))
-                .reset_index(level=0, drop=True)
-            )
-            if 'keltner_upper' in self.indicator_list:
-                df['keltner_upper'] = kc['keltner_upper']
-            if 'keltner_lower' in self.indicator_list:
-                df['keltner_lower'] = kc['keltner_lower']
+            # Pre-calculate rolling windows for better performance
+            if any(indicator in self.indicator_list for indicator in ['hurst_100', 'perm_entropy_50', 'sampen_50', 'fractal_50']):
+                # Create a dictionary to store rolling window results
+                rolling_results = {}
 
-        # — Momentum (two outputs: price & volume) —
-        if {'price_momentum', 'volume_momentum'} & set(self.indicator_list):
-            momentum = (
-                df
-                .groupby('Ticker')
-                .apply(lambda g: pd.DataFrame({
-                    'price_momentum': self.momentum_signals(g['Close'], g['Volume'])[0],
-                    'volume_momentum': self.momentum_signals(g['Close'], g['Volume'])[1],
-                }, index=g.index))
-                .reset_index(level=0, drop=True)
-            )
-            if 'price_momentum' in self.indicator_list:
-                df['price_momentum'] = momentum['price_momentum']
-            if 'volume_momentum' in self.indicator_list:
-                df['volume_momentum'] = momentum['volume_momentum']
+                if 'hurst_100' in self.indicator_list:
+                    # Process in chunks for better performance
+                    hurst_values = np.full(len(close_values), np.nan)
+                    valid_indices = np.arange(100, len(close_values))
 
-        if 'nasdaq_rsi' or 'nasdaq_returns' in self.indicator_list:
+                    # Process in smaller batches to avoid memory issues
+                    batch_size = 1000
+                    for i in range(0, len(valid_indices), batch_size):
+                        batch_indices = valid_indices[i:i+batch_size]
+                        for j in batch_indices:
+                            window = close_values[j-100:j]
+                            hurst_values[j] = self.hurst_window(window)
+
+                    rolling_results['hurst_100'] = pd.Series(hurst_values, index=close_index)
+
+                if 'perm_entropy_50' in self.indicator_list:
+                    perm_values = np.full(len(close_values), np.nan)
+                    valid_indices = np.arange(50, len(close_values))
+
+                    # Process in smaller batches
+                    batch_size = 1000
+                    for i in range(0, len(valid_indices), batch_size):
+                        batch_indices = valid_indices[i:i+batch_size]
+                        for j in batch_indices:
+                            window = close_values[j-50:j]
+                            perm_values[j] = self.perm_entropy_window(window)
+
+                    rolling_results['perm_entropy_50'] = pd.Series(perm_values, index=close_index)
+
+                if 'sampen_50' in self.indicator_list:
+                    sampen_values = np.full(len(close_values), np.nan)
+                    valid_indices = np.arange(50, len(close_values))
+
+                    # Process in smaller batches
+                    batch_size = 1000
+                    for i in range(0, len(valid_indices), batch_size):
+                        batch_indices = valid_indices[i:i+batch_size]
+                        for j in batch_indices:
+                            window = close_values[j-50:j]
+                            sampen_values[j] = self.sampen_window(window)
+
+                    rolling_results['sampen_50'] = pd.Series(sampen_values, index=close_index)
+
+                if 'fractal_50' in self.indicator_list:
+                    fractal_values = np.full(len(close_values), np.nan)
+                    valid_indices = np.arange(50, len(close_values))
+
+                    # Process in smaller batches
+                    batch_size = 1000
+                    for i in range(0, len(valid_indices), batch_size):
+                        batch_indices = valid_indices[i:i+batch_size]
+                        for j in batch_indices:
+                            window = close_values[j-50:j]
+                            fractal_values[j] = self.fractal(window)
+
+                    rolling_results['fractal_50'] = pd.Series(fractal_values, index=close_index)
+
+                # Add results to the result dictionary
+                result.update(rolling_results)
+
+            # Process multi-output indicators
+            if {'keltner_upper', 'keltner_lower'} & set(self.indicator_list):
+                upper, lower = self.keltner_channel(data['High'], data['Low'], data['Close'])
+                if 'keltner_upper' in self.indicator_list:
+                    result['keltner_upper'] = upper
+                if 'keltner_lower' in self.indicator_list:
+                    result['keltner_lower'] = lower
+
+            if {'price_momentum', 'volume_momentum'} & set(self.indicator_list):
+                price_mom, volume_mom = self.momentum_signals(data['Close'], data['Volume'])
+                if 'price_momentum' in self.indicator_list:
+                    result['price_momentum'] = price_mom
+                if 'volume_momentum' in self.indicator_list:
+                    result['volume_momentum'] = volume_mom
+
+            if {'bullish_engulfing', 'bearish_engulfing'} & set(self.indicator_list):
+                bullish, bearish = self.engulfing_patterns(data['Open'], data['Close'])
+                if 'bullish_engulfing' in self.indicator_list:
+                    result['bullish_engulfing'] = bullish
+                if 'bearish_engulfing' in self.indicator_list:
+                    result['bearish_engulfing'] = bearish
+
+            return ticker, result
+
+        # Process NASDAQ data once if needed
+        if {'nasdaq_rsi', 'nasdaq_returns'} & set(self.indicator_list):
             nasdaq_close = self.get_index_data()
+            nasdaq_close.index = pd.to_datetime(nasdaq_close.index).tz_localize(None)
             if 'nasdaq_rsi' in self.indicator_list:
                 nasdaq_rsi = self.stochastic_rsi(nasdaq_close['close']).rename('nasdaq_rsi')
                 df = df.merge(nasdaq_rsi.to_frame(), left_index=True, right_index=True)
-
             if 'nasdaq_returns' in self.indicator_list:
                 nasdaq_returns = nasdaq_close['close'].pct_change().rename('nasdaq_returns')
                 df = df.merge(nasdaq_returns.to_frame(), left_index=True, right_index=True)
 
-        self.dataset_ex_df = df
+        # Process indicators in parallel for each ticker
+        # Use self.max_workers if specified, otherwise use a sensible default
+        workers = self.max_workers if self.max_workers is not None else min(os.cpu_count(), len(ticker_groups))
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            results = list(executor.map(process_ticker_indicators, ticker_groups.items()))
 
+        self.indicator_results = results
+
+        # Update the dataframe with the calculated indicators
+        for ticker, ticker_results in self.indicator_results:
+            ticker_idx = ticker_groups[ticker].index  # cache ‑ small speed gain
+            for indicator, values in ticker_results.items():
+                if indicator not in df.columns:
+                    df[indicator] = np.nan
+                df.loc[ticker_idx, indicator] = values
+
+        self.dataset_ex_df = df
         return df
 
     # ——— Final Merge Based on indicators & mode ———
@@ -491,9 +584,9 @@ class TickerData:
         return self.final_df
 
     def process_all(self):
-        self.fetch_stock_data()
+        #self.fetch_stock_data()
         self.preprocess_data()
         self.add_technical_indicators()
-        return self.merge_data(), self.stock_data
+        return self.merge_data()
 
 #indicators = ['ema_20', 'ema_50', 'ema_100', 'stoch_rsi14', 'macd', 'b_percent', 'hmm_state', 'ssa_trend', 'dmd', 'hurst_100','perm_entropy_50','close_denoised_L1', 'Close','fractal_50','sampen_50','cci','cmf','parabolic_sar','keltner_upper','keltner_lower','nasdaq_rsi','nasdaq_returns']
