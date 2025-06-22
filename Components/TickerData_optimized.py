@@ -8,9 +8,12 @@ import antropy as ant
 from pyts.decomposition import SingularSpectrumAnalysis
 from pydmd import DMD
 from hurst import compute_Hc
+import numba
+from numba import jit
 
 from datetime import datetime, timedelta
 import os
+import time
 
 from Components.MarketRegimes import RegimeDetector
 
@@ -57,6 +60,11 @@ class TickerData:
             self.end_date = datetime.now().strftime("%Y-%m-%d")
         self.prediction_mode = kwargs.get('prediction_mode', False)
         self.max_workers = kwargs.get('max_workers', None)
+
+        # Cache for SIC codes to avoid repeated API calls
+        self.sic_code_cache = {}
+        self.last_api_call_time = 0
+        self.api_call_delay = 0.2  # 200ms delay between API calls to avoid rate limiting
 
     def get_news_for_ticker(self, ticker, start_date, end_date, full_dates, limit=1000):
         # 1) Fetch all articles in one paginated iterator
@@ -409,6 +417,383 @@ class TickerData:
         true_range = pd.concat([high - low, abs(high - close.shift()), abs(low - close.shift())], axis=1).max(axis=1)
         return true_range.rolling(period).mean()
 
+    # ——— NEW TECHNICAL INDICATORS FOR TFT ———
+
+    @staticmethod
+    def log_returns(series, periods=[1, 2, 3]):
+        """Calculate log returns for multiple periods"""
+        results = {}
+        for period in periods:
+            results[f'log_ret_{period}'] = np.log(series / series.shift(period))
+        return results
+
+    @staticmethod
+    def sma(series, period):
+        """Simple Moving Average"""
+        return series.rolling(window=period).mean()
+
+    @staticmethod
+    def ema_crossover_diff(series, fast_period=5, slow_period=10):
+        """EMA crossover difference (fast EMA - slow EMA)"""
+        fast_ema = series.ewm(span=fast_period, adjust=False).mean()
+        slow_ema = series.ewm(span=slow_period, adjust=False).mean()
+        return fast_ema - slow_ema
+
+    @staticmethod
+    def rsi(series, period=14):
+        """Relative Strength Index"""
+        delta = series.diff()
+        gain = delta.clip(lower=0)
+        loss = -delta.clip(upper=0)
+        avg_gain = gain.rolling(window=period).mean()
+        avg_loss = loss.rolling(window=period).mean()
+        rs = avg_gain / avg_loss
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
+
+    @staticmethod
+    def macd_custom(series, fast_period=5, slow_period=13, signal_period=3):
+        """MACD with custom parameters"""
+        fast_ema = series.ewm(span=fast_period, adjust=False).mean()
+        slow_ema = series.ewm(span=slow_period, adjust=False).mean()
+        macd_line = fast_ema - slow_ema
+        signal_line = macd_line.ewm(span=signal_period, adjust=False).mean()
+        return macd_line - signal_line  # MACD histogram
+
+    @staticmethod
+    def bollinger_band_width(series, period=10, std_dev=2):
+        """Bollinger Band Width"""
+        sma = series.rolling(window=period).mean()
+        std = series.rolling(window=period).std()
+        upper_band = sma + (std_dev * std)
+        lower_band = sma - (std_dev * std)
+        bb_width = (upper_band - lower_band) / sma
+        return bb_width
+
+    @staticmethod
+    def realized_volatility(series, period=5):
+        """Realized volatility (rolling standard deviation of returns)"""
+        returns = series.pct_change()
+        return returns.rolling(window=period).std() * np.sqrt(252)  # Annualized
+
+    @staticmethod
+    def obv(close, volume):
+        """On-Balance Volume"""
+        price_change = close.diff()
+        obv_values = np.where(price_change > 0, volume, 
+                             np.where(price_change < 0, -volume, 0))
+        return pd.Series(obv_values, index=close.index).cumsum()
+
+    @staticmethod
+    def mfi(high, low, close, volume, period=5):
+        """Money Flow Index"""
+        typical_price = (high + low + close) / 3
+        money_flow = typical_price * volume
+
+        price_change = typical_price.diff()
+        positive_flow = np.where(price_change > 0, money_flow, 0)
+        negative_flow = np.where(price_change < 0, money_flow, 0)
+
+        positive_mf = pd.Series(positive_flow, index=close.index).rolling(window=period).sum()
+        negative_mf = pd.Series(negative_flow, index=close.index).rolling(window=period).sum()
+
+        mfi = 100 - (100 / (1 + (positive_mf / negative_mf)))
+        return mfi
+
+    @staticmethod
+    def dollar_volume_zscore(close, volume, period=30):
+        """Dollar Volume Z-score"""
+        dollar_volume = close * volume
+        rolling_mean = dollar_volume.rolling(window=period).mean()
+        rolling_std = dollar_volume.rolling(window=period).std()
+        z_score = (dollar_volume - rolling_mean) / rolling_std
+        return z_score
+
+    @staticmethod
+    def stochastic_oscillator(high, low, close, k_period=5, d_period=3):
+        """Stochastic Oscillator %K and %D"""
+        lowest_low = low.rolling(window=k_period).min()
+        highest_high = high.rolling(window=k_period).max()
+
+        k_percent = 100 * ((close - lowest_low) / (highest_high - lowest_low))
+        d_percent = k_percent.rolling(window=d_period).mean()
+
+        return k_percent, d_percent
+
+    @staticmethod
+    def adx(high, low, close, period=7):
+        """Average Directional Index"""
+        # Calculate True Range
+        tr1 = high - low
+        tr2 = abs(high - close.shift())
+        tr3 = abs(low - close.shift())
+        true_range = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+
+        # Calculate Directional Movement
+        plus_dm = high.diff()
+        minus_dm = -low.diff()
+
+        plus_dm = np.where((plus_dm > minus_dm) & (plus_dm > 0), plus_dm, 0)
+        minus_dm = np.where((minus_dm > plus_dm) & (minus_dm > 0), minus_dm, 0)
+
+        plus_dm = pd.Series(plus_dm, index=close.index)
+        minus_dm = pd.Series(minus_dm, index=close.index)
+
+        # Smooth the values
+        atr = true_range.rolling(window=period).mean()
+        plus_di = 100 * (plus_dm.rolling(window=period).mean() / atr)
+        minus_di = 100 * (minus_dm.rolling(window=period).mean() / atr)
+
+        # Calculate ADX
+        dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
+        adx = dx.rolling(window=period).mean()
+
+        return adx
+
+    @staticmethod
+    def williams_r(high, low, close, period=7):
+        """Williams %R"""
+        highest_high = high.rolling(window=period).max()
+        lowest_low = low.rolling(window=period).min()
+
+        williams_r = -100 * ((highest_high - close) / (highest_high - lowest_low))
+        return williams_r
+
+    # ——— CROSS-ASSET INDICATORS ———
+
+    def get_spy_data(self):
+        """Get SPY data for cross-asset indicators"""
+        try:
+            # Use the same data fetching mechanism as for other tickers
+            spy_data = self.get_ohlc_for_ticker('SPY', multiplier=1, timespan="day", limit=50000)
+            if spy_data is not None and not spy_data.empty:
+                spy_data.index = pd.to_datetime(spy_data.index).tz_localize(None)
+                return spy_data
+        except Exception as e:
+            print(f"Warning: Could not fetch SPY data: {e}")
+        return None
+
+    def get_vix_data(self):
+        """Get VIX data for volatility indicators"""
+        try:
+            # VIX data from Polygon
+            vix_data = self.get_ohlc_for_ticker('VIX', multiplier=1, timespan="day", limit=50000)
+            if vix_data is not None and not vix_data.empty:
+                vix_data.index = pd.to_datetime(vix_data.index).tz_localize(None)
+                return vix_data
+        except Exception as e:
+            print(f"Warning: Could not fetch VIX data: {e}")
+        return None
+
+    def get_sector_etf_data(self, sector_etfs=['XLK', 'XLE', 'XLF', 'XLV', 'XLI', 'XLY', 'XLP', 'XLB', 'XLU']):
+        """Get sector ETF data"""
+        sector_data = {}
+        for etf in sector_etfs:
+            try:
+                etf_data = self.get_ohlc_for_ticker(etf, multiplier=1, timespan="day", limit=50000)
+                if etf_data is not None and not etf_data.empty:
+                    etf_data.index = pd.to_datetime(etf_data.index).tz_localize(None)
+                    sector_data[etf] = etf_data
+            except Exception as e:
+                print(f"Warning: Could not fetch {etf} data: {e}")
+        return sector_data
+
+    @staticmethod
+    def calculate_returns(series, periods=[1, 3]):
+        """Calculate returns for multiple periods"""
+        results = {}
+        for period in periods:
+            results[f'ret_{period}'] = series.pct_change(periods=period)
+        return results
+
+    # ——— NEW INDICATORS: SIC CODES AND CALENDAR FEATURES ———
+
+    def get_sic_code_for_ticker(self, ticker):
+        """Get SIC code for a ticker using Polygon API with rate limiting and caching"""
+        # Check cache first
+        if ticker in self.sic_code_cache:
+            return self.sic_code_cache[ticker]
+
+        # Rate limiting: ensure minimum delay between API calls
+        current_time = time.time()
+        time_since_last_call = current_time - self.last_api_call_time
+        if time_since_last_call < self.api_call_delay:
+            sleep_time = self.api_call_delay - time_since_last_call
+            time.sleep(sleep_time)
+
+        # Retry logic with exponential backoff
+        max_retries = 3
+        base_delay = 1.0  # Start with 1 second delay
+
+        for attempt in range(max_retries):
+            try:
+                self.last_api_call_time = time.time()
+                details = self.client.get_ticker_details(ticker)
+                sic_code = getattr(details, 'sic_code', None)
+
+                # Cache the result (even if None)
+                self.sic_code_cache[ticker] = sic_code
+                return sic_code
+
+            except Exception as e:
+                error_str = str(e).lower()
+
+                # Check if it's a rate limiting error (429)
+                if '429' in error_str or 'too many' in error_str or 'rate limit' in error_str:
+                    if attempt < max_retries - 1:  # Don't sleep on the last attempt
+                        retry_delay = base_delay * (2 ** attempt)  # Exponential backoff
+                        print(f"Rate limit hit for {ticker}, retrying in {retry_delay:.1f}s (attempt {attempt + 1}/{max_retries})")
+                        time.sleep(retry_delay)
+                        continue
+                    else:
+                        print(f"Warning: Rate limit exceeded for {ticker} after {max_retries} attempts: {e}")
+                        # Cache the failure to avoid repeated attempts
+                        self.sic_code_cache[ticker] = None
+                        return None
+                else:
+                    # For non-rate-limiting errors, don't retry
+                    print(f"Warning: Could not fetch SIC code for {ticker}: {e}")
+                    # Cache the failure
+                    self.sic_code_cache[ticker] = None
+                    return None
+
+        # If we get here, all retries failed
+        self.sic_code_cache[ticker] = None
+        return None
+
+    def create_sector_indicator(self, tickers):
+        """Create sector indicator based on SIC codes"""
+        sic_to_sector = {
+            # Technology
+            range(3570, 3580): 'Technology',  # Computer and office equipment
+            range(3600, 3700): 'Technology',  # Electronic equipment
+            range(7370, 7380): 'Technology',  # Computer programming and data processing
+
+            # Financial Services
+            range(6000, 6100): 'Financial',   # Banking
+            range(6200, 6300): 'Financial',   # Security and commodity brokers
+            range(6300, 6400): 'Financial',   # Insurance carriers
+            range(6700, 6800): 'Financial',   # Holding and investment offices
+
+            # Healthcare
+            range(2830, 2840): 'Healthcare',  # Drugs
+            range(3840, 3850): 'Healthcare',  # Surgical and medical instruments
+            range(8000, 8100): 'Healthcare',  # Health services
+
+            # Energy
+            range(1300, 1400): 'Energy',      # Oil and gas extraction
+            range(2900, 3000): 'Energy',      # Petroleum refining
+
+            # Consumer Discretionary
+            range(2300, 2400): 'Consumer_Discretionary',  # Apparel
+            range(3700, 3800): 'Consumer_Discretionary',  # Transportation equipment
+            range(5000, 5200): 'Consumer_Discretionary',  # Wholesale trade
+            range(5200, 5600): 'Consumer_Discretionary',  # Retail trade
+
+            # Consumer Staples
+            range(2000, 2100): 'Consumer_Staples',  # Food products
+            range(5400, 5500): 'Consumer_Staples',  # Food stores
+
+            # Industrials
+            range(1500, 1800): 'Industrials',  # Construction
+            range(3300, 3400): 'Industrials',  # Primary metal industries
+            range(3400, 3500): 'Industrials',  # Fabricated metal products
+            range(3500, 3600): 'Industrials',  # Industrial machinery
+
+            # Materials
+            range(1000, 1500): 'Materials',    # Mining
+            range(2600, 2700): 'Materials',    # Paper and allied products
+            range(2800, 2900): 'Materials',    # Chemicals
+
+            # Utilities
+            range(4900, 5000): 'Utilities',    # Electric, gas, and sanitary services
+
+            # Real Estate
+            range(6500, 6600): 'Real_Estate',  # Real estate
+
+            # Communication Services
+            range(4800, 4900): 'Communication',  # Communications
+        }
+
+        ticker_sectors = {}
+        for ticker in tickers:
+            sic_code = self.get_sic_code_for_ticker(ticker)
+            if sic_code:
+                try:
+                    # Convert SIC code to integer for range comparison
+                    sic_code_int = int(sic_code)
+                    sector = 'Other'  # Default sector
+                    for sic_range, sector_name in sic_to_sector.items():
+                        if isinstance(sic_range, range) and sic_code_int in sic_range:
+                            sector = sector_name
+                            break
+                    ticker_sectors[ticker] = sector
+                except (ValueError, TypeError):
+                    # If SIC code can't be converted to int, mark as Unknown
+                    ticker_sectors[ticker] = 'Unknown'
+            else:
+                ticker_sectors[ticker] = 'Unknown'
+
+        return ticker_sectors
+
+    @staticmethod
+    def add_calendar_indicators(df):
+        """Add calendar-based indicators"""
+        # Ensure index is datetime
+        if not isinstance(df.index, pd.DatetimeIndex):
+            df.index = pd.to_datetime(df.index)
+
+        # Day of week (0=Monday, 6=Sunday)
+        df['day_of_week'] = df.index.dayofweek
+
+        # Day of month (1-31)
+        df['day_of_month'] = df.index.day
+
+        # Days to month end
+        # Get the last day of each month for each date
+        month_ends = df.index.to_period('M').end_time
+        current_dates = df.index
+        df['days_to_month_end'] = (month_ends - current_dates).days
+
+        return df
+
+    def get_earnings_dates_for_ticker(self, ticker):
+        """Get earnings dates for a ticker (placeholder implementation)"""
+        # Note: This would require a more comprehensive earnings calendar API
+        # For now, we'll create a placeholder that can be replaced with actual earnings data
+        try:
+            # Placeholder: In a real implementation, you would fetch earnings dates
+            # from an earnings calendar API or financial data provider
+            # For now, return None to indicate no earnings data available
+            return None
+        except Exception as e:
+            print(f"Warning: Could not fetch earnings dates for {ticker}: {e}")
+            return None
+
+    @staticmethod
+    def add_earnings_dummy(df, earnings_dates_dict=None, lookforward_days=10):
+        """Add earnings dummy indicator (0/1 flag for next 10 trading days)"""
+        # Initialize earnings dummy column
+        df['earnings_dummy_10d'] = 0
+
+        if earnings_dates_dict:
+            for ticker, earnings_dates in earnings_dates_dict.items():
+                if earnings_dates:
+                    ticker_mask = df['Ticker'] == ticker
+                    ticker_df = df[ticker_mask].copy()
+
+                    for earnings_date in earnings_dates:
+                        earnings_date = pd.to_datetime(earnings_date)
+                        # Find dates within lookforward_days before earnings
+                        start_date = earnings_date - pd.Timedelta(days=lookforward_days)
+                        end_date = earnings_date
+
+                        # Set dummy to 1 for dates in the range
+                        date_mask = (ticker_df.index >= start_date) & (ticker_df.index <= end_date)
+                        df.loc[ticker_mask & date_mask, 'earnings_dummy_10d'] = 1
+
+        return df
+
     # ——— OPTIMIZED Core Indicator Loop ———
     def add_technical_indicators(self):
         self.dataset_ex_df.index = pd.to_datetime(self.dataset_ex_df.index).tz_localize(None)
@@ -425,8 +810,177 @@ class TickerData:
                 nasdaq_returns = nasdaq_close['close'].pct_change().rename('nasdaq_returns')
                 df = df.merge(nasdaq_returns.to_frame(), left_index=True, right_index=True)
 
+        # Process cross-asset indicators
+        cross_asset_indicators = ['spy_ret_1', 'spy_ret_3', 'sector_etf_ret_1', 'vix_delta_1', 'yc_2y10y_delta']
+        needed_cross_asset = [ind for ind in cross_asset_indicators if ind in self.indicator_list]
+
+        if needed_cross_asset:
+            # SPY returns
+            if 'spy_ret_1' in self.indicator_list or 'spy_ret_3' in self.indicator_list:
+                spy_data = self.get_spy_data()
+                if spy_data is not None:
+                    spy_returns = self.calculate_returns(spy_data['close'], [1, 3])
+                    if 'spy_ret_1' in self.indicator_list:
+                        spy_ret_1 = spy_returns['ret_1'].rename('spy_ret_1')
+                        df = df.merge(spy_ret_1.to_frame(), left_index=True, right_index=True, how='left')
+                    if 'spy_ret_3' in self.indicator_list:
+                        spy_ret_3 = spy_returns['ret_3'].rename('spy_ret_3')
+                        df = df.merge(spy_ret_3.to_frame(), left_index=True, right_index=True, how='left')
+                else:
+                    # Create placeholder columns if SPY data fetch fails
+                    if 'spy_ret_1' in self.indicator_list:
+                        df['spy_ret_1'] = np.nan
+                    if 'spy_ret_3' in self.indicator_list:
+                        df['spy_ret_3'] = np.nan
+
+            # Sector ETF returns (using XLK as representative)
+            if 'sector_etf_ret_1' in self.indicator_list:
+                sector_data = self.get_sector_etf_data(['XLK'])  # Technology sector as example
+                if 'XLK' in sector_data:
+                    xlk_ret_1 = sector_data['XLK']['close'].pct_change().rename('sector_etf_ret_1')
+                    df = df.merge(xlk_ret_1.to_frame(), left_index=True, right_index=True, how='left')
+                else:
+                    # Create placeholder column if sector ETF data fetch fails
+                    df['sector_etf_ret_1'] = np.nan
+
+            # VIX delta
+            if 'vix_delta_1' in self.indicator_list:
+                vix_data = self.get_vix_data()
+                if vix_data is not None:
+                    vix_delta_1 = vix_data['close'].diff().rename('vix_delta_1')
+                    df = df.merge(vix_delta_1.to_frame(), left_index=True, right_index=True, how='left')
+                else:
+                    # Create placeholder column if VIX data fetch fails
+                    df['vix_delta_1'] = np.nan
+
+            # Yield curve (2y-10y) - placeholder implementation
+            # Note: This would require FRED API or similar for actual yield data
+            if 'yc_2y10y_delta' in self.indicator_list:
+                # For now, create a placeholder that can be replaced with actual yield curve data
+                df['yc_2y10y_delta'] = 0.0  # Placeholder - replace with actual yield curve data
+
+        # ——— NEW INDICATORS: SIC SECTOR AND CALENDAR FEATURES ———
+
+        # Process SIC sector indicator
+        if 'sic_sector' in self.indicator_list:
+            unique_tickers = df['Ticker'].unique()
+            ticker_sectors = self.create_sector_indicator(unique_tickers)
+            df['sic_sector'] = df['Ticker'].map(ticker_sectors)
+
+        # Process calendar indicators
+        calendar_indicators = ['day_of_week', 'day_of_month', 'days_to_month_end']
+        needed_calendar = [ind for ind in calendar_indicators if ind in self.indicator_list]
+        if needed_calendar:
+            df = self.add_calendar_indicators(df)
+
+        # Process earnings dummy indicator
+        if 'earnings_dummy_10d' in self.indicator_list:
+            # Get unique tickers and fetch earnings dates
+            unique_tickers = df['Ticker'].unique()
+            earnings_dates_dict = {}
+            for ticker in unique_tickers:
+                earnings_dates = self.get_earnings_dates_for_ticker(ticker)
+                if earnings_dates:
+                    earnings_dates_dict[ticker] = earnings_dates
+
+            df = self.add_earnings_dummy(df, earnings_dates_dict, lookforward_days=10)
+
         # VECTORIZED APPROACH: Process all tickers at once using groupby
         grouped = df.groupby('Ticker')
+
+        # Process log returns
+        log_ret_indicators = ['log_ret_1', 'log_ret_2', 'log_ret_3']
+        needed_log_rets = [ind for ind in log_ret_indicators if ind in self.indicator_list]
+        if needed_log_rets:
+            for ticker, group in grouped:
+                log_ret_results = self.log_returns(group['Close'])
+                for indicator in needed_log_rets:
+                    if indicator not in df.columns:
+                        df[indicator] = np.nan
+                    df.loc[group.index, indicator] = log_ret_results[indicator]
+
+        # Process SMA indicators
+        if 'sma_5_close' in self.indicator_list:
+            df['sma_5_close'] = grouped['Close'].transform(lambda x: self.sma(x, 5))
+
+        # Process EMA crossover
+        if 'ema_fast5_slow10' in self.indicator_list:
+            df['ema_fast5_slow10'] = grouped['Close'].transform(lambda x: self.ema_crossover_diff(x, 5, 10))
+
+        # Process RSI indicators
+        rsi_indicators = ['rsi_3', 'rsi_7']
+        for indicator in rsi_indicators:
+            if indicator in self.indicator_list:
+                period = int(indicator.split('_')[1])
+                df[indicator] = grouped['Close'].transform(lambda x: self.rsi(x, period))
+
+        # Process custom MACD
+        if 'macd_fast5_slow13' in self.indicator_list:
+            df['macd_fast5_slow13'] = grouped['Close'].transform(lambda x: self.macd_custom(x, 5, 13, 3))
+
+        # Process ATR with period 5
+        if 'atr_5' in self.indicator_list:
+            df['atr_5'] = np.nan
+            for ticker, group in grouped:
+                atr_values = self.atr(group['Close'], group['High'], group['Low'], 5)
+                df.loc[group.index, 'atr_5'] = atr_values
+
+        # Process Bollinger Band Width
+        if 'bb_width_10' in self.indicator_list:
+            df['bb_width_10'] = grouped['Close'].transform(lambda x: self.bollinger_band_width(x, 10, 2))
+
+        # Process Realized Volatility
+        if 'real_vol_5' in self.indicator_list:
+            df['real_vol_5'] = grouped['Close'].transform(lambda x: self.realized_volatility(x, 5))
+
+        # Process OBV
+        if 'obv' in self.indicator_list:
+            df['obv'] = np.nan
+            for ticker, group in grouped:
+                obv_values = self.obv(group['Close'], group['Volume'])
+                df.loc[group.index, 'obv'] = obv_values
+
+        # Process MFI
+        if 'mfi_5' in self.indicator_list:
+            df['mfi_5'] = np.nan
+            for ticker, group in grouped:
+                mfi_values = self.mfi(group['High'], group['Low'], group['Close'], group['Volume'], 5)
+                df.loc[group.index, 'mfi_5'] = mfi_values
+
+        # Process Dollar Volume Z-score
+        if 'dollar_vol_z' in self.indicator_list:
+            df['dollar_vol_z'] = np.nan
+            for ticker, group in grouped:
+                dollar_vol_values = self.dollar_volume_zscore(group['Close'], group['Volume'], 30)
+                df.loc[group.index, 'dollar_vol_z'] = dollar_vol_values
+
+        # Process Stochastic Oscillator
+        stoch_indicators = ['stoch_k_5', 'stoch_d_5']
+        if any(ind in self.indicator_list for ind in stoch_indicators):
+            if 'stoch_k_5' in self.indicator_list:
+                df['stoch_k_5'] = np.nan
+            if 'stoch_d_5' in self.indicator_list:
+                df['stoch_d_5'] = np.nan
+            for ticker, group in grouped:
+                k_values, d_values = self.stochastic_oscillator(group['High'], group['Low'], group['Close'], 5, 3)
+                if 'stoch_k_5' in self.indicator_list:
+                    df.loc[group.index, 'stoch_k_5'] = k_values
+                if 'stoch_d_5' in self.indicator_list:
+                    df.loc[group.index, 'stoch_d_5'] = d_values
+
+        # Process ADX
+        if 'adx_7' in self.indicator_list:
+            df['adx_7'] = np.nan
+            for ticker, group in grouped:
+                adx_values = self.adx(group['High'], group['Low'], group['Close'], 7)
+                df.loc[group.index, 'adx_7'] = adx_values
+
+        # Process Williams %R
+        if 'williams_r_7' in self.indicator_list:
+            df['williams_r_7'] = np.nan
+            for ticker, group in grouped:
+                williams_values = self.williams_r(group['High'], group['Low'], group['Close'], 7)
+                df.loc[group.index, 'williams_r_7'] = williams_values
 
         # Process EMA indicators using vectorized operations
         for period in (20, 50, 100, 200):
