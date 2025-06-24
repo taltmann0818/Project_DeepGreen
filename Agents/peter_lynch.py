@@ -1,6 +1,15 @@
+import math
 from pandas import DataFrame
-from Components.Fundamentals import search_line_items, get_metric_value
 import pandas as pd
+import numpy as np
+import logging
+import time
+import os
+
+from google import genai
+from google.genai import types
+
+from Components.Fundamentals import search_line_items, get_metric_value
 
 class PeterLynchAgent():
     """
@@ -24,6 +33,7 @@ class PeterLynchAgent():
         self.limit = kwargs.get('analysis_limit')
         self.analysis_data = {} # Storing returned results in dict
         self.threshold_matrix_path = kwargs.get('threshold_matrix_path',None)
+        self.model_name = kwargs.get('model_name','gemini-2.5-flash')
         
     def analyze(self):
         financial_line_items, self.SIC_code = search_line_items(
@@ -79,7 +89,7 @@ class PeterLynchAgent():
 
         self.analysis_data = {
             "name": self.agent_name,
-            "signal": signal,
+            #"signal": signal,
             "score": total_score,
             "max_score": max_possible_score,
             "growth_analysis": growth_analysis,
@@ -89,7 +99,9 @@ class PeterLynchAgent():
             "insider_activity": insider_activity,
         }
 
-        return self.analysis_data
+        self.llm_output = self.generate_llm_output()
+
+        return {"name":self.analysis_data.name,"signal": self.llm_output.signal, "score":self.analysis_data.score, "confidence": self.llm_output.confidence, "reasoning": self.llm_output.reasoning}
 
 
     def analyze_lynch_growth(self, financial_line_items: DataFrame):
@@ -372,3 +384,65 @@ class PeterLynchAgent():
             details.append(f"Mostly insider selling: {buys} buys vs. {sells} sells")
 
         return {"score": score, "details": "; ".join(details)}
+
+    def generate_llm_output(
+        self,
+        max_retries: int = 3,
+        initial_delay: int = 5,
+        backoff_factor: float = 1.5
+    ):
+        """
+        Generates a final JSON signal in Peter Lynch's voice & style.
+        """
+
+        template = types.GenerateContentConfig(
+            system_instruction=[
+            f"""You are a {self.agent_name} AI agentt. You make investment decisions based on {self.agent_name}'s well-known principless:
+            1. Invest in What You Know: Emphasize understandable businesses, possibly discovered in everyday life.
+            2. Growth at a Reasonable Price (GARP): Rely on the PEG ratio as a prime metric.
+            3. Look for 'Ten-Baggers': Companies capable of growing earnings and share price substantially.
+            4. Steady Growth: Prefer consistent revenue/earnings expansion, less concern about short-term noise.
+            5. Avoid High Debt: Watch for dangerous leverage.
+            6. Management & Story: A good 'story' behind the stock, but not overhyped or too complex.
+            """,
+            f"""When you provide your reasoning, do it in Peter Lynch's voice:
+            - Cite the PEG ratio
+            - Mention 'ten-bagger' potential if applicable
+            - Refer to personal or anecdotal observations (e.g., "If my kids love the product...")
+            - Use practical, folksy language
+            - Provide key positives and negatives
+            - Conclude with a clear stance (bullish, bearish, or neutral)
+            """,
+            "Return a rational recommendation: bullish, bearish, or neutral, with a confidence level (0-100) and thorough reasoning."
+        ],
+        response_mime_type="application/json",
+        response_schema={
+            "type": "OBJECT",
+            "properties": {
+                "signal": {"type": "STRING", "enum": ["bullish", "bearish", "neutral"]},
+                "confidence": {"type": "NUMBER", "minimum": 0, "maximum": 100},
+                "reasoning": {"type": "STRING"}
+            },
+            "required": ["signal","confidence","reasoning"],
+            },
+        )
+
+        delay = initial_delay
+        client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+        for attempt in range(1, max_retries + 1):
+            try: 
+                response = client.models.generate_content(
+                    model=self.model_name,
+                       contents=f"Based on the following analysis for {self.ticker}, produce your {self.agent_name}-style investment signal: Analysis Data for {self.ticker}: {self.analysis_data}",
+                    config=template,
+                )
+                response = response.parsed
+            except:
+                if attempt == max_retries:
+                    response = {"signal":"None", "confidence":"N/A", "reasoning":"None"}
+                    logging.warning(f"{self.agent_name} AI agent failed for '{self.ticker}' after {max_retries} attempts")
+                    
+                time.sleep(delay)
+                delay = int(delay * backoff_factor)
+
+        return response

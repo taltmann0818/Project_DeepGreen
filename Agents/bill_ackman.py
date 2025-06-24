@@ -1,6 +1,14 @@
 from pandas import DataFrame
-from Components.Fundamentals import search_line_items, get_metric_value
 import pandas as pd
+import numpy as np
+import logging
+import time
+import os
+
+from google import genai
+from google.genai import types
+
+from Components.Fundamentals import search_line_items, get_metric_value
 
 class BillAckmanAgent:
     """
@@ -15,11 +23,10 @@ class BillAckmanAgent:
         self.period = kwargs.get('analysis_period')
         self.limit = kwargs.get('analysis_limit')
         self.threshold_matrix_path = kwargs.get('threshold_matrix_path',None)
+        self.model_name = kwargs.get('model_name','gemini-2.5-flash')
         self.analysis_data = {} # Storing returned results in dict
 
     def analyze(self):
-        #metrics = get_financial_metrics(ticker, end_date, period="annual", limit=5)
-        # Request multiple periods of data (annual or TTM) for a more robust long-term view.
         financial_line_items, self.SIC_code = search_line_items(
             self.ticker,
             [
@@ -32,7 +39,6 @@ class BillAckmanAgent:
                 "dividends_and_other_cash_distributions",
                 "outstanding_shares",
                 "return_on_equity",
-                # Optional: intangible_assets if available
                 "intangible_assets",
                 "market_cap"
             ],
@@ -67,7 +73,7 @@ class BillAckmanAgent:
 
         self.analysis_data = {
             "name": self.agent_name,
-            "signal": signal,
+            #"signal": signal,
             "score": total_score,
             "max_score": max_possible_score,
             "quality_analysis": quality_analysis,
@@ -76,7 +82,9 @@ class BillAckmanAgent:
             "valuation_analysis": valuation_analysis
         }
 
-        return self.analysis_data
+        self.llm_output = self.generate_llm_output()
+
+        return {"name":self.analysis_data.name,"signal": self.llm_output.signal, "score":self.analysis_data.score, "confidence": self.llm_output.confidence, "reasoning": self.llm_output.reasoning}
 
 
     def analyze_business_quality(self, financial_line_items: DataFrame):
@@ -327,3 +335,67 @@ class BillAckmanAgent:
             "intrinsic_value": intrinsic_value,
             "margin_of_safety": margin_of_safety
         }
+
+    def generate_llm_output(
+        self,
+        max_retries: int = 12,
+        initial_delay: int = 5,
+        backoff_factor: float = 1.5
+    ):
+        """
+        Generates investment decisions in the style of Bill Ackman.
+        Includes more explicit references to brand strength, activism potential, 
+        catalysts, and management changes in the system prompt.
+        """
+
+        template = types.GenerateContentConfig(
+            system_instruction=[
+            f"""You are a {self.agent_name} AI agent, making investment decisions using his principles:
+            1. Seek high-quality businesses with durable competitive advantages (moats), often in well-known consumer or service brands.
+            2. Prioritize consistent free cash flow and growth potential over the long term.
+            3. Advocate for strong financial discipline (reasonable leverage, efficient capital allocation).
+            4. Valuation matters: target intrinsic value with a margin of safety.
+            5. Consider activism where management or operational improvements can unlock substantial upside.
+            6. Concentrate on a few high-conviction investments.
+            """,
+            """When providing your reasoning, be thorough and specific by:
+            - Emphasize brand strength, moat, or unique market positioning.
+            - Review free cash flow generation and margin trends as key signals.
+            - Analyze leverage, share buybacks, and dividends as capital discipline metrics.
+            - Provide a valuation assessment with numerical backup (DCF, multiples, etc.).
+            - Identify any catalysts for activism or value creation (e.g., cost cuts, better capital allocation).
+            - Use a confident, analytic, and sometimes confrontational tone when discussing weaknesses or opportunities.
+            """,
+            "Return a rational recommendation: bullish, bearish, or neutral, with a confidence level (0-100) and thorough reasoning."
+        ],
+        response_mime_type="application/json",
+        response_schema={
+            "type": "OBJECT",
+            "properties": {
+                "signal": {"type": "STRING", "enum": ["bullish", "bearish", "neutral"]},
+                "confidence": {"type": "NUMBER", "minimum": 0, "maximum": 100},
+                "reasoning": {"type": "STRING"}
+            },
+            "required": ["signal","confidence","reasoning"],
+            },
+        )
+
+        delay = initial_delay
+        client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+        for attempt in range(1, max_retries + 1):
+            try: 
+                response = client.models.generate_content(
+                    model=self.model_name,
+                       contents=f"Based on the following analysis for {self.ticker}, produce your {self.agent_name}-style investment signal: Analysis Data for {self.ticker}: {self.analysis_data}",
+                    config=template,
+                )
+                response = response.parsed
+            except:
+                if attempt == max_retries:
+                    response = {"signal":"None", "confidence":"N/A", "reasoning":"None"}
+                    logging.warning(f"{self.agent_name} AI agent failed for '{self.ticker}' after {max_retries} attempts")
+                    
+                time.sleep(delay)
+                delay = int(delay * backoff_factor)
+
+        return response

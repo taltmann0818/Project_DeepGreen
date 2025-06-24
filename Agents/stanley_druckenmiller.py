@@ -1,7 +1,14 @@
 import statistics
-from pandas import DataFrame
-from Components.Fundamentals import search_line_items, get_metric_value
 import pandas as pd
+import numpy as np
+import logging
+import time
+import os
+
+from google import genai
+from google.genai import types
+
+from Components.Fundamentals import search_line_items, get_metric_value
 
 class StanleyDruckenmillerAgent():
     """
@@ -19,15 +26,11 @@ class StanleyDruckenmillerAgent():
         self.ticker = ticker
         self.period = kwargs.get('analysis_period')
         self.limit = kwargs.get('analysis_limit')
-        self.analysis_data = {} # Storing returned results in dict
         self.threshold_matrix_path = kwargs.get('threshold_matrix_path',None)
+        self.model_name = kwargs.get('model_name','gemini-2.5-flash')
+        self.analysis_data = {} # Storing returned results in dict  
         
     def analyze(self):
-        # Include relevant line items for Stan Druckenmiller's approach:
-        #   - Growth & momentum: revenue, EPS, operating_income, ...
-        #   - Valuation: net_income, free_cash_flow, ebit, ebitda
-        #   - Leverage: total_debt, shareholders_equity
-        #   - Liquidity: cash_and_equivalents
         financial_line_items, self.SIC_code = search_line_items(
             self.ticker,
             [
@@ -85,7 +88,7 @@ class StanleyDruckenmillerAgent():
 
         self.analysis_data = {
             "name": self.agent_name,
-            "signal": signal,
+            #"signal": signal,
             "score": total_score,
             "max_score": max_possible_score,
             "growth_momentum_analysis": growth_momentum_analysis,
@@ -95,7 +98,9 @@ class StanleyDruckenmillerAgent():
             "valuation_analysis": valuation_analysis,
         }
 
-        return self.analysis_data
+        self.llm_output = self.generate_llm_output()
+
+        return {"name":self.analysis_data.name,"signal": self.llm_output.signal, "score":self.analysis_data.score, "confidence": self.llm_output.confidence, "reasoning": self.llm_output.reasoning}
 
     def analyze_growth_and_momentum(self, financial_line_items: DataFrame):
         """
@@ -403,3 +408,77 @@ class StanleyDruckenmillerAgent():
         final_score = min(10, (raw_score / 8) * 10)
 
         return {"score": final_score, "details": "; ".join(details)}
+
+    def generate_llm_output(
+        self,
+        max_retries: int = 3,
+        initial_delay: int = 5,
+        backoff_factor: float = 1.5
+    ):
+        """
+        Generates a JSON signal in the style of Stanley Druckenmiller.
+        """
+
+        template = types.GenerateContentConfig(
+            system_instruction=[
+            f"""You are a {self.agent_name} AI agent, making investment decisions using his principles:
+            1. Seek asymmetric risk-reward opportunities (large upside, limited downside).
+            2. Emphasize growth, momentum, and market sentiment.
+            3. Preserve capital by avoiding major drawdowns.
+            4. Willing to pay higher valuations for true growth leaders.
+            5. Be aggressive when conviction is high.
+            6. Cut losses quickly if the thesis changes.
+            """,
+            """
+            Rules:
+            - Reward companies showing strong revenue/earnings growth and positive stock momentum.
+            - Evaluate sentiment and insider activity as supportive or contradictory signals.
+            - Watch out for high leverage or extreme volatility that threatens capital.
+            """
+            f"""When providing your reasoning, be thorough and specific by:
+              1. Explaining the growth and momentum metrics that most influenced your decision
+              2. Highlighting the risk-reward profile with specific numerical evidence
+              3. Discussing market sentiment and catalysts that could drive price action
+              4. Addressing both upside potential and downside risks
+              5. Providing specific valuation context relative to growth prospects
+              6. Using {self.agent_name}'s decisive, momentum-focused, and conviction-driven voice
+            """,
+            """
+            For example, if bullish: "The company shows exceptional momentum with revenue accelerating from 22% to 35% YoY and the stock up 28% over the past three months. Risk-reward is highly asymmetric with 70% upside potential based on FCF multiple expansion and only 15% downside risk given the strong balance sheet with 3x cash-to-debt. Insider buying and positive market sentiment provide additional tailwinds..."
+            """,
+            """
+             For example, if bearish: "Despite recent stock momentum, revenue growth has decelerated from 30% to 12% YoY, and operating margins are contracting. The risk-reward proposition is unfavorable with limited 10% upside potential against 40% downside risk. The competitive landscape is intensifying, and insider selling suggests waning confidence. I'm seeing better opportunities elsewhere with more favorable setups..."
+            """,
+            "Return a rational recommendation: bullish, bearish, or neutral, with a confidence level (0-100) and thorough reasoning."
+        ],
+        response_mime_type="application/json",
+        response_schema={
+            "type": "OBJECT",
+            "properties": {
+                "signal": {"type": "STRING", "enum": ["bullish", "bearish", "neutral"]},
+                "confidence": {"type": "NUMBER", "minimum": 0, "maximum": 100},
+                "reasoning": {"type": "STRING"}
+            },
+            "required": ["signal","confidence","reasoning"],
+            },
+        )
+
+        delay = initial_delay
+        client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+        for attempt in range(1, max_retries + 1):
+            try: 
+                response = client.models.generate_content(
+                    model=self.model_name,
+                       contents=f"Based on the following analysis for {self.ticker}, produce your {self.agent_name}-style investment signal: Analysis Data for {self.ticker}: {self.analysis_data}",
+                    config=template,
+                )
+                response = response.parsed
+            except:
+                if attempt == max_retries:
+                    response = {"signal":"None", "confidence":"N/A", "reasoning":"None"}
+                    logging.warning(f"{self.agent_name} AI agent failed for '{self.ticker}' after {max_retries} attempts")
+                    
+                time.sleep(delay)
+                delay = int(delay * backoff_factor)
+
+        return response

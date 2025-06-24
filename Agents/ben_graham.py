@@ -1,8 +1,15 @@
 import math
 from pandas import DataFrame
-from Components.Fundamentals import search_line_items, get_metric_value
 import pandas as pd
 import numpy as np
+import logging
+import time
+import os
+
+from google import genai
+from google.genai import types
+
+from Components.Fundamentals import search_line_items, get_metric_value
 
 class BenGrahamAgent:
     """
@@ -19,7 +26,8 @@ class BenGrahamAgent:
         self.period = kwargs.get('analysis_period')
         self.limit = kwargs.get('analysis_limit')
         self.threshold_matrix_path = kwargs.get('threshold_matrix_path',None)
-        self.analysis_data = {} # Storing returned results in dict
+        self.model_name = kwargs.get('model_name','gemini-2.5-flash')
+        self.analysis_data = {} # Storing returned results in dict  
 
     def analyze(self):
         financial_line_items, self.SIC_code = search_line_items(
@@ -64,7 +72,7 @@ class BenGrahamAgent:
         # ─── Push data back to manager ──────────────────────────────────────
         self.analysis_data = {
             "name": self.agent_name,
-            "signal": signal,
+            #"signal": signal, # Removing to test agent vs LLM signal congruence
             "score": total_score,
             "max_score": max_possible_score,
             "earnings_analysis": earnings_analysis,
@@ -72,7 +80,9 @@ class BenGrahamAgent:
             "valuation_analysis": valuation_analysis
         }
 
-        return self.analysis_data
+        self.llm_output = self.generate_llm_output()
+
+        return {"name":self.analysis_data.name,"signal": self.llm_output.signal, "score":self.analysis_data.score, "confidence": self.llm_output.confidence, "reasoning": self.llm_output.reasoning}
 
     # ────────────────────────────────────────────────────────────────────────────────
     # Helper analyses
@@ -262,3 +272,72 @@ class BenGrahamAgent:
         # else: already appended details for missing graham_number
 
         return {"score": score, "details": "; ".join(details)}
+
+    def generate_llm_output(
+        self,
+        max_retries: int = 3,
+        initial_delay: int = 5,
+        backoff_factor: float = 1.5
+    ):
+        """
+        Generates an investment decision in the style of Benjamin Graham:
+        - Value emphasis, margin of safety, net-nets, conservative balance sheet, stable earnings.
+        - Return the result in a JSON structure: { signal, confidence, reasoning }.
+        """
+
+        template = types.GenerateContentConfig(
+            system_instruction=[
+            f"""You are a {self.agent_name} AI agent, making investment decisions using his principles:
+            1. Insist on a margin of safety by buying below intrinsic value (e.g., using Graham Number, net-net).
+            2. Emphasize the company's financial strength (low leverage, ample current assets).
+            3. Prefer stable earnings over multiple years.
+            4. Consider dividend record for extra safety.
+            5. Avoid speculative or high-growth assumptions; focus on proven metrics.
+            """,
+            f"""When providing your reasoning, be thorough and specific by:
+            1. Explaining the key valuation metrics that influenced your decision the most (Graham Number, NCAV, P/E, etc.)
+            2. Highlighting the specific financial strength indicators (current ratio, debt levels, etc.)
+            3. Referencing the stability or instability of earnings over time
+            4. Providing quantitative evidence with precise numbers
+            5. Comparing current metrics to Graham's specific thresholds (e.g., "Current ratio of 2.5 exceeds Graham's minimum of 2.0")
+            6. Using {self.agent_name}'s conservative, analytical voice and style in your explanation
+            """,
+            """
+            For example, if bullish: "The stock trades at a 35% discount to net current asset value, providing an ample margin of safety. The current ratio of 2.5 and debt-to-equity of 0.3 indicate strong financial position..."
+            """,
+            """
+            For example, if bearish: "Despite consistent earnings, the current price of $50 exceeds our calculated Graham Number of $35, offering no margin of safety. Additionally, the current ratio of only 1.2 falls below Graham's preferred 2.0 threshold..."
+            """,
+            "Return a rational recommendation: bullish, bearish, or neutral, with a confidence level (0-100) and thorough reasoning."
+        ],
+        response_mime_type="application/json",
+        response_schema={
+            "type": "OBJECT",
+            "properties": {
+                "signal": {"type": "STRING", "enum": ["bullish", "bearish", "neutral"]},
+                "confidence": {"type": "NUMBER", "minimum": 0, "maximum": 100},
+                "reasoning": {"type": "STRING"}
+            },
+            "required": ["signal","confidence","reasoning"],
+            },
+        )
+
+        delay = initial_delay
+        client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+        for attempt in range(1, max_retries + 1):
+            try: 
+                response = client.models.generate_content(
+                    model=self.model_name,
+                       contents=f"Based on the following analysis for {self.ticker}, produce your {self.agent_name}-style investment signal: Analysis Data for {self.ticker}: {self.analysis_data}",
+                    config=template,
+                )
+                response = response.parsed
+            except:
+                if attempt == max_retries:
+                    response = {"signal":"None", "confidence":"N/A", "reasoning":"None"}
+                    logging.warning(f"{self.agent_name} AI agent failed for '{self.ticker}' after {max_retries} attempts")
+                    
+                time.sleep(delay)
+                delay = int(delay * backoff_factor)
+
+        return response

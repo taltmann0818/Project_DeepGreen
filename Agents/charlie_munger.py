@@ -1,6 +1,15 @@
+import math
 from pandas import DataFrame
-from Components.Fundamentals import search_line_items, get_metric_value
 import pandas as pd
+import numpy as np
+import logging
+import time
+import os
+
+from google import genai
+from google.genai import types
+
+from Components.Fundamentals import search_line_items, get_metric_value
 
 class CharlieMungerAgent:
     """
@@ -16,6 +25,7 @@ class CharlieMungerAgent:
         self.ticker = ticker
         self.period = kwargs.get('analysis_period')
         self.limit = kwargs.get('analysis_limit')
+        self.model_name = kwargs.get('model_name','gemini-2.5-flash')
         self.analysis_data = {} # Storing returned results in dict
         self.threshold_matrix_path = kwargs.get('threshold_matrix_path',None)
         
@@ -71,18 +81,19 @@ class CharlieMungerAgent:
 
         self.analysis_data = {
             "name": self.agent_name,
-            "signal": signal,
+            #"signal": signal,
             "score": total_score,
             "max_score": max_possible_score,
             "moat_analysis": moat_analysis,
             "management_analysis": management_analysis,
             "predictability_analysis": predictability_analysis,
             "valuation_analysis": valuation_analysis,
-            # Include some qualitative assessment from news
-            "news_sentiment": "No news data available"
+            "news_sentiment": "No news data available" # Include some qualitative assessment from news
         }
 
-        return self.analysis_data
+        self.llm_output = self.generate_llm_output()
+
+        return {"name":self.analysis_data.name,"signal": self.llm_output.signal, "score":self.analysis_data.score, "confidence": self.llm_output.confidence, "reasoning": self.llm_output.reasoning}
 
 
     def analyze_moat_strength(self, financial_line_items: DataFrame):
@@ -546,3 +557,84 @@ class CharlieMungerAgent:
             "fcf_yield": fcf_yield,
             "normalized_fcf": normalized_fcf
         }
+    
+    def generate_llm_output(
+        self,
+        max_retries: int = 3,
+        initial_delay: int = 5,
+        backoff_factor: float = 1.5
+    ):
+        """
+        Generates investment decisions in the style of Charlie Munger.
+        """
+
+        template = types.GenerateContentConfig(
+            system_instruction=[
+            f"""You are a {self.agent_name} AI agent, making investment decisions using his principles:
+            1. Focus on the quality and predictability of the business.
+            2. Rely on mental models from multiple disciplines to analyze investments.
+            3. Look for strong, durable competitive advantages (moats).
+            4. Emphasize long-term thinking and patience.
+            5. Value management integrity and competence.
+            6. Prioritize businesses with high returns on invested capital.
+            7. Pay a fair price for wonderful businesses.
+            8. Never overpay, always demand a margin of safety.
+            9. Avoid complexity and businesses you don't understand.
+            10. "Invert, always invert" - focus on avoiding stupidity rather than seeking brilliance.
+            """,
+            """
+            Rules:
+            - Praise businesses with predictable, consistent operations and cash flows.
+            - Value businesses with high ROIC and pricing power.
+            - Prefer simple businesses with understandable economics.
+            - Admire management with skin in the game and shareholder-friendly capital allocation.
+            - Focus on long-term economics rather than short-term metrics.
+            - Be skeptical of businesses with rapidly changing dynamics or excessive share dilution.
+            - Avoid excessive leverage or financial engineering.
+            """,
+            f"""When providing your reasoning, be thorough and specific by:
+            1. Explaining the key factors that influenced your decision the most (both positive and negative)
+            2. Applying at least 2-3 specific mental models or disciplines to explain your thinking
+            3. Providing quantitative evidence where relevant (e.g., specific ROIC values, margin trends)
+            4. Citing what you would "avoid" in your analysis (invert the problem)
+            5. Using {self.agent_name}'s direct, pithy conversational style in your explanation
+            """,
+            """
+            For example, if bullish: "The high ROIC of 22% demonstrates the company's moat. When applying basic microeconomics, we can see that competitors would struggle to..."
+            """,
+            """
+            For example, if bearish: "I see this business making a classic mistake in capital allocation. As I've often said about [relevant Mungerism], this company appears to be..."
+            """,
+            "Return a rational recommendation: bullish, bearish, or neutral, with a confidence level (0-100) and thorough reasoning."
+        ],
+        response_mime_type="application/json",
+        response_schema={
+            "type": "OBJECT",
+            "properties": {
+                "signal": {"type": "STRING", "enum": ["bullish", "bearish", "neutral"]},
+                "confidence": {"type": "NUMBER", "minimum": 0, "maximum": 100},
+                "reasoning": {"type": "STRING"}
+            },
+            "required": ["signal","confidence","reasoning"],
+            },
+        )
+
+        delay = initial_delay
+        client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+        for attempt in range(1, max_retries + 1):
+            try: 
+                response = client.models.generate_content(
+                    model=self.model_name,
+                       contents=f"Based on the following analysis for {self.ticker}, produce your {self.agent_name}-style investment signal: Analysis Data for {self.ticker}: {self.analysis_data}",
+                    config=template,
+                )
+                response = response.parsed
+            except:
+                if attempt == max_retries:
+                    response = {"signal":"None", "confidence":"N/A", "reasoning":"None"}
+                    logging.warning(f"{self.agent_name} AI agent failed for '{self.ticker}' after {max_retries} attempts")
+                    
+                time.sleep(delay)
+                delay = int(delay * backoff_factor)
+
+        return response

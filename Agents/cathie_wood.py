@@ -1,6 +1,15 @@
-import pandas as pd
-from Components.Fundamentals import search_line_items, get_metric_value
+import math
 from pandas import DataFrame
+import pandas as pd
+import numpy as np
+import logging
+import time
+import os
+
+from google import genai
+from google.genai import types
+
+from Components.Fundamentals import search_line_items, get_metric_value
 
 class CathieWoodAgent:
     """
@@ -18,10 +27,9 @@ class CathieWoodAgent:
         self.limit = kwargs.get('analysis_limit')
         self.analysis_data = {} # Storing returned results in dict
         self.threshold_matrix_path = kwargs.get('threshold_matrix_path',None)
+        self.model_name = kwargs.get('model_name','gemini-2.5-flash')
         
     def analyze(self):
-        #metrics = get_financial_metrics(ticker, end_date, period="annual", limit=5)
-        # Request multiple periods of data (annual or TTM) for a more robust view.
         financial_line_items, self.SIC_code = search_line_items(
             self.ticker,
             [
@@ -63,7 +71,7 @@ class CathieWoodAgent:
 
         self.analysis_data = {
             "name": self.agent_name,
-            "signal": signal,
+            #"signal": signal,
             "score": total_score,
             "max_score": max_possible_score,
             "disruptive_analysis": disruptive_analysis,
@@ -71,7 +79,9 @@ class CathieWoodAgent:
             "valuation_analysis": valuation_analysis
         }
 
-        return self.analysis_data
+        self.llm_output = self.generate_llm_output()
+
+        return {"name":self.analysis_data.name,"signal": self.llm_output.signal, "score":self.analysis_data.score, "confidence": self.llm_output.confidence, "reasoning": self.llm_output.reasoning}
 
     def analyze_disruptive_potential(self, financial_line_items: DataFrame):
         """
@@ -363,3 +373,78 @@ class CathieWoodAgent:
             "intrinsic_value": intrinsic_value,
             "margin_of_safety": margin_of_safety
         }
+
+    def generate_llm_output(
+        self,
+        max_retries: int = 3,
+        initial_delay: int = 5,
+        backoff_factor: float = 1.5
+    ):
+        """
+        Generates investment decisions in the style of Cathie Wood.
+        """
+
+        template = types.GenerateContentConfig(
+            system_instruction=[
+            f"""You are a {self.agent_name} AI agent, making investment decisions using his principles:
+            1. Seek companies leveraging disruptive innovation.
+            2. Emphasize exponential growth potential, large TAM.
+            3. Focus on technology, healthcare, or other future-facing sectors.
+            4. Consider multi-year time horizons for potential breakthroughs.
+            5. Accept higher volatility in pursuit of high returns.
+            6. Evaluate management's vision and ability to invest in R&D.
+            """,
+            """
+            Rules:
+            - Identify disruptive or breakthrough technology.
+            - Evaluate strong potential for multi-year revenue growth.
+            - Check if the company can scale effectively in a large market.
+            - Use a growth-biased valuation approach.
+            """,
+            f"""When providing your reasoning, be thorough and specific by:
+            1. Identifying the specific disruptive technologies/innovations the company is leveraging
+            2. Highlighting growth metrics that indicate exponential potential (revenue acceleration, expanding TAM)
+            3. Discussing the long-term vision and transformative potential over 5+ year horizons
+            4. Explaining how the company might disrupt traditional industries or create new markets
+            5. Addressing R&D investment and innovation pipeline that could drive future growth
+            6. Using {self.agent_name}'s optimistic, future-focused, and conviction-driven voice
+            """,
+            """
+            For example, if bullish: "The company's AI-driven platform is transforming the $500B healthcare analytics market, with evidence of platform adoption accelerating from 40% to 65% YoY. Their R&D investments of 22% of revenue are creating a technological moat that positions them to capture a significant share of this expanding market. The current valuation doesn't reflect the exponential growth trajectory we expect as..."
+            """,
+            """
+            For example, if bearish: "While operating in the genomics space, the company lacks truly disruptive technology and is merely incrementally improving existing techniques. R&D spending at only 8% of revenue signals insufficient investment in breakthrough innovation. With revenue growth slowing from 45% to 20% YoY, there's limited evidence of the exponential adoption curve we look for in transformative companies..."
+            """,
+            "Return a rational recommendation: bullish, bearish, or neutral, with a confidence level (0-100) and thorough reasoning."
+        ],
+        response_mime_type="application/json",
+        response_schema={
+            "type": "OBJECT",
+            "properties": {
+                "signal": {"type": "STRING", "enum": ["bullish", "bearish", "neutral"]},
+                "confidence": {"type": "NUMBER", "minimum": 0, "maximum": 100},
+                "reasoning": {"type": "STRING"}
+            },
+            "required": ["signal","confidence","reasoning"],
+            },
+        )
+
+        delay = initial_delay
+        client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+        for attempt in range(1, max_retries + 1):
+            try: 
+                response = client.models.generate_content(
+                    model=self.model_name,
+                       contents=f"Based on the following analysis for {self.ticker}, produce your {self.agent_name}-style investment signal: Analysis Data for {self.ticker}: {self.analysis_data}",
+                    config=template,
+                )
+                response = response.parsed
+            except:
+                if attempt == max_retries:
+                    response = {"signal":"None", "confidence":"N/A", "reasoning":"None"}
+                    logging.warning(f"{self.agent_name} AI agent failed for '{self.ticker}' after {max_retries} attempts")
+                    
+                time.sleep(delay)
+                delay = int(delay * backoff_factor)
+
+        return response

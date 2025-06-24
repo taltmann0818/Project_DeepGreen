@@ -1,16 +1,27 @@
+import math
 from pandas import DataFrame
-from Components.Fundamentals import search_line_items, get_metric_value
 import pandas as pd
+import numpy as np
+import logging
+import time
+import os
+
+from google import genai
+from google.genai import types
+
+from Components.Fundamentals import search_line_items, get_metric_value
 
 class WarrenBuffettAgent:
+    """Analyzes stocks using Buffett's principles and LLM reasoning."""
     def __init__(self, ticker, metrics, **kwargs):
         self.agent_name = "Warren Buffett"
         self.metrics = metrics
         self.ticker = ticker
         self.period = kwargs.get('analysis_period')
         self.limit = kwargs.get('analysis_limit')
-        self.analysis_data = {} # Storing returned results in dict
         self.threshold_matrix_path = kwargs.get('threshold_matrix_path',None)
+        self.model_name = kwargs.get('model_name','gemini-2.5-flash')
+        self.analysis_data = {} # Storing returned results in dict  
         
     def analyze(self):
         financial_line_items, self.SIC_code = search_line_items(
@@ -66,7 +77,7 @@ class WarrenBuffettAgent:
         # Combine all analysis results
         self.analysis_data = {
             "name": self.agent_name,
-            "signal": signal,
+            #"signal": signal,
             "score": total_score,
             "max_score": max_possible_score,
             "fundamental_analysis": fundamental_analysis,
@@ -77,7 +88,9 @@ class WarrenBuffettAgent:
             "margin_of_safety": margin_of_safety,
         }
 
-        return self.analysis_data
+        self.llm_output = self.generate_llm_output()
+
+        return {"name":self.analysis_data.name,"signal": self.llm_output.signal, "score":self.analysis_data.score, "confidence": self.llm_output.confidence, "reasoning": self.llm_output.reasoning}
 
     def analyze_fundamentals(self, financial_line_items: DataFrame):
         """Analyze company fundamentals based on Buffett's criteria."""
@@ -340,3 +353,99 @@ class WarrenBuffettAgent:
             },
             "details": ["Intrinsic value calculated using DCF model with owner earnings"],
         }
+
+    def generate_llm_output(
+        self,
+        max_retries: int = 3,
+        initial_delay: int = 5,
+        backoff_factor: float = 1.5
+    ):
+        """Get investment decision from LLM with Buffett's principles"""
+
+        template = types.GenerateContentConfig(
+            system_instruction=[
+            f"""You are a {self.agent_name}, the Oracle of Omaha. Analyze investment opportunities using my proven methodology developed over 60+ years of investing.""",
+            """
+            MY CORE PRINCIPLES:
+            1. Circle of Competence: "Risk comes from not knowing what you're doing." Only invest in businesses I thoroughly understand.
+            2. Economic Moats: Seek companies with durable competitive advantages - pricing power, brand strength, scale advantages, switching costs.
+            3. Quality Management: Look for honest, competent managers who think like owners and allocate capital wisely.
+            4. Financial Fortress: Prefer companies with strong balance sheets, consistent earnings, and minimal debt.
+            5. Intrinsic Value & Margin of Safety: Pay significantly less than what the business is worth - "Price is what you pay, value is what you get."
+            6. Long-term Perspective: "Our favorite holding period is forever." Look for businesses that will prosper for decades.
+            7. Pricing Power: The best businesses can raise prices without losing customers.
+            """,
+            """
+            MY CIRCLE OF COMPETENCE PREFERENCES:
+                STRONGLY PREFER:
+                - Consumer staples with strong brands (Coca-Cola, P&G, Walmart, Costco)
+                - Commercial banking (Bank of America, Wells Fargo) - NOT investment banking
+                - Insurance (GEICO, property & casualty)
+                - Railways and utilities (BNSF, simple infrastructure)
+                - Simple industrials with moats (UPS, FedEx, Caterpillar)
+                - Energy companies with reserves and pipelines (Chevron, not exploration)
+
+                GENERALLY AVOID:
+                - Complex technology (semiconductors, software, except Apple due to consumer ecosystem)
+                - Biotechnology and pharmaceuticals (too complex, regulatory risk)
+                - Airlines (commodity business, poor economics)
+                - Cryptocurrency and fintech speculation
+                - Complex derivatives or financial instruments
+                - Rapid technology change industries
+                - Capital-intensive businesses without pricing power
+
+                APPLE EXCEPTION: I own Apple not as a tech stock, but as a consumer products company with an ecosystem that creates switching costs.
+
+                MY INVESTMENT CRITERIA HIERARCHY:
+                First: Circle of Competence - If I don't understand the business model or industry dynamics, I don't invest, regardless of potential returns.
+                Second: Business Quality - Does it have a moat? Will it still be thriving in 20 years?
+                Third: Management - Do they act in shareholders' interests? Smart capital allocation?
+                Fourth: Financial Strength - Consistent earnings, low debt, strong returns on capital?
+                Fifth: Valuation - Am I paying a reasonable price for this wonderful business?
+            """,
+            f"""When providing your reasoning, be thorough and specific by:
+                1. Whether this falls within your circle of competence and why (CRITICAL FIRST STEP)
+                2. Your assessment of the business's competitive moat
+                3. Management quality and capital allocation
+                4. Financial health and consistency
+                5. Valuation relative to intrinsic value
+                6. Long-term prospects and any red flags
+                7. How this compares to opportunities in your portfolio
+                8. Write as {self.agent_name} would speak - plainly, with conviction, and with specific references to the data provided.
+            """,
+            """
+             Remember: I'd rather own a wonderful business at a fair price than a fair business at a wonderful price. And when in doubt, the answer is usually "no" - there's no penalty for missed opportunities, only for permanent capital loss.
+            """,
+            "Return a rational recommendation: bullish, bearish, or neutral, with a confidence level (0-100) and thorough reasoning."
+        ],
+        response_mime_type="application/json",
+        response_schema={
+            "type": "OBJECT",
+            "properties": {
+                "signal": {"type": "STRING", "enum": ["bullish", "bearish", "neutral"]},
+                "confidence": {"type": "NUMBER", "minimum": 0, "maximum": 100},
+                "reasoning": {"type": "STRING"}
+            },
+            "required": ["signal","confidence","reasoning"],
+            },
+        )
+
+        delay = initial_delay
+        client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+        for attempt in range(1, max_retries + 1):
+            try: 
+                response = client.models.generate_content(
+                    model=self.model_name,
+                       contents=f"Based on the following analysis for {self.ticker}, produce your {self.agent_name}-style investment signal: Analysis Data for {self.ticker}: {self.analysis_data}",
+                    config=template,
+                )
+                response = response.parsed
+            except:
+                if attempt == max_retries:
+                    response = {"signal":"None", "confidence":"N/A", "reasoning":"None"}
+                    logging.warning(f"{self.agent_name} AI agent failed for '{self.ticker}' after {max_retries} attempts")
+                    
+                time.sleep(delay)
+                delay = int(delay * backoff_factor)
+
+        return response

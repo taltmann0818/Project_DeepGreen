@@ -1,7 +1,15 @@
 import statistics
 from pandas import DataFrame
-from Components.Fundamentals import search_line_items, get_metric_value
 import pandas as pd
+import numpy as np
+import logging
+import time
+import os
+
+from google import genai
+from google.genai import types
+
+from Components.Fundamentals import search_line_items, get_metric_value
 
 class PhilFisherAgent():
     """
@@ -21,15 +29,11 @@ class PhilFisherAgent():
         self.ticker = ticker
         self.period = kwargs.get('analysis_period')
         self.limit = kwargs.get('analysis_limit')
-        self.analysis_data = {} # Storing returned results in dict
         self.threshold_matrix_path = kwargs.get('threshold_matrix_path',None)
+        self.model_name = kwargs.get('model_name','gemini-2.5-flash')
+        self.analysis_data = {} # Storing returned results in dict  
         
     def analyze(self):
-        # Include relevant line items for Phil Fisher's approach:
-        #   - Growth & Quality: revenue, net_income, earnings_per_share, R&D expense
-        #   - Margins & Stability: operating_income, operating_margin, gross_margin
-        #   - Management Efficiency & Leverage: total_debt, shareholders_equity, free_cash_flow
-        #   - Valuation: net_income, free_cash_flow (for P/E, P/FCF), ebit, ebitda
         financial_line_items, self.SIC_code = search_line_items(
             self.ticker,
             [
@@ -95,7 +99,7 @@ class PhilFisherAgent():
 
         self.analysis_data = {
             "name": self.agent_name,
-            "signal": signal,
+            #"signal": signal,
             "score": total_score,
             "max_score": max_possible_score,
             "growth_quality": growth_quality,
@@ -106,7 +110,9 @@ class PhilFisherAgent():
             "sentiment_analysis": sentiment_analysis,
         }
 
-        return self.analysis_data
+        self.llm_output = self.generate_llm_output()
+
+        return {"name":self.analysis_data.name,"signal": self.llm_output.signal, "score":self.analysis_data.score, "confidence": self.llm_output.confidence, "reasoning": self.llm_output.reasoning}
 
 
     def analyze_fisher_growth_quality(self, financial_line_items: DataFrame):
@@ -469,3 +475,72 @@ class PhilFisherAgent():
             details.append("Mostly positive/neutral headlines")
 
         return {"score": score, "details": "; ".join(details)}
+
+    def generate_llm_output(
+        self,
+        max_retries: int = 3,
+        initial_delay: int = 5,
+        backoff_factor: float = 1.5
+    ):
+        """
+        Generates an investment decision in the style of Benjamin Graham:
+        - Value emphasis, margin of safety, net-nets, conservative balance sheet, stable earnings.
+        - Return the result in a JSON structure: { signal, confidence, reasoning }.
+        """
+
+        template = types.GenerateContentConfig(
+            system_instruction=[
+            f"""You are a {self.agent_name} AI agent, making investment decisions using his principles:
+            1. Emphasize long-term growth potential and quality of management.
+            2. Focus on companies investing in R&D for future products/services.
+            3. Look for strong profitability and consistent margins.
+            4. Willing to pay more for exceptional companies but still mindful of valuation.
+            5. Rely on thorough research (scuttlebutt) and thorough fundamental checks.
+            """,
+            f"""When providing your reasoning, be thorough and specific by:
+            1. Discussing the company's growth prospects in detail with specific metrics and trends
+            2. Evaluating management quality and their capital allocation decisions
+            3. Highlighting R&D investments and product pipeline that could drive future growth
+            4. Assessing consistency of margins and profitability metrics with precise numbers
+            5. Explaining competitive advantages that could sustain growth over 3-5+ years
+            6. Using {self.agent_name}'s methodical, growth-focused, and long-term oriented voice
+            """,
+            """
+            For example, if bullish: "This company exhibits the sustained growth characteristics we seek, with revenue increasing at 18% annually over five years. Management has demonstrated exceptional foresight by allocating 15% of revenue to R&D, which has produced three promising new product lines. The consistent operating margins of 22-24% indicate pricing power and operational efficiency that should continue to..."
+            """,
+            """
+             For example, if bearish: "Despite operating in a growing industry, management has failed to translate R&D investments (only 5% of revenue) into meaningful new products. Margins have fluctuated between 10-15%, showing inconsistent operational execution. The company faces increasing competition from three larger competitors with superior distribution networks. Given these concerns about long-term growth sustainability..."
+            """,
+            "Return a rational recommendation: bullish, bearish, or neutral, with a confidence level (0-100) and thorough reasoning."
+        ],
+        response_mime_type="application/json",
+        response_schema={
+            "type": "OBJECT",
+            "properties": {
+                "signal": {"type": "STRING", "enum": ["bullish", "bearish", "neutral"]},
+                "confidence": {"type": "NUMBER", "minimum": 0, "maximum": 100},
+                "reasoning": {"type": "STRING"}
+            },
+            "required": ["signal","confidence","reasoning"],
+            },
+        )
+
+        delay = initial_delay
+        client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+        for attempt in range(1, max_retries + 1):
+            try: 
+                response = client.models.generate_content(
+                    model=self.model_name,
+                       contents=f"Based on the following analysis for {self.ticker}, produce your {self.agent_name}-style investment signal: Analysis Data for {self.ticker}: {self.analysis_data}",
+                    config=template,
+                )
+                response = response.parsed
+            except:
+                if attempt == max_retries:
+                    response = {"signal":"None", "confidence":"N/A", "reasoning":"None"}
+                    logging.warning(f"{self.agent_name} AI agent failed for '{self.ticker}' after {max_retries} attempts")
+                    
+                time.sleep(delay)
+                delay = int(delay * backoff_factor)
+
+        return response
