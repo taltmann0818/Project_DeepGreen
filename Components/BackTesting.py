@@ -1,6 +1,13 @@
 import vectorbt as vbt
 from vectorbt.portfolio.enums import SizeType, Direction, NoOrder, OrderStatus, OrderSide
-from Agents.portfolio_manager import PortfolioManagerAgent
+
+# Conditional import for portfolio manager (requires cvxpy)
+try:
+    from Agents.portfolio_manager import PortfolioManagerAgent
+    PORTFOLIO_MANAGER_AVAILABLE = True
+except ImportError:
+    PORTFOLIO_MANAGER_AVAILABLE = False
+    PortfolioManagerAgent = None
 
 class BackTesting:
     def __init__(self,data,ticker,initial_capital,pct_change_entry=0.05,pct_change_exit=0.05,**kwargs):
@@ -28,27 +35,31 @@ class BackTesting:
             self.data['signal'] = 'hold'
             self.data.loc[self.data['entry_signal'], 'signal'] = 'buy'
             self.data.loc[self.data['exit_signal'], 'signal'] = 'sell'
-        
+
         else:
             raise ValueError("Invalid Ticker. Please provide a string.")
 
         if self.use_sizing:
-            size_df = self.data
-            size_df['sharpe_series'] = 0.68
-            size_df['var_series'] = 0.05
-            size_df['holdings'] = 0.0
+            if not PORTFOLIO_MANAGER_AVAILABLE:
+                print("Warning: PortfolioManagerAgent not available (requires cvxpy), using default sizing")
+                self.position_size = 1.0
+            else:
+                size_df = self.data
+                size_df['sharpe_series'] = 0.68
+                size_df['var_series'] = 0.05
+                size_df['holdings'] = 0.0
 
-            self.position_size = PortfolioManagerAgent(capital=self.initial_cash).compute_sizes_from_series(size_df['signal'],
-                                                              size_df['Close'],
-                                                              size_df['var_series'],
-                                                              size_df['sharpe_series'],
-                                                              size_df['holdings'])
+                self.position_size = PortfolioManagerAgent(capital=self.initial_cash).compute_sizes_from_series(size_df['signal'],
+                                                                  size_df['Close'],
+                                                                  size_df['var_series'],
+                                                                  size_df['sharpe_series'],
+                                                                  size_df['holdings'])
         else:
             self.position_size = 1.0
 
     @staticmethod
     def VectorBTBackTestSignals(self, bt_data, initial_cash, size):
-        
+
         portfolio = vbt.Portfolio.from_signals(
             bt_data['Close'],
             entries=bt_data['entry_signal'],
@@ -70,7 +81,7 @@ class BackTesting:
         #print(f"Running vectorbt backtest for {self.ticker}")
         # Run the backtest using vectorbt's Portfolio
         self.pf = self.VectorBTBackTestSignals(self, self.data, self.initial_cash, self.position_size)
-        
+
     def plot_performance(self):
         vbt.settings.set_theme("dark")
 

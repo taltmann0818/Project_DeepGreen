@@ -1,185 +1,595 @@
 #!/usr/bin/env python
 """
-One-shot CI benchmark runner
-===========================
+Modular ML Model Benchmark Runner with W&B Integration
+=====================================================
+
+A rapid, one-shot ML development script for benchmarking multiple models
+with Weights & Biases integration and LLM-generated reports.
 
 Example
 -------
-$ python benchmark_models.py --models Tempus_v2 --sample-size 100 --out-dir artefacts --sharpe-min 1.0
+$ python benchmark_models.py --experiment-run "model_comparison_v1" --models Tempus_v2 Tempus_v3_8 --years 1
 """
-import argparse, logging, os, random, sys, time
-from tqdm import tqdm
-from datetime import date
+import argparse
+import logging
+import os
+import sys
+import time
+import json
+import importlib.util
+from datetime import date, datetime
 from pathlib import Path
+from typing import Dict, List, Any, Optional
 
 import numpy as np
 import pandas as pd
-from polygon import RESTClient
 import plotly.graph_objects as go
-import quantstats_lumi as qs
+import plotly.express as px
+from plotly.subplots import make_subplots
+import quantstats as qs
+from tqdm import tqdm
+
+# Optional dependencies
+try:
+    import wandb
+    WANDB_AVAILABLE = True
+except ImportError:
+    WANDB_AVAILABLE = False
+    wandb = None
+
+try:
+    import google.generativeai as genai
+    GEMINI_AVAILABLE = True
+except ImportError:
+    GEMINI_AVAILABLE = False
+    genai = None
 
 from Components.TickerData import TickerData
-from Components.ModelInference import onnx_predict
 from Components.BackTesting import BackTesting
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s | %(levelname)s | %(message)s")
 
-# ──────────────────────────────────────────────────────────────────────────────
-_INDEX_CONFIG = {  # table-index, column-index per Wikipedia page
-    'NASDAQ':        ('https://en.wikipedia.org/wiki/Nasdaq-100',                 4, 1),
-    'S&P500':        ('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies',0, 0),
-    'RUSSELL1000':   ('https://en.wikipedia.org/wiki/Russell_1000_Index',        3, 1),
-    'DOWJONES':      ('https://en.wikipedia.org/wiki/Dow_Jones_Industrial_Average',2, 2),
-}
 
+class ModelBenchmarkRunner:
+    """Modular benchmark runner for ML models with W&B integration"""
 
-# ──────────────────────────────────────────────────────────────────────────────
-def get_index_tickers(indices, sample_size):
-    """Return a de-duplicated <sample_size> random ticker list."""
-    tickers = []
-    for idx in indices:
-        url, tbl, col = _INDEX_CONFIG[idx]
-        df = pd.read_html(url)[tbl]
-        tickers.extend(df.iloc[:, col].dropna().astype(str).tolist())
-    tickers = list(dict.fromkeys(tickers))          # dedupe, keep order
-    if sample_size > len(tickers):
-        raise ValueError("sample_size larger than available tickers")
-    return random.sample(tickers, sample_size)
+    def __init__(self, experiment_run: str, models: List[str], years: int = 1, 
+                 out_dir: str = "benchmark_results"):
+        self.experiment_run = experiment_run
+        self.models = models
+        self.years = years
+        self.out_dir = Path(out_dir)
+        self.out_dir.mkdir(exist_ok=True)
 
+        # Initialize W&B
+        self.wandb_run = None
+        self.initialize_wandb()
 
-def score_model(model_name, processed, raw, index_returns,
-                entry_th=0.02, exit_th=0.07708,
-                initial_capital=10_000, rf=0.04236,
-               *, show_bar=True):
-    """Run the full back-test for one ONNX model; return (summary_row, returns_df)."""
-    rows, returns = [], []
-    tickers = processed['Ticker'].unique()
-    loop = tqdm(tickers,
-                desc=f"🔮  {model_name}",
-                leave=False, position=1) if show_bar else tickers
-    
-    for ticker in loop:
-        preds_df = onnx_predict(f"Models/{model_name}.onnx",
-                                processed[processed['Ticker'] == ticker],
-                                window_size=20)
-        preds_df = pd.merge(
-            preds_df,
-            raw[raw['Ticker'] == ticker][['open', 'high', 'low', 'volume', 'close']],
-            left_index=True, right_index=True, how='left'
+        # Initialize Gemini
+        self.gemini_model = None
+        self.initialize_gemini()
+
+        # Model results storage
+        self.model_results = {}
+        self.benchmark_data = None
+
+    def initialize_wandb(self):
+        """Initialize Weights & Biases"""
+        if not WANDB_AVAILABLE:
+            logging.warning("⚠️  W&B not available (install with: pip install wandb)")
+            return
+
+        try:
+            self.wandb_run = wandb.init(
+                project="model-benchmark",
+                name=self.experiment_run,
+                config={
+                    "models": self.models,
+                    "years": self.years,
+                    "experiment_run": self.experiment_run
+                }
+            )
+            logging.info("✅ Initialized W&B run: %s", self.experiment_run)
+        except Exception as e:
+            logging.warning("⚠️  Could not initialize W&B: %s", e)
+
+    def initialize_gemini(self):
+        """Initialize Google Gemini API"""
+        if not GEMINI_AVAILABLE:
+            logging.warning("⚠️  Google Generative AI not available (install with: pip install google-generativeai)")
+            return
+
+        try:
+            api_key = os.getenv("GEMINI_API_KEY")
+            if not api_key:
+                logging.warning("⚠️  GEMINI_API_KEY not set, LLM reports disabled")
+                return
+
+            genai.configure(api_key=api_key)
+            self.gemini_model = genai.GenerativeModel('gemini-2.0-flash-exp')
+            logging.info("✅ Initialized Gemini API")
+        except Exception as e:
+            logging.warning("⚠️  Could not initialize Gemini: %s", e)
+
+    def load_model_inference(self, model_name: str):
+        """Dynamically load model inference class"""
+        model_dir = Path("Models") / model_name
+        inference_path = model_dir / "inference.py"
+
+        if not inference_path.exists():
+            raise FileNotFoundError(f"Inference script not found: {inference_path}")
+
+        # Load the inference module
+        spec = importlib.util.spec_from_file_location(f"{model_name}_inference", inference_path)
+        inference_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(inference_module)
+
+        # Get the inference class (assumes naming convention)
+        class_name = f"{model_name.replace('_', '').replace('.', '')}Inference"
+        if hasattr(inference_module, class_name):
+            return getattr(inference_module, class_name)()
+        else:
+            # Try common naming patterns
+            for attr_name in dir(inference_module):
+                attr = getattr(inference_module, attr_name)
+                if (hasattr(attr, '__class__') and 
+                    hasattr(attr, 'predict') and 
+                    'Inference' in attr.__class__.__name__):
+                    return attr
+
+        raise AttributeError(f"Could not find inference class in {inference_path}")
+
+    def load_model_datamodule(self, model_name: str):
+        """Load model-specific datamodule"""
+        model_dir = Path("Models") / model_name
+        datamodule_path = model_dir / "datamodule.py"
+
+        if not datamodule_path.exists():
+            logging.warning("⚠️  No datamodule found for %s, using default", model_name)
+            return None
+
+        # Load the datamodule
+        spec = importlib.util.spec_from_file_location(f"{model_name}_datamodule", datamodule_path)
+        datamodule_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(datamodule_module)
+
+        # Get the datamodule class
+        for attr_name in dir(datamodule_module):
+            attr = getattr(datamodule_module, attr_name)
+            if (hasattr(attr, '__class__') and 
+                hasattr(attr, 'prepare_data') and 
+                'DataModule' in attr.__class__.__name__):
+                return attr(years=self.years, use_cache=True)
+
+        return None
+
+    def prepare_benchmark_data(self):
+        """Prepare benchmark data (NDX index)"""
+        try:
+            # Use TickerData to get benchmark data
+            ticker_data = TickerData(
+                ticker='I:NDX',
+                indicator_list=[],
+                years=self.years
+            )
+
+            benchmark_prices = ticker_data.get_ohlc_for_ticker('I:NDX')
+            if benchmark_prices is not None and 'close' in benchmark_prices.columns:
+                benchmark_returns = benchmark_prices['close'].pct_change().dropna()
+                self.benchmark_data = benchmark_returns.cumsum().reset_index()
+                self.benchmark_data.columns = ['Date', 'bench_cumulative_return']
+                logging.info("✅ Loaded benchmark data (NDX)")
+            else:
+                logging.warning("⚠️  Could not load benchmark data")
+                self.benchmark_data = None
+        except Exception as e:
+            logging.error("❌ Error loading benchmark data: %s", e)
+            self.benchmark_data = None
+
+    def run_model_backtest(self, model_name: str, inference_class, data: pd.DataFrame) -> Dict[str, Any]:
+        """Run backtest for a single model"""
+        logging.info("🔮 Running backtest for %s", model_name)
+
+        # Run inference
+        predictions = inference_class.predict(data, window_size=20, use_cache=True)
+
+        # Merge with price data for backtesting
+        price_columns = ['open', 'high', 'low', 'close', 'volume']
+        available_price_cols = [col for col in price_columns if col in data.columns]
+
+        if not available_price_cols:
+            raise ValueError(f"No price data available for backtesting in {model_name}")
+
+        backtest_data = pd.merge(
+            predictions,
+            data[available_price_cols + ['Ticker']],
+            left_index=True, right_index=True, how='inner'
         )
 
-        bt = BackTesting(
-            preds_df.rename(columns={'open':'Open','high':'High',
-                                     'low':'Low','close':'Close',
-                                     'volume':'Volume'}),
-            ticker, initial_capital, entry_th, exit_th, use_sizing=False)
-        bt.run_simulation()
-        returns.append(pd.DataFrame({"Returns": bt.pf.returns(),
-                                     "Ticker":  ticker}))
+        # Run backtests per ticker
+        results = []
+        returns_list = []
 
-        m = np.array(qs.reports.metrics(bt.pf.returns(),
-                                        index_returns, mode='full',
-                                        rf=rf, display=False))
+        tickers = backtest_data['Ticker'].unique()
+        for ticker in tqdm(tickers, desc=f"Backtesting {model_name}", leave=False):
+            ticker_data = backtest_data[backtest_data['Ticker'] == ticker].copy()
 
-        rows.append(dict(
-            backtesting_date=date.today(), model=model_name, ticker=ticker,
-            cumReturn=m[4][1], CAGR=m[5][1],
-            Sharpe=m[10][1], Sortino=m[12][1],
-            MaxDrawdown=m[16][1], dVaR=m[27][1],
-            Alpha=m[58][1], Beta=m[57][1]
-        ))
-        logging.info("%s | %s done", model_name, ticker)
-    return pd.DataFrame(rows), pd.concat(returns, axis=0)
+            if len(ticker_data) < 50:  # Skip if insufficient data
+                continue
 
+            # Rename columns for BackTesting class
+            ticker_data = ticker_data.rename(columns={
+                'open': 'Open', 'high': 'High', 'low': 'Low', 
+                'close': 'Close', 'volume': 'Volume'
+            })
 
-def aggregate_returns(returns_all):
-    """Collapse ticker-level returns to strategy-level cumulative series."""
-    returns_all = returns_all.reset_index().rename(columns={"index":"Date"})
-    returns_all = returns_all.sort_values(['Ticker', 'Date'])
-    returns_all['cum_return'] = returns_all.groupby('Ticker')['Returns'].cumsum()
-    strat = (returns_all.groupby('Date')['cum_return']
-                      .mean()
-                      .reset_index(name='strat_cumulative_return'))
-    strat['Date'] = strat['Date'].dt.tz_localize(None)
-    return strat
+            try:
+                bt = BackTesting(
+                    ticker_data, ticker, initial_capital=10000,
+                    pct_change_entry=0.02, pct_change_exit=0.07708,
+                    use_sizing=False
+                )
+                bt.run_simulation()
 
+                # Calculate metrics
+                portfolio_returns = bt.pf.returns()
+                if len(portfolio_returns) > 0:
+                    returns_list.append(pd.DataFrame({
+                        "Returns": portfolio_returns,
+                        "Ticker": ticker
+                    }))
 
-def plot(strat, bench, title, path):
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=strat['Date'], y=strat['strat_cumulative_return'],
-        name=title))
-    fig.add_trace(go.Scatter(
-        x=bench['Date'], y=bench['bench_cumulative_return'],
-        name='NDX Benchmark', line=dict(color='grey')))
-    fig.add_hline(y=0,line_dash="dash",line_color="black",line_width=2)
-    fig.update_layout(title='Model Backesting Summary',
-                      xaxis_title="Date",
-                      yaxis_title="Cumulative Return %",
-                      yaxis_tickformat=".1%",
-                      height=600,
-                      template='ggplot2',
-                      legend=dict(orientation="h", yanchor="bottom", y=1.02)
-                     )
-    fig.write_html(path)
-    logging.info("⬆️  wrote %s", path)
+                    # Calculate performance metrics
+                    metrics = self.calculate_metrics(portfolio_returns)
+                    metrics.update({
+                        'model': model_name,
+                        'ticker': ticker,
+                        'backtesting_date': date.today()
+                    })
+                    results.append(metrics)
 
+            except Exception as e:
+                logging.warning("⚠️  Backtest failed for %s-%s: %s", model_name, ticker, e)
+                continue
 
-# ──────────────────────────────────────────────────────────────────────────────
-def main():
-    p = argparse.ArgumentParser(description="CI benchmark runner")
-    p.add_argument("--models", nargs="+", required=True,
-                   help="model names (without .onnx)")
-    p.add_argument("--sample-size", type=int, default=500)
-    p.add_argument("--out-dir", default="artefacts")
-    p.add_argument("--indices", nargs="+",
-                   default=["S&P500", "RUSSELL1000", "DOWJONES"])
-    p.add_argument("--sharpe-min", type=float, default=1.0,
-                   help="CI fails if Sharpe < this threshold")
-    cfg = p.parse_args()
+        # Aggregate results
+        if results:
+            results_df = pd.DataFrame(results)
+            returns_df = pd.concat(returns_list, axis=0) if returns_list else pd.DataFrame()
 
-    api_key = "XizU4KyrwjCA6bxHrR5_eQnUxwFFUnI2" #os.getenv("POLYGON_API_KEY")
-    if not api_key:
-        logging.error("Set POLYGON_API_KEY env var"); sys.exit(1)
+            # Calculate strategy-level returns
+            strategy_returns = self.aggregate_returns(returns_df) if not returns_df.empty else pd.DataFrame()
 
-    out = Path(cfg.out_dir); out.mkdir(exist_ok=True)
-
-    # 1) Universe
-    tickers = get_index_tickers(cfg.indices, cfg.sample_size)
-    logging.info("Back-testing on %d tickers: %s …", len(tickers), ", ".join(tickers[:10]))
-
-    # 2) Data pull (once!)
-    client = RESTClient(api_key, num_pools=50)
-    ind = ['ema_20','ema_50','ema_100','stoch_rsi14','macd','hmm_state','Close']
-    td = TickerData(tickers, ind, client=client)
-    processed, raw = td.process_all()
-
-    # index benchmark
-    index_ret = TickerData('I:NDX', [], client).get_ohlc_for_ticker('I:NDX')['close'].pct_change().tz_localize(None)
-    bench_df = index_ret.cumsum().reset_index().rename(columns={"date":"Date",
-                                                                "close":"bench_cumulative_return"})
-
-    # 3) Run each model
-    summaries = []
-    for m in tqdm(cfg.models, desc="🏗️  Models", position=0):
-        s_df, r_df = score_model(m, processed, raw, index_ret, show_bar=True)
-        summaries.append(s_df)
-        strat_curve = aggregate_returns(r_df)
-        plot(strat_curve, bench_df, f"{m} cumulative return", out/f"{m}_plot.html")
-
-        # CI pass/fail rule
-        if s_df['Sharpe'].mean() < cfg.sharpe_min:
-            logging.error("%s failed Sharpe threshold (%.2f < %.2f)",
-                          m, s_df['Sharpe'].mean(), cfg.sharpe_min)
-            exit_code = 1
+            return {
+                'results_df': results_df,
+                'returns_df': returns_df,
+                'strategy_returns': strategy_returns,
+                'model_info': inference_class.get_model_info()
+            }
         else:
-            exit_code = 0
+            logging.warning("⚠️  No successful backtests for %s", model_name)
+            return None
 
-    summary = pd.concat(summaries).sort_values(["model", "ticker"])
-    summary.to_csv(out / "benchmark_summary.csv", index=False)
-    logging.info("📄  wrote %s", out/"benchmark_summary.csv")
-    sys.exit(exit_code)
+    def calculate_metrics(self, returns: pd.Series) -> Dict[str, float]:
+        """Calculate performance metrics for returns series"""
+        try:
+            if len(returns) == 0:
+                return {}
+
+            # Basic metrics
+            total_return = (1 + returns).prod() - 1
+            annualized_return = (1 + total_return) ** (252 / len(returns)) - 1
+            volatility = returns.std() * np.sqrt(252)
+            sharpe_ratio = annualized_return / volatility if volatility > 0 else 0
+
+            # Drawdown
+            cumulative = (1 + returns).cumprod()
+            running_max = cumulative.expanding().max()
+            drawdown = (cumulative - running_max) / running_max
+            max_drawdown = drawdown.min()
+
+            return {
+                'total_return': total_return,
+                'annualized_return': annualized_return,
+                'volatility': volatility,
+                'sharpe_ratio': sharpe_ratio,
+                'max_drawdown': max_drawdown,
+                'num_trades': len(returns)
+            }
+        except Exception as e:
+            logging.warning("⚠️  Error calculating metrics: %s", e)
+            return {}
+
+    def aggregate_returns(self, returns_df: pd.DataFrame) -> pd.DataFrame:
+        """Aggregate ticker-level returns to strategy level"""
+        if returns_df.empty:
+            return pd.DataFrame()
+
+        returns_df = returns_df.reset_index().rename(columns={"index": "Date"})
+        returns_df = returns_df.sort_values(['Ticker', 'Date'])
+        returns_df['cum_return'] = returns_df.groupby('Ticker')['Returns'].cumsum()
+
+        strategy_returns = (returns_df.groupby('Date')['cum_return']
+                          .mean()
+                          .reset_index(name='strategy_cumulative_return'))
+
+        if 'Date' in strategy_returns.columns:
+            strategy_returns['Date'] = pd.to_datetime(strategy_returns['Date'])
+
+        return strategy_returns
+
+    def create_comparison_plots(self) -> Dict[str, go.Figure]:
+        """Create comparison plots for all models"""
+        plots = {}
+
+        # Performance comparison plot
+        fig = go.Figure()
+
+        for model_name, results in self.model_results.items():
+            if results and 'strategy_returns' in results and not results['strategy_returns'].empty:
+                strategy_data = results['strategy_returns']
+                fig.add_trace(go.Scatter(
+                    x=strategy_data['Date'],
+                    y=strategy_data['strategy_cumulative_return'],
+                    name=model_name,
+                    mode='lines'
+                ))
+
+        # Add benchmark if available
+        if self.benchmark_data is not None:
+            fig.add_trace(go.Scatter(
+                x=self.benchmark_data['Date'],
+                y=self.benchmark_data['bench_cumulative_return'],
+                name='NDX Benchmark',
+                line=dict(color='grey', dash='dash')
+            ))
+
+        fig.update_layout(
+            title='Model Performance Comparison',
+            xaxis_title='Date',
+            yaxis_title='Cumulative Return',
+            yaxis_tickformat='.1%',
+            height=600,
+            template='plotly_white'
+        )
+
+        plots['performance_comparison'] = fig
+
+        # Metrics comparison
+        metrics_data = []
+        for model_name, results in self.model_results.items():
+            if results and 'results_df' in results and not results['results_df'].empty:
+                model_metrics = results['results_df'].groupby('model').agg({
+                    'sharpe_ratio': 'mean',
+                    'total_return': 'mean',
+                    'max_drawdown': 'mean',
+                    'volatility': 'mean'
+                }).reset_index()
+                metrics_data.append(model_metrics)
+
+        if metrics_data:
+            all_metrics = pd.concat(metrics_data, ignore_index=True)
+
+            # Create metrics comparison chart
+            fig_metrics = make_subplots(
+                rows=2, cols=2,
+                subplot_titles=['Sharpe Ratio', 'Total Return', 'Max Drawdown', 'Volatility']
+            )
+
+            fig_metrics.add_trace(
+                go.Bar(x=all_metrics['model'], y=all_metrics['sharpe_ratio'], name='Sharpe'),
+                row=1, col=1
+            )
+            fig_metrics.add_trace(
+                go.Bar(x=all_metrics['model'], y=all_metrics['total_return'], name='Return'),
+                row=1, col=2
+            )
+            fig_metrics.add_trace(
+                go.Bar(x=all_metrics['model'], y=all_metrics['max_drawdown'], name='Drawdown'),
+                row=2, col=1
+            )
+            fig_metrics.add_trace(
+                go.Bar(x=all_metrics['model'], y=all_metrics['volatility'], name='Volatility'),
+                row=2, col=2
+            )
+
+            fig_metrics.update_layout(
+                title='Model Metrics Comparison',
+                height=600,
+                showlegend=False
+            )
+
+            plots['metrics_comparison'] = fig_metrics
+
+        return plots
+
+    def generate_llm_report(self, summary_data: Dict[str, Any]) -> str:
+        """Generate LLM narrative report using Gemini"""
+        if not self.gemini_model:
+            return "LLM report generation not available (Gemini API not configured)"
+
+        try:
+            # Prepare data summary for LLM
+            prompt = f"""
+            As a quantitative finance expert, analyze the following model benchmark results and provide a comprehensive report with recommendations.
+
+            Experiment: {self.experiment_run}
+            Models Tested: {', '.join(self.models)}
+            Testing Period: {self.years} year(s)
+
+            Performance Summary:
+            {json.dumps(summary_data, indent=2, default=str)}
+
+            Please provide:
+            1. Executive Summary of findings
+            2. Detailed analysis of each model's performance
+            3. Comparative analysis highlighting strengths and weaknesses
+            4. Risk assessment and drawdown analysis
+            5. Clear recommendation on which model(s) to adopt and why
+            6. Suggestions for further testing or improvements
+
+            Format the response in clear sections with actionable insights.
+            """
+
+            response = self.gemini_model.generate_content(prompt)
+            return response.text
+
+        except Exception as e:
+            logging.error("❌ Error generating LLM report: %s", e)
+            return f"Error generating LLM report: {e}"
+
+    def publish_wandb_report(self, plots: Dict[str, go.Figure], llm_report: str):
+        """Publish comprehensive report to W&B"""
+        if not WANDB_AVAILABLE or not self.wandb_run:
+            logging.info("⚠️  W&B not available, skipping report publishing")
+            return
+
+        try:
+            # Log plots
+            for plot_name, fig in plots.items():
+                self.wandb_run.log({plot_name: wandb.Html(fig.to_html())})
+
+            # Log summary metrics
+            summary_metrics = {}
+            for model_name, results in self.model_results.items():
+                if results and 'results_df' in results and not results['results_df'].empty:
+                    model_summary = results['results_df'].groupby('model').agg({
+                        'sharpe_ratio': 'mean',
+                        'total_return': 'mean',
+                        'max_drawdown': 'mean'
+                    }).to_dict('records')[0]
+
+                    for metric, value in model_summary.items():
+                        summary_metrics[f"{model_name}_{metric}"] = value
+
+            self.wandb_run.log(summary_metrics)
+
+            # Log LLM report
+            self.wandb_run.log({"llm_analysis": wandb.Html(f"<pre>{llm_report}</pre>")})
+
+            # Save artifacts
+            for model_name, results in self.model_results.items():
+                if results and 'results_df' in results:
+                    results_path = self.out_dir / f"{model_name}_results.csv"
+                    results['results_df'].to_csv(results_path, index=False)
+                    self.wandb_run.log_artifact(str(results_path))
+
+            logging.info("✅ Published report to W&B")
+
+        except Exception as e:
+            logging.error("❌ Error publishing to W&B: %s", e)
+
+    def run_benchmark(self):
+        """Run the complete benchmark process"""
+        logging.info("🚀 Starting benchmark run: %s", self.experiment_run)
+
+        # Prepare benchmark data
+        self.prepare_benchmark_data()
+
+        # Run each model
+        for model_name in self.models:
+            try:
+                logging.info("📊 Processing model: %s", model_name)
+
+                # Load model components
+                inference_class = self.load_model_inference(model_name)
+                datamodule = self.load_model_datamodule(model_name)
+
+                # Prepare data
+                if datamodule:
+                    datamodule.prepare_data()
+                    data = datamodule.get_inference_data()
+                else:
+                    # Fallback to default data loading
+                    ticker_data = TickerData(
+                        indicator_list=['ema_20', 'ema_50', 'ema_100', 'stoch_rsi14', 'macd', 'hmm_state', 'Close'],
+                        years=self.years
+                    )
+                    data = ticker_data.process_all()
+
+                if data is None or data.empty:
+                    logging.warning("⚠️  No data available for %s", model_name)
+                    continue
+
+                # Run backtest
+                results = self.run_model_backtest(model_name, inference_class, data)
+                self.model_results[model_name] = results
+
+                logging.info("✅ Completed %s", model_name)
+
+            except Exception as e:
+                logging.error("❌ Error processing %s: %s", model_name, e)
+                self.model_results[model_name] = None
+
+        # Generate comparison plots
+        plots = self.create_comparison_plots()
+
+        # Save plots locally
+        for plot_name, fig in plots.items():
+            plot_path = self.out_dir / f"{plot_name}.html"
+            fig.write_html(plot_path)
+            logging.info("💾 Saved plot: %s", plot_path)
+
+        # Generate LLM report
+        summary_data = {
+            model_name: {
+                'avg_sharpe': results['results_df']['sharpe_ratio'].mean() if results and 'results_df' in results and not results['results_df'].empty else 0,
+                'avg_return': results['results_df']['total_return'].mean() if results and 'results_df' in results and not results['results_df'].empty else 0,
+                'max_drawdown': results['results_df']['max_drawdown'].mean() if results and 'results_df' in results and not results['results_df'].empty else 0
+            }
+            for model_name, results in self.model_results.items()
+        }
+
+        llm_report = self.generate_llm_report(summary_data)
+
+        # Save LLM report
+        report_path = self.out_dir / "llm_analysis_report.txt"
+        with open(report_path, 'w') as f:
+            f.write(llm_report)
+        logging.info("💾 Saved LLM report: %s", report_path)
+
+        # Publish to W&B
+        self.publish_wandb_report(plots, llm_report)
+
+        # Save summary
+        summary_path = self.out_dir / "benchmark_summary.json"
+        with open(summary_path, 'w') as f:
+            json.dump({
+                'experiment_run': self.experiment_run,
+                'models': self.models,
+                'summary_data': summary_data,
+                'timestamp': datetime.now().isoformat()
+            }, f, indent=2, default=str)
+
+        logging.info("✅ Benchmark complete! Results saved to %s", self.out_dir)
+
+        if self.wandb_run:
+            self.wandb_run.finish()
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Modular ML Model Benchmark Runner")
+    parser.add_argument("--experiment-run", required=True,
+                       help="W&B experiment run name")
+    parser.add_argument("--models", nargs="+", required=True,
+                       help="Model names to benchmark (e.g., Tempus_v2 Tempus_v3_8)")
+    parser.add_argument("--years", type=int, default=1,
+                       help="Years of data to use for backtesting")
+    parser.add_argument("--out-dir", default="benchmark_results",
+                       help="Output directory for results")
+
+    args = parser.parse_args()
+
+    # Run benchmark
+    runner = ModelBenchmarkRunner(
+        experiment_run=args.experiment_run,
+        models=args.models,
+        years=args.years,
+        out_dir=args.out_dir
+    )
+
+    runner.run_benchmark()
 
 
 if __name__ == "__main__":

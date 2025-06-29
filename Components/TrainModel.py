@@ -4,11 +4,15 @@ import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
-#from torch.cuda.amp import autocast, GradScaler
+from torch.cuda.amp import autocast, GradScaler
+from transformer_engine.common.recipe import Format, DelayedScaling
+import transformer_engine.pytorch as te
+import copy
+
 import numpy as np
 import pandas as pd
 import math
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, ConcatDataset
 from sklearn.preprocessing import StandardScaler
 from tqdm.auto import tqdm
 
@@ -18,33 +22,31 @@ from plotly.subplots import make_subplots
 
 class TEMPUS(nn.Module):
     """
-    TEMPUS is a neural network model designed to process and analyze temporal data
-    by combining multiple aspects of time-series modeling.
-    It incorporates LSTMs with multiple temporal resolutions, Temporal Convolutional Networks (TCNs),
-    and Transformer encoders for temporal attention.
+    TEMPUS is a streamlined neural network model designed for efficient temporal data processing.
+    It combines a single bidirectional LSTM with a Temporal Convolutional Network (TCN) and
+    a multi-head attention mechanism for capturing temporal dependencies at different scales.
 
-    The model integrates several functionalities with layer normalization and
-    residual connections for efficient feature extraction, fusion, and sequence
-    processing. It is primarily used for regression tasks on temporal data.
+    The architecture is optimized for Ada Lovelace hardware with tensor cores, using
+    mixed precision training and efficient tensor operations.
 
     :ivar device: The device to execute the model on (e.g., 'cpu', 'cuda').
     :ivar hidden_size: Number of hidden units used in LSTM and other layers.
-    :ivar num_layers: Number of layers in both LSTM modules.
+    :ivar num_layers: Number of layers in the LSTM module.
     :ivar input_size: Number of input features per timestep.
     :ivar dropout: Dropout probability for regularization.
     :ivar clip_size: Gradient clipping threshold to prevent exploding gradients.
-    :ivar tcn_kernel_sizes: List of kernel sizes for TCN layers.
-    :ivar attention_heads: Number of attention heads used in the Transformer encoder.
+    :ivar tcn_kernel_size: Kernel size for the TCN layer.
+    :ivar attention_heads: Number of attention heads used in the multi-head attention.
     :ivar learning_rate: Learning rate for the optimizer.
     :ivar weight_decay: Weight decay for L2 regularization in the optimizer.
     :ivar scaler: Feature scaler for the input data (optional).
     :type device: Str
     :type hidden_size: int
     :type num_layers: int
-    :type input_size:
+    :type input_size: int
     :type dropout: Float
     :type clip_size: float
-    :type tcn_kernel_sizes: list[int]
+    :type tcn_kernel_size: int
     :type attention_heads: int
     :type learning_rate: float
     :type weight_decay: float
@@ -53,47 +55,34 @@ class TEMPUS(nn.Module):
     def __init__(self, config, scaler=None):
         super(TEMPUS, self).__init__()
         self.device = config.get("device", "cpu")
-        self.hidden_size = config.get("hidden_size", 64)
+        self.hidden_size = config.get("hidden_size", 128)  # Increased default size for better representation
         self.num_layers = config.get("num_layers", 2)
         self.input_size = config.get("input_size", 10)
         self.dropout = config.get("dropout", 0.2)
         self.clip_size = config.get("clip_size", 1.0)
-        self.tcn_kernel_sizes = config.get("tcn_kernel_sizes", [3, 5, 7])
-        self.attention_heads = config.get("attention_heads", 4)
+        self.tcn_kernel_size = config.get("tcn_kernel_size", 5)  # Single kernel size for efficiency
+        self.attention_heads = config.get("attention_heads", 8)  # Increased heads for better attention
         self.learning_rate = config.get("learning_rate", 0.001)
         self.weight_decay = config.get("weight_decay", 0.01)
+        self.use_amp = config.get("use_amp", True)  # Enable automatic mixed precision by default
+        self.use_fp8 = config.get("use_fp8", False)  # Enable FP8 precision for Ada Lovelace hardware
+
+        # FP8 recipe for transformer engine
+        self.fp8_recipe = None
+        if self.use_fp8 and self.device != 'cpu':
+            self.fp8_recipe = DelayedScaling(
+                fp8_format=Format.E4M3,  # FP8 format for Ada Lovelace
+                amax_history_len=16,     # Length of amax history
+                amax_compute_algo="max", # Algorithm for computing amax
+            )
 
         if scaler is not None:
             self.scaler = scaler
             self.register_buffer("mean", torch.tensor(scaler.mean_, dtype=torch.float32))
             self.register_buffer("scale", torch.tensor(scaler.scale_, dtype=torch.float32))
 
-        # ——— sanity check for zero / near-zero scales ———
-        with torch.no_grad():
-            # eps threshold you consider “too small”
-            eps = 1e-6
-            zero_mask = (self.scale == 0)
-            near_zero_mask = (self.scale.abs() < eps)
-    
-            if zero_mask.any():
-                idxs = zero_mask.nonzero(as_tuple=False).view(-1).tolist()
-                print(f"[WARN] scaler.scale_ has EXACT zeros at indices: {idxs}")
-    
-            if near_zero_mask.any():
-                idxs = near_zero_mask.nonzero(as_tuple=False).view(-1).tolist()
-                mins = self.scale[near_zero_mask]
-                print(f"[WARN] scaler.scale_ has near-zero (<{eps}) at indices {idxs}, values: {mins.tolist()}")
-
-        # Multiple Temporal Resolutions of LSTM with layer normalization
-        self.lstm_short = nn.LSTM(
-            input_size=self.input_size,
-            hidden_size=self.hidden_size,
-            num_layers=self.num_layers,
-            batch_first=True,
-            dropout=self.dropout if self.num_layers > 1 else 0,
-            bidirectional=True
-        )
-        self.lstm_medium = nn.LSTM(
+        # Single efficient bidirectional LSTM
+        self.lstm = nn.LSTM(
             input_size=self.input_size,
             hidden_size=self.hidden_size,
             num_layers=self.num_layers,
@@ -102,60 +91,63 @@ class TEMPUS(nn.Module):
             bidirectional=True
         )
 
-        # Layer normalization for LSTM outputs
-        self.lstm_short_norm = nn.LayerNorm(self.hidden_size * 2)
-        self.lstm_medium_norm = nn.LayerNorm(self.hidden_size * 2)
+        # Layer normalization for LSTM output
+        self.lstm_norm = nn.LayerNorm(self.hidden_size * 2)
 
-        # Fusion layer for temporal resolutions with residual connection
-        self.temporal_fusion = nn.Linear(self.hidden_size * 4, self.hidden_size * 2)
-        self.temporal_fusion_norm = nn.LayerNorm(self.hidden_size * 2)
+        # Projection layer for residual connections
+        if self.use_fp8 and self.device != 'cpu':
+            self.residual_proj = te.Linear(self.input_size, self.hidden_size * 2, fp8_recipe=self.fp8_recipe)
+        else:
+            self.residual_proj = nn.Linear(self.input_size, self.hidden_size * 2)
 
-        # Projection layer for residual connections when dimensions don't match
-        self.residual_proj = nn.Linear(self.input_size, self.hidden_size * 2)
+        # Efficient TCN with single kernel size and dilation
+        self.tcn = nn.Sequential(
+            nn.Conv1d(self.input_size, self.hidden_size * 2, 
+                      kernel_size=self.tcn_kernel_size,
+                      padding=(self.tcn_kernel_size - 1) // 2, 
+                      stride=1),
+            nn.BatchNorm1d(self.hidden_size * 2),
+            nn.GELU()  # GELU activation for better gradient flow
+        )
 
-        # Temporal Convolutional Network (TCN) with layer normalization 
-        self.tcn_modules = nn.ModuleList()
-        for i, k_size in enumerate(self.tcn_kernel_sizes):
-            dilation = 2 ** i  # Exponentially increasing dilation
-            padding = ((k_size - 1) * dilation) // 2  # Adjusted padding for dilation
-            self.tcn_modules.append(nn.Sequential(
-                nn.Conv1d(self.input_size, self.hidden_size, kernel_size=k_size,
-                          padding=padding, dilation=dilation, stride=1),
-                nn.BatchNorm1d(self.hidden_size),
-                nn.GELU(), # Switching from ReLU to GELU
-                nn.Conv1d(self.hidden_size, self.hidden_size, kernel_size=k_size,
-                          padding=padding, dilation=dilation, stride=1),
-                nn.BatchNorm1d(self.hidden_size),
-                nn.GELU() # Switching from ReLU to GELU
-            ))
-        self.tcn_fusion = nn.Linear(self.hidden_size * len(self.tcn_kernel_sizes), self.hidden_size * 2)
-        self.tcn_fusion_norm = nn.LayerNorm(self.hidden_size * 2)
-
-        # Combine TCN and LSTM features
-        self.feature_fusion = nn.Linear(self.hidden_size * 4, self.hidden_size * 2)
-        self.feature_fusion_norm = nn.LayerNorm(self.hidden_size * 2)
-
-        # Transformer encoder for temporal attention (replacing custom attention)
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=self.hidden_size * 2,
-            nhead=self.attention_heads,
-            dim_feedforward=self.hidden_size * 4,
+        # Multi-head attention for temporal relationships
+        self.attention = nn.MultiheadAttention(
+            embed_dim=self.hidden_size * 2,
+            num_heads=self.attention_heads,
             dropout=self.dropout,
-            activation='gelu',
             batch_first=True
         )
-        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=2)
 
-        # Positional encoding for transformer
+        # Positional encoding for attention
         self.pos_encoder = PositionalEncoding(self.hidden_size * 2, self.dropout)
 
-        # Fully connected layers with dropout and layer normalization
-        self.fc1 = nn.Linear(self.hidden_size * 2, self.hidden_size)
-        self.fc1_norm = nn.LayerNorm(self.hidden_size)
-        self.fc2 = nn.Linear(self.hidden_size, self.hidden_size // 2)
-        self.fc2_norm = nn.LayerNorm(self.hidden_size // 2)
-        self.regression_head = nn.Linear(self.hidden_size // 2, 1)
-        self.dropout_layer = nn.Dropout(self.dropout)
+        # Streamlined fully connected layers
+        if self.use_fp8 and self.device != 'cpu':
+            # FP8-enabled fully connected layers
+            self.fc = nn.Sequential(
+                te.Linear(self.hidden_size * 2, self.hidden_size, fp8_recipe=self.fp8_recipe),
+                nn.LayerNorm(self.hidden_size),
+                nn.GELU(),
+                nn.Dropout(self.dropout),
+                te.Linear(self.hidden_size, self.hidden_size // 2, fp8_recipe=self.fp8_recipe),
+                nn.LayerNorm(self.hidden_size // 2),
+                nn.GELU(),
+                nn.Dropout(self.dropout),
+                te.Linear(self.hidden_size // 2, 1, fp8_recipe=self.fp8_recipe)
+            )
+        else:
+            # Standard fully connected layers
+            self.fc = nn.Sequential(
+                nn.Linear(self.hidden_size * 2, self.hidden_size),
+                nn.LayerNorm(self.hidden_size),
+                nn.GELU(),
+                nn.Dropout(self.dropout),
+                nn.Linear(self.hidden_size, self.hidden_size // 2),
+                nn.LayerNorm(self.hidden_size // 2),
+                nn.GELU(),
+                nn.Dropout(self.dropout),
+                nn.Linear(self.hidden_size // 2, 1)
+            )
 
     def downsample_sequence(self, x, factor):
         """Downsample time sequence by average pooling"""
@@ -173,136 +165,136 @@ class TEMPUS(nn.Module):
         return x
 
     def forward(self, x):
-        if self.scaler is not None:
+        """
+        Forward pass through the TEMPUS model.
+
+        Args:
+            x (torch.Tensor): Input tensor of shape (batch_size, seq_len, input_size)
+
+        Returns:
+            torch.Tensor: Output predictions of shape (batch_size, seq_len, 1)
+        """
+        # Apply scaling if available
+        if hasattr(self, 'scaler') and self.scaler is not None:
             x = (x - self.mean) / self.scale
 
         batch_size, seq_len, features = x.size()
-        #time_features = torch.linspace(0, 1, seq_len).unsqueeze(0).unsqueeze(2).repeat(batch_size, 1, 1).to(x.device)
+
+        # Create time features for positional information
+        time_features = torch.linspace(0, 1, seq_len, device=x.device).unsqueeze(0).unsqueeze(2).repeat(batch_size, 1, 1)
 
         # Process with TCN
-        tcn_outputs = []
         x_tcn = x.transpose(1, 2)  # TCN expects (batch, channels, seq_len)
-        for tcn_module in self.tcn_modules:
-            tcn_out = tcn_module(x_tcn)
-            tcn_outputs.append(tcn_out)
+        tcn_features = self.tcn(x_tcn)
+        tcn_features = tcn_features.transpose(1, 2)  # Back to (batch, seq, features)
 
-        # Concatenate TCN outputs
-        tcn_combined = torch.cat(tcn_outputs, dim=1)
-        tcn_combined = tcn_combined.transpose(1, 2)  # Back to (batch, seq, features)
-        tcn_features = self.tcn_fusion(tcn_combined)
-        tcn_features = self.tcn_fusion_norm(tcn_features)
+        # Process with LSTM
+        lstm_out, _ = self.lstm(x)
+        lstm_features = self.lstm_norm(lstm_out)
 
-        # Multiple Temporal Resolutions
-        # Original sequence for short-term patterns
-        lstm_short_out, _ = self.lstm_short(x)
-        lstm_short_out = self.lstm_short_norm(lstm_short_out)
-
-        # Downsampled sequence for medium-term patterns
-        x_medium = self.downsample_sequence(x, 2)
-        lstm_medium_out, _ = self.lstm_medium(x_medium)
-
-        # Upsample medium resolution back to original sequence length
-        lstm_medium_out = F.interpolate(
-            lstm_medium_out.transpose(1, 2).to('cpu'),
-            size=seq_len,
-            mode='linear'
-        ).transpose(1, 2).to(self.device)
-        lstm_medium_out = self.lstm_medium_norm(lstm_medium_out)
-
-        # Combine temporal resolutions
-        lstm_combined = torch.cat([lstm_short_out, lstm_medium_out], dim=2)
-        lstm_features = self.temporal_fusion(lstm_combined)
-        lstm_features = self.temporal_fusion_norm(lstm_features)
-
-        # Add residual connection with projection if needed
+        # Add residual connection
         x_residual = self.residual_proj(x)
-        lstm_features = lstm_features + x_residual
+        features = lstm_features + x_residual
 
-        # Combine LSTM and TCN features
-        combined_features = torch.cat([lstm_features, tcn_features], dim=2)
-        fused_features = self.feature_fusion(combined_features)
-        fused_features = self.feature_fusion_norm(fused_features)
+        # Add positional encoding for attention
+        features = self.pos_encoder(features)
 
-        # Add positional encoding for transformer
-        fused_features = self.pos_encoder(fused_features)
+        # Apply multi-head attention
+        attn_output, _ = self.attention(
+            query=features,
+            key=features,
+            value=features
+        )
 
-        # Apply transformer encoder (replacing custom attention)
-        attended_features = self.transformer_encoder(fused_features)
+        # Combine with TCN features through residual connection
+        combined_features = attn_output + tcn_features
 
-        # Final output layers with layer normalization
-        x = F.relu(self.fc1(attended_features))
-        x = self.fc1_norm(x)
-        x = self.dropout_layer(x)
-        x = F.relu(self.fc2(x))
-        x = self.fc2_norm(x)
-        x = self.dropout_layer(x)
-        outputs = self.regression_head(x)
+        # Pass through final fully connected layers
+        outputs = self.fc(combined_features)
 
         return outputs
 
     def train_model(self, train_loader, val_loader, test_loader, num_epochs=100, patience=10):
         """
-        Train the model with a regression task
+        Train the model with a regression task using automatic mixed precision for Ada Lovelace hardware.
+
+        Args:
+            train_loader: DataLoader for training data
+            val_loader: DataLoader for validation data
+            test_loader: DataLoader for test data
+            num_epochs: Maximum number of training epochs
+            patience: Number of epochs to wait for improvement before early stopping
+
+        Returns:
+            dict: Training history with metrics
         """
         self.to(self.device)
 
         # Define loss function and optimizer with weight decay
         criterion = nn.MSELoss()
         optimizer = AdamW(self.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay)
-        #grad_scaler = GradScaler()
 
-        # Learning rate scheduler
-        scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
+        # Learning rate scheduler with cosine annealing for better convergence
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+            optimizer, 
+            T_0=10,  # Restart every 10 epochs
+            T_mult=2,  # Double the restart period after each restart
+            eta_min=1e-6  # Minimum learning rate
+        )
 
-        # Hybrid: E4M3 forward, E5M2 backward
-        fp8_recipe = DelayedScaling(fp8_format=Format.HYBRID, amax_history_len=16)
+        # Initialize gradient scaler for mixed precision training
+        scaler = GradScaler(enabled=self.use_amp and self.device != 'cpu')
 
         # Early stopping variables
-        best_val_loss = float('inf')
-        best_model_state = None
+        best_val_mape = float('inf')
         patience_counter = 0
+        best_model_state = None
 
         self.history = {
             'train_loss': [], 'val_loss': [], 'test_loss': [],
-            'train_rmse': [], 'val_rmse': [], 'test_rmse': [],
-            'train_mape': [], 'val_mape': [], 'test_mape': []
+            'val_rmse': [], 'test_rmse': [],
+            'val_mape': [], 'test_mape': [],
+            'learning_rates': []
         }
 
         epoch_progress = tqdm(range(num_epochs), desc="Training Epochs")
         for epoch in epoch_progress:
-            # Training phase
-            self.train()
-            train_loss, train_rmse, train_mape = self._train_epoch(train_loader, criterion, optimizer, fp8)
+            # Training phase with mixed precision
+            train_loss = self._train_epoch(train_loader, criterion, optimizer, scaler)
+
             # Validation phase
-            val_loss, val_rmse, val_mape = self.evaluate(val_loader, criterion, fp8)
+            val_loss, val_rmse, val_mape = self.evaluate(val_loader, criterion)
+
             # Test phase
-            test_loss, test_rmse, test_mape = self.evaluate(test_loader, criterion, fp8)
+            test_loss, test_rmse, test_mape = self.evaluate(test_loader, criterion)
+
             # Update learning rate
-            scheduler.step(val_loss)
+            scheduler.step()
+            current_lr = optimizer.param_groups[0]['lr']
 
             # Store history
             self.history['train_loss'].append(train_loss)
             self.history['val_loss'].append(val_loss)
             self.history['test_loss'].append(test_loss)
-            self.history['train_rmse'].append(train_rmse)
             self.history['val_rmse'].append(val_rmse)
             self.history['test_rmse'].append(test_rmse)
-            self.history['train_mape'].append(train_mape)
             self.history['val_mape'].append(val_mape)
             self.history['test_mape'].append(test_mape)
+            self.history['learning_rates'].append(current_lr)
 
             # Update progress
             epoch_progress.set_postfix({
                 'Train Loss': f'{train_loss:.4f}',
-                'Test Loss': f'{test_loss:.4f}',
+                'Val Loss': f'{val_loss:.4f}',
                 'RMSE': f'{test_rmse:.4f}',
-                'MAPE': f'{test_mape:.2f}%'
+                'MAPE': f'{test_mape:.2f}%',
+                'LR': f'{current_lr:.6f}'
             })
 
             # Model selection and early stopping
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                best_model_state = self.state_dict()
+            if val_mape < best_val_mape:
+                best_val_mape = val_mape
+                best_model_state = copy.deepcopy(self.state_dict())
                 patience_counter = 0
             else:
                 patience_counter += 1
@@ -310,101 +302,122 @@ class TEMPUS(nn.Module):
                     print(f"Early stopping triggered after {epoch + 1} epochs")
                     break
 
-            # Load the best model state
+        # Load the best model state
         if best_model_state is not None:
+            print("Loading the best model state...")
             self.load_state_dict(best_model_state)
 
-            # Final evaluation
+        # Final evaluation
         final_test_loss, final_test_rmse, final_test_mape = self.evaluate(test_loader, criterion)
-        print(
-            f"\nFinal Test Results | Loss: {final_test_loss:.4f}, RMSE: {final_test_rmse:.4f}, MAPE: {final_test_mape:.2f}%")
+        print(f"\nFinal Test Results | Loss: {final_test_loss:.4f}, RMSE: {final_test_rmse:.4f}, MAPE: {final_test_mape:.2f}%")
 
         return self.history
 
-    def _train_epoch(self, train_loader, criterion, optimizer, fp8=None, grad_scaler=None):
-        """Helper method for training a single epoch"""
+    def _train_epoch(self, train_loader, criterion, optimizer, scaler=None):
+        """
+        Helper method for training a single epoch with optional mixed precision.
+
+        Args:
+            train_loader: DataLoader for training data
+            criterion: Loss function
+            optimizer: Optimizer
+            scaler: GradScaler for mixed precision training
+
+        Returns:
+            float: Average training loss for the epoch
+        """
         self.train()
         total_loss = 0
-        all_predictions = []
-        all_targets = []
 
         for batch_idx, (inputs, targets) in enumerate(train_loader):
             inputs, targets = inputs.to(self.device), targets.to(self.device)
             optimizer.zero_grad()
-            
-            # ——— forward with fp8 precision + loss ———
-            with te.fp8_autocast(enabled=True, fp8_recipe=fp8):
+
+            # Use mixed precision for forward pass if scaler is provided
+            if scaler is not None and self.use_amp and self.device != 'cpu':
+                if self.use_fp8 and hasattr(self, 'fp8_recipe') and self.fp8_recipe is not None:
+                    # Use transformer engine's FP8 autocast
+                    with te.fp8_autocast(enabled=True, fp8_recipe=self.fp8_recipe):
+                        outputs = self(inputs)
+                        if outputs.dim() > 1:
+                            outputs = outputs[:, -1, 0] if outputs.size(1) > 1 and outputs.size(2) > 0 else outputs.squeeze()
+                        loss = criterion(outputs, targets)
+                else:
+                    # Use standard PyTorch autocast (FP16/BF16)
+                    with autocast():
+                        outputs = self(inputs)
+                        if outputs.dim() > 1:
+                            outputs = outputs[:, -1, 0] if outputs.size(1) > 1 and outputs.size(2) > 0 else outputs.squeeze()
+                        loss = criterion(outputs, targets)
+
+                # Scale gradients and optimize with mixed precision
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+                nn.utils.clip_grad_norm_(self.parameters(), max_norm=self.clip_size)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                # Standard precision training
                 outputs = self(inputs)
-                # Squeeze the last dimension if it exists
                 if outputs.dim() > 1:
                     outputs = outputs[:, -1, 0] if outputs.size(1) > 1 and outputs.size(2) > 0 else outputs.squeeze()
                 loss = criterion(outputs, targets)
-
-            # ——— detect NaN loss BEFORE backward ———
-            if torch.isnan(loss) or torch.isinf(loss):
-                # compute output range
-                out_min, out_max = outputs.min().item(), outputs.max().item()
-                print(f"\n[ERROR] NaN/Inf loss at batch {batch_idx}")
-                print(f"  loss = {loss.item()}")
-                print(f"  outputs range = ({out_min:.6f}, {out_max:.6f})")
-
-                # compute gradient norm BEFORE scaling/clipping
-                # (need a dummy backward to get grads)
-                loss_clone = loss.clone().detach().requires_grad_(True)
-                loss_clone.backward(retain_graph=True)
-                total_norm = 0.0
-                for p in self.parameters():
-                    if p.grad is not None:
-                        param_norm = p.grad.data.norm(2).item()
-                        total_norm += param_norm**2
-                total_norm = math.sqrt(total_norm)
-                print(f"  grad_norm (pre-clip) = {total_norm:.6f}")
-
-                raise RuntimeError("Stopping training due to NaN/Inf loss")
-
-            # ——— backward + step ———
-            #grad_scaler.scale(loss).backward()
-            loss.backward()
-            #grad_scaler.unscale_(optimizer)
-            nn.utils.clip_grad_norm_(self.parameters(), max_norm=self.clip_size)
-            #grad_scaler.step(optimizer)
-            #grad_scaler.update()
-            optimizer.step()
+                loss.backward()
+                nn.utils.clip_grad_norm_(self.parameters(), max_norm=self.clip_size)
+                optimizer.step()
 
             total_loss += loss.item() * inputs.size(0)
-            all_predictions.append(outputs.detach().cpu().numpy())
-            all_targets.append(targets.cpu().numpy())
 
         # Calculate metrics
-        all_predictions = np.concatenate(all_predictions, axis=0)
-        all_targets = np.concatenate(all_targets, axis=0)
-
         avg_loss = total_loss / len(train_loader.dataset)
-        rmse = np.sqrt(np.mean((all_predictions - all_targets) ** 2))
 
-        # MAPE calculation to handle near-zero values
-        epsilon = 1e-6  # Larger epsilon for numerical stability
-        abs_percentage_errors = np.abs((all_targets - all_predictions) / np.maximum(np.abs(all_targets), epsilon))
-        # Clip extreme values
-        abs_percentage_errors = np.clip(abs_percentage_errors, 0, 10)  # Cap at 1000%
-        mape = np.mean(abs_percentage_errors) * 100
+        return avg_loss
 
-        return avg_loss, rmse, mape
+    def evaluate(self, data_loader, criterion, use_amp=None):
+        """
+        Evaluate the model with improved metrics and optional mixed precision.
 
-    def evaluate(self, data_loader, criterion, fp8=None, grad_scaler=None):
-        """Evaluate the model with improved metrics"""
+        Args:
+            data_loader: DataLoader for evaluation data
+            criterion: Loss function
+            use_amp: Whether to use automatic mixed precision (defaults to self.use_amp)
+
+        Returns:
+            tuple: (average loss, RMSE, MAPE)
+        """
         self.eval()
         total_loss = 0
-        all_predictions = []
-        all_targets = []
+        all_predictions, all_targets = [], []
+
+        # Default to model's use_amp setting if not specified
+        if use_amp is None:
+            use_amp = getattr(self, 'use_amp', False)
+
+        # Only use mixed precision if on GPU
+        use_amp = use_amp and self.device != 'cpu'
 
         with torch.no_grad():
             for inputs, targets in data_loader:
                 inputs, targets = inputs.to(self.device), targets.to(self.device)
-                
-                with te.fp8_autocast(enabled=True, fp8_recipe=fp8):
+
+                # Use mixed precision for inference if enabled
+                if use_amp:
+                    if self.use_fp8 and hasattr(self, 'fp8_recipe') and self.fp8_recipe is not None:
+                        # Use transformer engine's FP8 autocast for inference
+                        with te.fp8_autocast(enabled=True, fp8_recipe=self.fp8_recipe):
+                            outputs = self(inputs)
+                            if outputs.dim() > 1:
+                                outputs = outputs[:, -1, 0] if outputs.size(1) > 1 and outputs.size(2) > 0 else outputs.squeeze()
+                            loss = criterion(outputs, targets)
+                    else:
+                        # Use standard PyTorch autocast (FP16/BF16)
+                        with autocast():
+                            outputs = self(inputs)
+                            if outputs.dim() > 1:
+                                outputs = outputs[:, -1, 0] if outputs.size(1) > 1 and outputs.size(2) > 0 else outputs.squeeze()
+                            loss = criterion(outputs, targets)
+                else:
                     outputs = self(inputs)
-                    # Squeeze the last dimension if it exists
                     if outputs.dim() > 1:
                         outputs = outputs[:, -1, 0] if outputs.size(1) > 1 and outputs.size(2) > 0 else outputs.squeeze()
                     loss = criterion(outputs, targets)
@@ -420,9 +433,10 @@ class TEMPUS(nn.Module):
         avg_loss = total_loss / len(data_loader.dataset)
         rmse = np.sqrt(np.mean((all_predictions - all_targets) ** 2))
 
-        # Improved MAPE calculation
+        # Improved MAPE calculation with epsilon to avoid division by zero
         epsilon = 1e-6
         abs_percentage_errors = np.abs((all_targets - all_predictions) / np.maximum(np.abs(all_targets), epsilon))
+        # Clip extreme values for more stable MAPE
         abs_percentage_errors = np.clip(abs_percentage_errors, 0, 10)
         mape = np.mean(abs_percentage_errors) * 100
 
@@ -445,8 +459,6 @@ class TEMPUS(nn.Module):
             fig.update_yaxes(title_text="Loss", row=1, col=1)
 
             # Plot MAPE
-            fig.add_trace(go.Scatter(y=self.history['train_mape'], name='Train MAPE', line=dict(color='blue')),
-                          row=1, col=2)
             fig.add_trace(go.Scatter(y=self.history['test_mape'], name='Test MAPE', line=dict(color='green')),
                           row=1, col=2)
             fig.add_trace(go.Scatter(y=self.history['val_mape'], name='Validation MAPE', line=dict(color='orange')),
@@ -468,16 +480,34 @@ class TEMPUS(nn.Module):
             return
 
     def export_model_to_torchscript(self, save_path, data_loader, device):
+        """
+        Export the model to TorchScript format for deployment.
+
+        Args:
+            save_path: Path to save the exported model
+            data_loader: DataLoader to get example inputs
+            device: Device to use for export
+
+        Returns:
+            str: Path to the saved model or None if export failed
+        """
         try:
             self.eval()
+            self.to(device)
+            self.device = device
+
             # Fetch a sample input tensor from DataLoader
             example_inputs, _ = next(iter(data_loader))
+            example_inputs = example_inputs.to(device)
 
-            # Export model to TorchScript using tracing
-            scripted_model = torch.jit.trace(self.to(device), example_inputs.to(device))
+            # Export model to TorchScript using tracing with optimization
+            with torch.no_grad():
+                # Use torch.jit.optimize_for_inference for better performance
+                scripted_model = torch.jit.trace(self, example_inputs)
+                optimized_model = torch.jit.optimize_for_inference(scripted_model)
 
-            # Save the TorchScript model
-            torch.jit.save(scripted_model, save_path)
+            # Save the optimized TorchScript model
+            torch.jit.save(optimized_model, save_path)
 
             print(f"Model successfully exported and saved to {save_path}")
             return save_path
@@ -486,15 +516,69 @@ class TEMPUS(nn.Module):
             print(f"Error exporting model to TorchScript: {str(e)}")
             return None
 
-class PositionalEncoding(nn.Module):
-    """
-    Positional encoding for the transformer model.
-    Adds information about the position of tokens in the sequence.
-    """
-    def __init__(self, d_model, dropout=0.1, max_len=5000):
-        super(PositionalEncoding, self).__init__()
-        self.dropout = nn.Dropout(p=dropout)
+    def export_model_to_onnx(self, save_path, data_loader, device, opset_version=13):
+        """
+        Export the model to ONNX format for deployment on Ada Lovelace hardware.
 
+        ONNX format provides better optimization for tensor cores on Ada Lovelace GPUs
+        through TensorRT integration.
+
+        Args:
+            save_path: Path to save the exported model
+            data_loader: DataLoader to get example inputs
+            device: Device to use for export
+            opset_version: ONNX opset version to use
+
+        Returns:
+            str: Path to the saved model or None if export failed
+        """
+        try:
+            self.eval()
+            self.to(device)
+            self.device = device
+
+            # Fetch a sample input tensor from DataLoader
+            example_inputs, _ = next(iter(data_loader))
+            example_inputs = example_inputs.to(device)
+
+            # Set dynamic axes for variable batch size and sequence length
+            dynamic_axes = {
+                'input': {0: 'batch_size', 1: 'sequence_length'},
+                'output': {0: 'batch_size', 1: 'sequence_length'}
+            }
+
+            # Export to ONNX with optimization flags
+            torch.onnx.export(
+                self,                                      # model being run
+                example_inputs,                            # model input
+                save_path,                                 # where to save the model
+                export_params=True,                        # store the trained parameter weights inside the model file
+                opset_version=opset_version,               # the ONNX version to export the model to
+                do_constant_folding=True,                  # whether to execute constant folding for optimization
+                input_names=['input'],                     # the model's input names
+                output_names=['output'],                   # the model's output names
+                dynamic_axes=dynamic_axes,                 # variable length axes
+                verbose=False
+            )
+
+            print(f"Model successfully exported to ONNX and saved to {save_path}")
+
+            # Verify the ONNX model
+            import onnx
+            onnx_model = onnx.load(save_path)
+            onnx.checker.check_model(onnx_model)
+            print("ONNX model verified successfully")
+
+            return save_path
+
+        except Exception as e:
+            print(f"Error exporting model to ONNX: {str(e)}")
+            return None
+
+class PositionalEncoding(nn.Module):
+    def __init__(self, d_model, dropout=0.1, max_len=5000):
+        super().__init__()
+        self.dropout = nn.Dropout(p=dropout)
         position = torch.arange(max_len).unsqueeze(1)
         div_term = torch.exp(torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model))
         pe = torch.zeros(max_len, d_model)
@@ -503,12 +587,7 @@ class PositionalEncoding(nn.Module):
         self.register_buffer('pe', pe)
 
     def forward(self, x):
-        """
-        Args:
-            x: Tensor, shape [batch_size, seq_len, embedding_dim]
-        """
-        x = x + self.pe[:x.size(1), :]
-        return self.dropout(x)
+        return self.dropout(x + self.pe[:x.size(1)])
 
 def torchscript_predict(model_path, input_df, device, window_size, target_col='shifted_prices', prediction_mode=False):
     # Load the TorchScript model
@@ -566,122 +645,91 @@ def torchscript_predict(model_path, input_df, device, window_size, target_col='s
 
     return preds_df
 
-from torch.utils.data import Dataset, DataLoader
-from sklearn.preprocessing import StandardScaler
-
 class DataModule:
-    def __init__(self, data, window_size=20, batch_size=32, val_size=0.1, test_size=0.1,
-                 random_state=42, target_col='shifted_prices', padding_strategy='zero'):
-        if 'Ticker' in data.columns:
-            self.data = data.drop(columns=['Ticker'])
-        elif data.columns[0] == 'Ticker':
-            # Drop the first column by index
-            self.data = data.iloc[:, 1:]
-        else:
-            self.data = data
-
+    def __init__(
+        self,
+        data,
+        window_size=20,
+        batch_size=32,
+        val_size=0.1,
+        test_size=0.1,
+        target_col='shifted_prices',
+    ):
+        # Keep raw data (including Ticker) for grouping
+        self.data = data.copy()
         self.window_size = window_size
         self.batch_size = batch_size
         self.val_size = val_size
         self.test_size = test_size
-        self.random_state = random_state
         self.target_col = target_col
-        self.padding_strategy = padding_strategy
-
         self.setup()
 
     def setup(self):
-        # Get datetime index from the data
+        # Verify index is DatetimeIndex
         if not isinstance(self.data.index, pd.DatetimeIndex):
-            raise ValueError("Data index must be a DatetimeIndex for year-based splitting")
+            raise ValueError("Data index must be a DatetimeIndex for splitting")
 
-        # Ensure data is sorted chronologically
-        length = len(self.data)
-        # Calculate the number of days in each split
-        test_days = int(length * self.test_size)
-        val_days = int(length * self.val_size)
-        train_days = length - test_days - val_days
+        # Determine global split dates for walk-forward chronological splits
+        all_dates = pd.Series(self.data.index.unique()).sort_values()
+        n = len(all_dates)
+        train_cut = int(n * (1 - self.val_size - self.test_size))
+        val_cut = int(n * (1 - self.test_size))
+        train_date = all_dates.iloc[train_cut]
+        val_date = all_dates.iloc[val_cut]
 
-        # Split the data chronologically
-        self.df_train = self.data[:train_days]
-        self.df_val = self.data[train_days:train_days + val_days]
-        self.df_test = self.data[train_days + val_days:]
+        # Split per ticker using global date boundaries
+        train_dfs, val_dfs, test_dfs = [], [], []
+        for ticker, df in self.data.groupby('Ticker'):
+            df = df.sort_index()
+            train_dfs.append(df[df.index <= train_date])
+            val_dfs.append(df[(df.index > train_date) & (df.index <= val_date)])
+            test_dfs.append(df[df.index > val_date])
+        # Concatenate splits
+        self.df_train = pd.concat(train_dfs)
+        self.df_val = pd.concat(val_dfs)
+        self.df_test = pd.concat(test_dfs)
 
-        # Create datasets and data loaders
-        feature_cols = [col for col in self.data.columns if col != self.target_col]
+        # Determine feature columns (exclude target and ticker)
+        feature_cols = [c for c in self.df_train.columns if c not in [self.target_col, 'Ticker']]
         self.num_features = len(feature_cols)
 
-         # Handle infinite values before scaling
-        self.df_train[feature_cols] = self.df_train[feature_cols].replace([np.inf, -np.inf], np.nan)
-        self.df_val[feature_cols] = self.df_val[feature_cols].replace([np.inf, -np.inf], np.nan)
-        self.df_test[feature_cols] = self.df_test[feature_cols].replace([np.inf, -np.inf], np.nan)
-
-        # Fill NaN values with appropriate method (median is generally robust)
-        for col in feature_cols:
-            median_val = self.df_train[col].median()
-            self.df_train[col] = self.df_train[col].fillna(median_val)
-            self.df_val[col] = self.df_val[col].fillna(median_val)
-            self.df_test[col] = self.df_test[col].fillna(median_val)
-
-        # Data Scaler
+        # Fit and apply scaler
         self.scaler = StandardScaler()
-        train_features = self.df_train[feature_cols]
-        self.scaler.fit(train_features)
+        self.scaler.fit(self.df_train[feature_cols])
+        for df in [self.df_train, self.df_val, self.df_test]:
+            df[feature_cols] = self.scaler.transform(df[feature_cols])
 
-        # Create datasets with an improved padding strategy
-        self.train_dataset = SequenceDataset(
-            self.df_train, target=self.target_col, features=feature_cols,
-            window_size=self.window_size, padding_strategy=self.padding_strategy
-        )
-        self.val_dataset = SequenceDataset(
-            self.df_val, target=self.target_col, features=feature_cols,
-            window_size=self.window_size, padding_strategy=self.padding_strategy
-        )
-        self.test_dataset = SequenceDataset(
-            self.df_test, target=self.target_col, features=feature_cols,
-            window_size=self.window_size, padding_strategy=self.padding_strategy
-        )
+        # Build per-ticker SequenceDatasets to prevent sequence bleed
+        self.train_dataset = ConcatDataset([SequenceDataset(df.drop(columns=['Ticker']), self.target_col, feature_cols, self.window_size) for df in train_dfs])
+        self.val_dataset = ConcatDataset([SequenceDataset(df.drop(columns=['Ticker']), self.target_col, feature_cols, self.window_size) for df in val_dfs])
+        self.test_dataset = ConcatDataset([SequenceDataset(df.drop(columns=['Ticker']),self.target_col, feature_cols, self.window_size) for df in test_dfs])
 
         # Create data loaders
         self.train_loader = DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True)
         self.val_loader = DataLoader(self.val_dataset, batch_size=self.batch_size, shuffle=False)
         self.test_loader = DataLoader(self.test_dataset, batch_size=self.batch_size, shuffle=False)
 
+
 class SequenceDataset(Dataset):
-    def __init__(self, dataframe, target, features, window_size, padding_strategy='zero'):
+    def __init__(self,dataframe,target, features,window_size):
         self.features = features
         self.target = target
         self.window_size = window_size
-        self.padding_strategy = padding_strategy
         self.y = torch.tensor(dataframe[target].values).float()
         self.X = torch.tensor(dataframe[features].values).float()
 
     def __len__(self):
-        return self.X.shape[0]
+        return len(self.y)
 
-    def __getitem__(self, i):
-        if i >= self.window_size - 1:
-            i_start = i - self.window_size + 1
-            x = self.X[i_start:(i + 1), :]
+    def __getitem__(self, idx):
+        if idx >= self.window_size - 1:
+            start = idx - self.window_size + 1
+            x = self.X[start:idx + 1]
         else:
-            # Improved padding strategy
-            if self.padding_strategy == 'zero':
-                # Zero padding
-                padding = torch.zeros(self.window_size - i - 1, self.X.shape[1])
-            elif self.padding_strategy == 'mean':
-                # Mean padding
-                padding = torch.mean(self.X[:i+1], dim=0).unsqueeze(0).repeat(self.window_size - i - 1, 1)
-            elif self.padding_strategy == 'repeat':
-                # Repeat first value (original strategy)
-                padding = self.X[0].repeat(self.window_size - i - 1, 1)
-            else:
-                # Default to zero padding
-                padding = torch.zeros(self.window_size - i - 1, self.X.shape[1])
-
-            x = self.X[0:(i + 1), :]
-            x = torch.cat((padding, x), 0)
-
-        return x, self.y[i]
+            pad_len = self.window_size - idx - 1
+            pad = torch.zeros(pad_len, self.X.shape[1])
+            x = torch.cat([pad, self.X[:idx+1]], dim=0)
+        return x, self.y[idx]
 
 
 class EchoStateNetwork(nn.Module):
