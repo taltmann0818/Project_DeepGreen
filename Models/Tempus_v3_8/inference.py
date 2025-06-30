@@ -12,250 +12,6 @@ from Components.TickerData import TickerData
 import warnings
 warnings.filterwarnings("ignore")  # avoid printing out absolute paths
 
-def load_model_config(config_path: str = None) -> dict:
-    """
-    Load model configuration from JSON metadata file.
-
-    Args:
-        config_path: Path to the JSON config file. If None, looks for 
-                    Tempus_v3.8_meta.json in the current directory.
-
-    Returns:
-        Dictionary containing model configuration
-    """
-    if config_path is None:
-        # Look for the metadata file in the current script's directory
-        script_dir = Path(__file__).parent
-        config_path = script_dir / "Tempus_v3.8_meta.json"
-
-    config_path = Path(config_path)
-    if not config_path.exists():
-        raise FileNotFoundError(f"Config file not found: {config_path}")
-
-    with open(config_path, 'r') as f:
-        config = json.load(f)
-
-    print(f"Loaded model configuration from: {config_path}")
-    return config
-
-class TFTDataModule:
-    """
-    Data module for TFT model training that handles data loading, preprocessing,
-    and creation of PyTorch Lightning dataloaders.
-    """
-
-    def __init__(
-        self,
-        config: dict = None,
-        batch_size: int = None,
-        max_prediction_length: int = None,
-        max_encoder_length: int = None,
-        years: int = 5,
-        prediction_window: int = 3,
-        num_workers: Optional[int] = None,
-        use_cache: bool = True,
-        cache_dir: str = "data_cache"
-    ):
-        # Load config if not provided
-        if config is None:
-            config = load_model_config()
-
-        self.config = config
-
-        # Use config values with fallback to parameters
-        self.batch_size = batch_size or config.get("batch_size", 256)
-        self.max_prediction_length = max_prediction_length or config.get("decoder_length", 3)
-        self.max_encoder_length = max_encoder_length or config.get("encoder_length", 30)
-        self.years = years
-        self.prediction_window = prediction_window
-        self.num_workers = num_workers or max(1, os.cpu_count() // 2)
-        self.use_cache = use_cache
-        self.cache_dir = Path(cache_dir)
-
-        # Create cache directory if it doesn't exist
-        if self.use_cache:
-            self.cache_dir.mkdir(exist_ok=True)
-
-        # Get feature columns from config
-        self.feature_cols = config.get("features", [])
-        self.static_categoricals = config.get("static_categoricals", [])
-        self.time_varying_known_reals = config.get("time_varying_known_reals", [])
-        self.time_varying_unknown_reals = config.get("time_varying_unknown_reals", [])
-
-        # Model path from config
-        self.model_path = config.get("model_path", "Tempus_v3_8_fp8.onnx")
-
-        # Additional columns needed for processing (target and identifier)
-        self.processing_cols = self.feature_cols
-
-        # Initialize datasets
-        self.training_data = None
-        self.training_dataset = None
-        self.validation_dataset = None
-        self.train_dataloader = None
-        self.val_dataloader = None
-
-    def _generate_cache_key(self) -> str:
-        """Generate a unique cache key based on data path and processing parameters."""
-        # Get file modification time for cache invalidation
-        current_date = pd.Timestamp.now().strftime('%Y-%m-%d')
-
-        cache_params = {
-            "current_date": current_date,
-            "years": self.years,
-            "prediction_window": self.prediction_window,
-            "feature_cols": sorted(self.feature_cols),  # Sort for consistency
-            "max_prediction_length": self.max_prediction_length,
-            "max_encoder_length": self.max_encoder_length
-        }
-
-        # Create hash from parameters
-        cache_str = json.dumps(cache_params, sort_keys=True)
-        cache_hash = hashlib.md5(cache_str.encode()).hexdigest()
-        return f"processed_data_{cache_hash}"
-
-    def _get_cache_paths(self) -> Tuple[Path, Path]:
-        """Get cache file paths for data and metadata."""
-        cache_key = self._generate_cache_key()
-        data_path = self.cache_dir / f"{cache_key}.parquet"
-        meta_path = self.cache_dir / f"{cache_key}_meta.json"
-        return data_path, meta_path
-
-    def _is_cache_valid(self) -> bool:
-        """Check if cached data exists and is valid."""
-        if not self.use_cache:
-            return False
-
-        data_path, meta_path = self._get_cache_paths()
-
-        # Check if both files exist
-        if not (data_path.exists() and meta_path.exists()):
-            return False
-
-        try:
-            # Load and validate metadata
-            with open(meta_path, 'r') as f:
-                metadata = json.load(f)
-
-            # Check if cache key matches
-            expected_key = self._generate_cache_key()
-            return metadata.get("cache_key") == expected_key
-
-        except (json.JSONDecodeError, KeyError):
-            return False
-
-    def _save_to_cache(self, data: pd.DataFrame):
-        """Save processed data to cache."""
-        if not self.use_cache:
-            return
-
-        data_path, meta_path = self._get_cache_paths()
-
-        try:
-            # Save data as Parquet
-            data.to_parquet(data_path, index=False)
-
-            # Save metadata
-            metadata = {
-                "cache_key": self._generate_cache_key(),
-                "data_shape": data.shape,
-                "columns": list(data.columns),
-                "created_at": pd.Timestamp.now().isoformat(),
-                "processing_params": {
-                    "years": self.years,
-                    "prediction_window": self.prediction_window,
-                    "max_prediction_length": self.max_prediction_length,
-                    "max_encoder_length": self.max_encoder_length
-                }
-            }
-
-            with open(meta_path, 'w') as f:
-                json.dump(metadata, f, indent=2)
-
-            print(f"Data cached to: {data_path}")
-
-        except Exception as e:
-            print(f"Warning: Failed to save cache: {e}")
-
-    def _load_from_cache(self) -> Optional[pd.DataFrame]:
-        """Load processed data from cache."""
-        if not self.use_cache or not self._is_cache_valid():
-            return None
-
-        data_path, meta_path = self._get_cache_paths()
-
-        try:
-            data = pd.read_parquet(data_path)
-            print(f"Loaded cached data from: {data_path}")
-            print(f"Cached data shape: {data.shape}")
-            return data
-
-        except Exception as e:
-            print(f"Warning: Failed to load cache: {e}")
-            return None
-
-    def prepare_data(self) -> pd.DataFrame:
-        """Load and preprocess raw data with caching support."""
-        print("Loading and preprocessing data...")
-
-        # Try to load from cache first
-        cached_data = self._load_from_cache()
-        if cached_data is not None:
-            self.training_data = cached_data
-            return cached_data
-
-        print("Cache miss or disabled. Processing data from scratch...")
-
-        # Load raw data with all required columns (features + Close + Ticker)
-        training_data = TickerData(
-            indicator_list=self.processing_cols,
-            years=self.years,
-            prediction_window=self.prediction_window,
-            prediction_mode=True,
-        ).process_all()
-
-        # Handle MultiIndex properly
-        if isinstance(training_data.index, pd.MultiIndex):
-            # Reset MultiIndex and handle the level names
-            training_data = training_data.reset_index()
-
-        # Ensure Ticker column is properly formatted as strings
-        if 'Ticker' in training_data.columns:
-            training_data['Ticker'] = training_data['Ticker'].astype(str)
-
-        tickers = training_data['Ticker'].unique()
-        tickers = np.random.choice(tickers, 100)
-        training_data = training_data[training_data['Ticker'].isin(tickers)]
-
-        # CRITICAL: Filter out tickers with insufficient data
-        min_length = self.max_encoder_length + self.max_prediction_length
-        print(f"Filtering tickers with at least {min_length} days of data...")
-
-        ticker_counts = training_data.groupby('Ticker').size()
-        valid_tickers = ticker_counts[ticker_counts >= min_length].index
-
-        print(f"Before filtering: {len(ticker_counts)} tickers")
-        print(f"After filtering: {len(valid_tickers)} tickers (>= {min_length} days)")
-        print(f"Removed {len(ticker_counts) - len(valid_tickers)} tickers with insufficient data")
-
-        if len(valid_tickers) == 0:
-            raise ValueError(
-                f"No tickers have at least {min_length} days of data. Consider reducing encoder_length or max_prediction_length.")
-
-        # Filter the data to only include valid tickers
-        training_data = training_data[training_data['Ticker'].isin(valid_tickers)]
-
-        # Create time index for the dataset
-        training_data["time_idx"] = training_data.groupby("Ticker").cumcount()
-        training_data = training_data.replace([np.inf, -np.inf], np.nan).dropna(axis=1)
-        training_data = training_data.sort_values(["Ticker", "date"]).reset_index(drop=True)
-
-        # Save to cache
-        self._save_to_cache(training_data)
-
-        self.training_data = training_data
-        print(f"Data prepared successfully. Shape: {training_data.shape}")
-        return training_data
 
 # ---------------------------------------------------------------------
 # 1.  CONFIG-BASED CONSTANTS  
@@ -521,9 +277,18 @@ def run_inference(config_path: str = None, external_df: pd.DataFrame = None) -> 
     print("Preparing dataset for inference...")
     dataset = prepare_dataset(oos_df, config)
 
+    tickers_sorted = sorted(oos_df["Ticker"].unique())
+    id2ticker = {i: t for i, t in enumerate(tickers_sorted)}
+
+    # We'll need `oos_df` later to get the date, so keep a trimmed copy
+    date_lookup = (
+        oos_df.loc[:, ["Ticker", "time_idx", "date"]]
+              .drop_duplicates()             # one row per (Ticker, time_idx)
+              .set_index(["Ticker", "time_idx"])
+    )
+
     # Get model path (relative to script directory)
-    script_dir = Path(__file__).parent
-    model_path = script_dir / constants['ONNX_MODEL_PATH']
+    model_path = constants['ONNX_MODEL_PATH']
 
     # Run inference
     print(f"Running inference with model: {model_path}")
@@ -535,18 +300,34 @@ def run_inference(config_path: str = None, external_df: pd.DataFrame = None) -> 
         config=config
     )
 
+    predictions["Ticker"] = predictions["group_id"].map(id2ticker)
+
+    # Re-attach the calendar date that belongs to the *first* decoder
+    # position (the one stored in `time_idx`)
+    predictions = (
+        predictions
+        .merge(
+            date_lookup.reset_index(),
+            on=["Ticker", "time_idx"],
+            how="left"
+        )
+        .drop(columns="group_id")            # no longer useful
+        .loc[:, ["Ticker", "date", "time_idx",
+                 "horizon", "prediction"]]   # tidy column order
+        .sort_values(["Ticker", "date", "horizon"])
+        .reset_index(drop=True)
+    )
+
     print(f"Inference completed. Generated {len(predictions)} predictions.")
     return predictions
 
 # ---------------------------------------------------------------------
 # 5.  EXAMPLE USAGE  ---------------------------------------------------
 # ---------------------------------------------------------------------
-if __name__ == "__main__":
-    # Run inference with automatic config loading and data fetching
-    predictions = run_inference()
+predictions = run_inference()
 
-    # Store results
-    predictions.to_parquet("predictions.parquet")
-    print("Predictions saved to predictions.parquet")
-    print("\nFirst few predictions:")
-    print(predictions.head())
+# Store results
+predictions.to_parquet("predictions.parquet")
+print("Predictions saved to predictions.parquet")
+print("\nFirst few predictions:")
+print(predictions.head())

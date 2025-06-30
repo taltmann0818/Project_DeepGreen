@@ -60,6 +60,7 @@ class TickerData:
         self.sample_size = kwargs.get('sample_size', None)
 
         # Initialize data fetcher
+        print("Fetching OHLCV data...")
         api_key = 'XizU4KyrwjCA6bxHrR5_eQnUxwFFUnI2'
         self.data_fetcher = DataFetcher(
             api_key=api_key,
@@ -68,6 +69,7 @@ class TickerData:
             years=years,
             sample_size=self.sample_size,
         )
+        print("Finished fetching OHLCV data")
 
         # Data storage
         self.dataset_ex_df = None
@@ -106,6 +108,8 @@ class TickerData:
         }
         self.dataset_ex_df = self.dataset_ex_df.rename(columns=column_mapping)
 
+        self.stock_data = self.dataset_ex_df.copy()
+
         # Add shifted prices for prediction if not in prediction mode
         if not self.prediction_mode:
             grouped = self.dataset_ex_df.groupby('Ticker')
@@ -113,13 +117,14 @@ class TickerData:
 
         return self.dataset_ex_df
 
-    def add_features(self):
+    def add_features(self, df=None):
         """Add all requested features to the dataset"""
         if self.dataset_ex_df is None:
             raise ValueError("Data must be preprocessed before adding features")
 
         # Ensure proper datetime index
-        df = self.dataset_ex_df.copy()
+        if df is None:
+            df = self.dataset_ex_df.copy()
 
         # Check if we already have a datetime index or need to create one
         if not isinstance(df.index, pd.DatetimeIndex):
@@ -141,18 +146,24 @@ class TickerData:
 
         # Add basic technical indicators
         df = TechnicalIndicators.add_technical_indicators(df=df,grouped=grouped,indicator_list=self.indicator_list,nasdaq_data=None)
+        print("Finished adding technical indicators")
 
         # Add cross-asset indicators
         #df = self._add_cross_asset_indicators(df)
 
         # Add sector indicators
+        self.data_fetcher.client.client.clear()
         df = SectorAnalysis.add_sector_indicators(df, self.data_fetcher, self.indicator_list)
+        print("Finished adding sector indicators")
 
         # Add news indicators
+        self.data_fetcher.client.client.clear()
         df = MarketNews.add_news_indicators(df, self.data_fetcher, self.indicator_list)
+        print("Finished adding news indicators")
 
         # Add calendar and earnings indicators
         df = CalendarEarnings.add_calendar_earnings_indicators(df, self.data_fetcher, self.indicator_list)
+        print("Finished adding calendar indicators")
 
         # Add Hidden Markov Model market regimes
         if 'hmm_state' in self.indicator_list:
