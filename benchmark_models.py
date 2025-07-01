@@ -8,7 +8,7 @@ with Weights & Biases integration and LLM-generated reports.
 
 Example
 -------
-$ python benchmark_models.py --experiment-run "model_comparison_v1" --models Tempus_v2 Tempus_v3_8 --years 1
+$ python benchmark_models.py --experiment-run "model_comparison_v1" --models Tempus_v2 Tempus_v3 --years 1
 """
 import argparse
 import logging
@@ -573,7 +573,7 @@ def main():
     parser.add_argument("--experiment-run", required=True,
                        help="W&B experiment run name")
     parser.add_argument("--models", nargs="+", required=True,
-                       help="Model names to benchmark (e.g., Tempus_v2 Tempus_v3_8)")
+                       help="Model names to benchmark (e.g., Tempus_v2 Tempus_v3)")
     parser.add_argument("--years", type=int, default=1,
                        help="Years of data to use for backtesting")
     parser.add_argument("--out-dir", default="benchmark_results",

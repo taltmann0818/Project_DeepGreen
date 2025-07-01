@@ -19,17 +19,20 @@ from Components.TickerData import TickerData
 class TFTDataModule:
     """Simple DataModule for Tempus v2 model"""
 
-    def __init__(self, data_path: str = 'raw_data_4k.csv', batch_size: int = 256, 
+    def __init__(self, config: dict = None,
+                 data_path: str = 'raw_data_4k.csv', batch_size: int = 256, 
                  max_prediction_length: int = 3, max_encoder_length: int = 30, 
-                 years: int = 5, prediction_window: int = 3, 
+                 days: int = 90, prediction_window: int = 3, 
                  num_workers: Optional[int] = None, use_cache: bool = True, 
                  cache_dir: str = "data_cache"):
 
+        self.config = config
+        self.sample_size = config.get("SAMPLE_SIZE", 100)
         self.data_path = data_path
         self.batch_size = batch_size
         self.max_prediction_length = max_prediction_length
         self.max_encoder_length = max_encoder_length
-        self.years = years
+        self.days = days
         self.prediction_window = prediction_window
         self.num_workers = num_workers or os.cpu_count()
         self.use_cache = use_cache
@@ -42,7 +45,7 @@ class TFTDataModule:
     def _generate_cache_key(self):
         """Generate a unique cache key based on parameters"""
         params = {
-            'years': self.years,
+            'days': self.days,
             'prediction_window': self.prediction_window,
             'indicators': sorted(self.indicator_list),
             'max_encoder_length': self.max_encoder_length,
@@ -94,7 +97,7 @@ class TFTDataModule:
             metadata = {
                 'cache_key': self._generate_cache_key(),
                 'created_at': pd.Timestamp.now().isoformat(),
-                'years': self.years,
+                'days': self.days,
                 'prediction_window': self.prediction_window,
                 'indicators': self.indicator_list,
                 'data_shape': data.shape
@@ -136,8 +139,10 @@ class TFTDataModule:
             # Use TickerData to process the data
             ticker_data = TickerData(
                 indicator_list=self.indicator_list,
-                years=self.years,
-                prediction_window=self.prediction_window
+                days=self.days,
+                prediction_window=self.prediction_window,
+                prediction_mode=True,
+                sample_size=self.sample_size
             )
 
             processed_data = ticker_data.process_all()
@@ -168,7 +173,7 @@ class TFTDataModule:
 
 def main():
     """Example usage"""
-    datamodule = TFTDataModule(years=1, use_cache=True)
+    datamodule = TFTDataModule(days=90, use_cache=True)
     data = datamodule.prepare_data()
 
     if data is not None:

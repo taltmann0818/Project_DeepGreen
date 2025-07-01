@@ -25,7 +25,7 @@ def onnx_predict(model_path, input_datamodule, window_size):
         input_window = np.expand_dims(input_window, axis=0)
 
         output = session.run(None, {input_name: input_window})
-        predictions.append(float(output[0][0][0])) if model_path == 'Models/Tempus_v3_8.onnx' else predictions.append(float(output[0].squeeze()))
+        predictions.append(float(output[0][0][0])) if model_path == 'Models/Tempus_v3.onnx' else predictions.append(float(output[0].squeeze()))
         tickers.append(ticker)
         dates.append(date)
 

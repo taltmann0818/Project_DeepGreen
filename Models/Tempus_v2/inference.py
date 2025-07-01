@@ -1,6 +1,6 @@
 import os
 import sys
-import json
+import yaml
 import pandas as pd
 import numpy as np
 import onnxruntime as ort
@@ -18,69 +18,33 @@ sys.path.insert(0, str(model_dir))
 try:
     from datamodule import TFTDataModule
 except ImportError:
-    try:
-        # Try importing from current directory
-        import importlib.util
-        spec = importlib.util.spec_from_file_location("datamodule", model_dir / "datamodule.py")
-        datamodule_module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(datamodule_module)
-        TFTDataModule = datamodule_module.TFTDataModule
-    except Exception as e:
-        print(f"Warning: Could not import TFTDataModule: {e}")
-        TFTDataModule = None
-
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("datamodule", model_dir / "datamodule.py")
+    datamodule_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(datamodule_module)
+    TFTDataModule = datamodule_module.TFTDataModule
 
 class TempusV2Inference:
     """Inference class for Tempus v2 model"""
+    def __init__(self, model_dir: str | Path | None = None):
+        self.model_dir = Path(model_dir) if model_dir else Path(__file__).parent
 
-    def __init__(self, model_dir: str = None):
-        if model_dir is None:
-            model_dir = Path(__file__).parent
-        else:
-            model_dir = Path(model_dir)
-
-        self.model_dir = model_dir
-        self.model_path = model_dir / "Tempus_v2.onnx"
-        self.meta_path = model_dir / "Tempus_v2_meta.json"
-        self.cache_dir = model_dir / "inference_cache"
-        self.cache_dir.mkdir(exist_ok=True)
-
-        # Load metadata
-        with open(self.meta_path, 'r') as f:
-            self.metadata = json.load(f)
-
-        # Initialize ONNX session
-        self.session = ort.InferenceSession(str(self.model_path))
-        self.input_name = self.session.get_inputs()[0].name
-
-    def get_cache_path(self, data_hash: str) -> Path:
-        """Get cache file path for given data hash"""
-        return self.cache_dir / f"inference_{data_hash}.parquet"
-
-    def generate_data_hash(self, data: pd.DataFrame) -> str:
-        """Generate hash for data to use as cache key"""
-        import hashlib
-        data_str = str(data.index.min()) + str(data.index.max()) + str(len(data))
-        return hashlib.md5(data_str.encode()).hexdigest()[:16]
-
-    def load_cached_inference(self, data_hash: str) -> Optional[pd.DataFrame]:
-        """Load cached inference results if available"""
-        cache_path = self.get_cache_path(data_hash)
-        if cache_path.exists():
-            try:
-                return pd.read_parquet(cache_path)
-            except Exception as e:
-                print(f"Warning: Could not load cache {cache_path}: {e}")
-        return None
-
-    def save_inference_cache(self, data_hash: str, results: pd.DataFrame):
-        """Save inference results to cache"""
-        cache_path = self.get_cache_path(data_hash)
+        # ── 1. locate & load YAML ──────────────────────────────────────────────
         try:
-            results.to_parquet(cache_path)
-            print(f"Cached inference results to {cache_path}")
-        except Exception as e:
-            print(f"Warning: Could not save cache {cache_path}: {e}")
+            cfg_path = next(self.model_dir.glob("config.yaml"))
+        except StopIteration:
+            raise FileNotFoundError(
+                f"No 'config.yaml' found in {self.model_dir}. "
+                "Place a config file in that directory or pass a different path."
+            )
+
+        with open(cfg_path, "r", encoding="utf-8") as fh:
+            self.config: Dict[str, Any] = yaml.safe_load(fh) or {}
+
+        # convenience: keep constants handy
+        self.constants = self.get_model_constants()
+
+        self.data: pd.DataFrame | None = None
 
     def prepare_features(self, data: pd.DataFrame) -> pd.DataFrame:
         """Prepare features according to model metadata"""
@@ -95,41 +59,41 @@ class TempusV2Inference:
         feature_data = data[required_features].copy()
         return feature_data
 
-    def predict(self, data: pd.DataFrame, window_size: int = 20, use_cache: bool = True) -> pd.DataFrame:
+    def get_model_constants(self) -> Dict[str, Any]:
+        """Translate YAML keys into the constants the pipeline expects."""
+        c = self.config  # shorthand
+        return {
+            "TV_KNOWN_REAL":       c["dataset_parameters"]["value"]["time_varying_unknown_reals"],
+            "ONNX_MODEL_PATH":     str(c["onnx_model_name"]["value"]),
+            "WINDOW_SIZE":         str(c["window_size"]["value"]),
+            "EXEC_PROVIDER":       c.get("execution_provider", "CPUExecutionProvider"),
+            "BATCH_SIZE":          int(c["batch_size"]["value"]),
+            "NUM_WORKERS":         int(c.get("num_workers", 30)),
+            "SAMPLE_SIZE":         100,
+        }
+    
+    def predict(self, data: pd.DataFrame) -> pd.DataFrame:
         """
-        Run inference on the provided data
-
-        Args:
-            data: DataFrame with features and Ticker column
-            window_size: Size of the sliding window for predictions
-            use_cache: Whether to use cached results if available
-
-        Returns:
-            DataFrame with predictions, indexed by date
+        Run ONNX-exported model on dateset and return 1-point prediction.
+    
+        Returns columns:
+            Ticker, date, prediction
         """
-        # Generate cache key
-        data_hash = self.generate_data_hash(data)
-
-        # Try to load from cache
-        if use_cache:
-            cached_results = self.load_cached_inference(data_hash)
-            if cached_results is not None:
-                print(f"Loaded cached inference results for {self.metadata['name']}")
-                return cached_results
-
-        # Prepare features
+        const = self.constants
         feature_data = self.prepare_features(data)
+        # ––––––––––––––– 1 Create ONNX session –––––––––––––––
+        sess_options = ort.SessionOptions()
+        sess_options.enable_cpu_mem_arena = True
+        session = ort.InferenceSession(
+            const["ONNX_MODEL_PATH"],
+            sess_options=sess_options,
+            providers=[const['EXEC_PROVIDER']]
+        )
+        input_name = session.get_inputs()[0].name
 
-        predictions = []
-        tickers = []
-        dates = []
-
-        print(f"Running inference for {self.metadata['name']} on {len(data)} samples...")
-
-        for i in range(window_size, len(feature_data)):
-            date = feature_data.index[i]
-            ticker = data['Ticker'].iloc[i] if 'Ticker' in data.columns else 'UNKNOWN'
-
+        preds, groups, times = [], [], []
+        
+        for i in range(const["WINDOW_SIZE"], len(feature_data)):
             # Get feature window (excluding Ticker column)
             feature_window = feature_data.iloc[i - window_size:i].values.astype(np.float32)
 
@@ -137,34 +101,19 @@ class TempusV2Inference:
             input_window = np.expand_dims(feature_window, axis=0)
 
             # Run inference
-            output = self.session.run(None, {self.input_name: input_window})
-            prediction = float(output[0].squeeze())  # Extract scalar prediction
+            output = self.session.run(None, {input_name: input_window})
 
-            predictions.append(prediction)
-            tickers.append(ticker)
-            dates.append(date)
+            preds.append(float(output[0].squeeze()))
+            groups.append(feature_data['Ticker'].iloc[i])
+            times.append(feature_data.index[i])
 
         # Create results DataFrame
         results_df = pd.DataFrame({
-            'Ticker': tickers,
-            'Predicted': predictions
-        }, index=dates)
-
-        # Cache results
-        if use_cache:
-            self.save_inference_cache(data_hash, results_df)
+            'Ticker': groups,
+            'Predicted': preds
+        }, index=times)
 
         return results_df
-
-    def get_model_info(self) -> Dict[str, Any]:
-        """Get model information"""
-        return {
-            'name': self.metadata['name'],
-            'features': self.metadata['features'],
-            'model_path': str(self.model_path),
-            'num_features': len(self.metadata['features'])
-        }
-
 
 def main():
     """Example usage"""
@@ -176,7 +125,7 @@ def main():
 
     # Load data using datamodule
     try:
-        datamodule = TFTDataModule(years=1, use_cache=True)
+        datamodule = TFTDataModule(config=inference.constants)
         datamodule.prepare_data()
         data = datamodule.get_inference_data()
 

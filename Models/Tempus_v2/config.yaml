@@ -1,0 +1,17 @@
+batch_size:
+    value: 256
+cache_dir:
+    value: data_cache
+dataset_parameters:
+    value:
+        time_varying_unknown_reals:
+            - ema_20
+            - ema_50
+            - ema_100
+            - macd
+            - hmm_state
+window_size:
+    value: 20
+onnx_model_name:
+    value: Tempus_v2.fp8.onnx
+
