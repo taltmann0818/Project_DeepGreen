@@ -13,6 +13,12 @@ from Components.DataModules.calendar_earnings import CalendarEarnings
 from Components.DataModules.market_news import MarketNews
 from Components.MarketRegimes import RegimeDetector
 
+# Add project root to path
+import sys
+from pathlib import Path
+project_root = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(project_root))
+
 class TickerData:
     """
     Refactored TickerData class with modular architecture.
@@ -21,7 +27,7 @@ class TickerData:
     using separate modules for different responsibilities.
     """
 
-    def __init__(self, indicator_list, years=1, prediction_window=3, **kwargs):
+    def __init__(self, indicator_list, days=1, prediction_window=3, **kwargs):
         """
         Initialize the TickerData with a ticker symbol and configuration.
 
@@ -47,11 +53,7 @@ class TickerData:
         # Configuration
         self.indicator_list = set(indicator_list)
         self.prediction_window = -abs(prediction_window)
-        self.years = years
-        self.days = years * 365
-
-        if years > 5:
-            raise ValueError("Max years is 5 due to API limits.")
+        self.days = days
 
         self.start_date = kwargs.get('start_date')
         self.end_date = kwargs.get('end_date')
@@ -60,16 +62,14 @@ class TickerData:
         self.sample_size = kwargs.get('sample_size', None)
 
         # Initialize data fetcher
-        print("Fetching OHLCV data...")
         api_key = 'XizU4KyrwjCA6bxHrR5_eQnUxwFFUnI2'
         self.data_fetcher = DataFetcher(
             api_key=api_key,
             start_date=self.start_date,
             end_date=self.end_date,
-            years=years,
+            days=days,
             sample_size=self.sample_size,
         )
-        print("Finished fetching OHLCV data")
 
         # Data storage
         self.dataset_ex_df = None
@@ -91,12 +91,13 @@ class TickerData:
         """
         if self.max_workers:
             workers = max(workers, self.max_workers)
-
+            
         return self.data_fetcher.fetch_stock_data(workers)
 
     def preprocess_data(self):
         """Preprocess the fetched data"""
         self.dataset_ex_df = self.fetch_stock_data()
+        print("Finished fetching OHLCV data")
 
         if self.dataset_ex_df.empty:
             raise ValueError("No data available for processing")
@@ -167,7 +168,7 @@ class TickerData:
 
         # Add Hidden Markov Model market regimes
         if 'hmm_state' in self.indicator_list:
-            _, df['hmm_state']  = RegimeDetector.load("Models/hmm_v2.pkl").predict(self.dataset_ex_df, ma=5)
+            _, df['hmm_state']  = RegimeDetector.load("/Users/thomasaltmann/PycharmProjects/Project DeepGreen/Models/hmm_v2.pkl").predict(self.dataset_ex_df, ma=5)
 
         self.dataset_ex_df = df
         return df

@@ -114,7 +114,7 @@ class TempusV3Inference:
             add_relative_time_idx=False,
             add_encoder_length=True,
             target_normalizer=target_normalizer,
-            predict_mode=True
+            predict_mode=False
         )
         return dataset
 
@@ -166,30 +166,36 @@ class TempusV3Inference:
     
         preds, groups, times = [], [], []
     
-        for batch in loader:
-            x, _ = batch
-            ort_inputs = {alias.get(k, k): v.detach().cpu().numpy()
-                          for k, v in x.items()
-                          if alias.get(k, k) in input_names}
-            out = session.run([output_name], ort_inputs)[0]
-            
-            # out can be (B, T, Q)  or  (B, Q, T)
-            if out.ndim != 3:
-                raise ValueError(f"ONNX output must be 3-D, got {out.shape}")
-    
-            b, d1, d2 = out.shape
-            dec_len = tft_dataset.max_prediction_length
-            if d2 == dec_len:                 # (B, Q, T)  
-                out = out.transpose(0, 2, 1)  # (B, T, Q) → transpose
-            elif d1 != dec_len:               # neither dim matches decoder lengt
-                raise ValueError(
-                    f"Cannot locate decoder length {dec_len} in ONNX output {out.shape}"
-                )
-    
-            preds.append(out)      
-            groups.append(x["groups"].squeeze().cpu().numpy())
-            times.append(x["decoder_time_idx"].cpu().numpy())
-    
+        for batch_idx, batch in enumerate(loader):
+            try:
+                x, _ = batch
+                ort_inputs = {alias.get(k, k): v.detach().cpu().numpy()
+                              for k, v in x.items()
+                              if alias.get(k, k) in input_names}
+                out = session.run([output_name], ort_inputs)[0]
+
+                # out can be (B, T, Q)  or  (B, Q, T)
+                if out.ndim != 3:
+                    raise ValueError(f"ONNX output must be 3-D, got {out.shape}")
+
+                b, d1, d2 = out.shape
+                dec_len = tft_dataset.max_prediction_length
+                if d2 == dec_len:                 # (B, Q, T)
+                    out = out.transpose(0, 2, 1)  # (B, T, Q) → transpose
+                elif d1 != dec_len:               # neither dim matches decoder lengt
+                    raise ValueError(
+                        f"Cannot locate decoder length {dec_len} in ONNX output {out.shape}"
+                    )
+
+                preds.append(out)
+                groups.append(x["groups"].squeeze().cpu().numpy())
+                times.append(x["decoder_time_idx"].cpu().numpy())
+
+            except Exception as e:
+                print(f"Warning: Skipping batch {batch_idx} due to error: {e}")
+                continue
+
+
         if not preds:
             raise RuntimeError("No successful predictions were made. Check your data and model compatibility.")
     

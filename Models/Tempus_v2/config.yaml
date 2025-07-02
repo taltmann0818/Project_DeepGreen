@@ -10,6 +10,8 @@ dataset_parameters:
             - ema_100
             - macd
             - hmm_state
+            - stoch_rsi_14
+            - Close
 window_size:
     value: 20
 onnx_model_name:

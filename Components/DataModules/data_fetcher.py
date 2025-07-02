@@ -16,7 +16,7 @@ from dateutil.easter import easter
 class DataFetcher:
     """Handles all data fetching operations from Polygon API"""
 
-    def __init__(self, api_key, start_date=None, end_date=None, sample_size=None, years=1):
+    def __init__(self, api_key, start_date=None, end_date=None, sample_size=None, days=1):
         """
         Initialize the DataFetcher with API credentials and date range.
 
@@ -32,8 +32,7 @@ class DataFetcher:
             Number of years of historical data to fetch if dates not provided
         """
         self.client = RESTClient(api_key,num_pools=50)
-        self.years = years
-        self.days = years * 365
+        self.days = days
         self.sample_size = sample_size
 
         if not start_date:

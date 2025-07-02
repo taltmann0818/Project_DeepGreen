@@ -355,8 +355,8 @@ class TechnicalIndicators:
 
         # Process parameterized indicators
         parameterized_indicators = [
-            ('sma', [5, 10, 20]), ('ema', [5, 10, 20]), ('rsi', [5, 14, 21]),
-            ('stochastic_rsi', [5, 14, 21])
+            ('sma', [5, 10, 20]), ('ema', [5, 10, 20, 50, 100]), ('rsi', [5, 14, 21]),
+            ('stoch_rsi', [5, 14, 21])
         ]
 
         for base_name, periods in parameterized_indicators:
@@ -369,7 +369,7 @@ class TechnicalIndicators:
                         df[name] = grouped['Close'].transform(lambda x: TechnicalIndicators.ema(x, period))
                     elif base_name == 'rsi':
                         df[name] = grouped['Close'].transform(lambda x: TechnicalIndicators.rsi(x, period))
-                    elif base_name == 'stochastic_rsi':
+                    elif base_name == 'stoch_rsi':
                         df[name] = grouped['Close'].transform(lambda x: TechnicalIndicators.stochastic_rsi(x, period))
 
         # Process multi-column indicators

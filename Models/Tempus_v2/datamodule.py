@@ -10,9 +10,12 @@ import hashlib
 import json
 
 # Add project root to path
-project_root = Path(__file__).parent.parent.parent
-sys.path.insert(0, str(project_root))
+import sys
+import os
 
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(os.path.dirname(current_dir))
+sys.path.insert(0, project_root)
 from Components.TickerData import TickerData
 
 
@@ -24,10 +27,11 @@ class TFTDataModule:
                  max_prediction_length: int = 3, max_encoder_length: int = 30, 
                  days: int = 90, prediction_window: int = 3, 
                  num_workers: Optional[int] = None, use_cache: bool = True, 
-                 cache_dir: str = "data_cache"):
+                 cache_dir: str = "data_cache",
+                 sample_size: int = 100):
 
         self.config = config
-        self.sample_size = config.get("SAMPLE_SIZE", 100)
+        self.sample_size = sample_size
         self.data_path = data_path
         self.batch_size = batch_size
         self.max_prediction_length = max_prediction_length
@@ -40,7 +44,7 @@ class TFTDataModule:
         self.cache_dir.mkdir(exist_ok=True)
 
         # Tempus v2 specific indicators
-        self.indicator_list = ['ema_20', 'ema_50', 'ema_100', 'stoch_rsi14', 'macd', 'hmm_state', 'Close']
+        self.indicator_list = ['ema_20', 'ema_50', 'ema_100', 'stoch_rsi_14', 'macd', 'hmm_state', 'Close']
 
     def _generate_cache_key(self):
         """Generate a unique cache key based on parameters"""
@@ -137,15 +141,22 @@ class TFTDataModule:
 
         try:
             # Use TickerData to process the data
-            ticker_data = TickerData(
+            processed_data = TickerData(
                 indicator_list=self.indicator_list,
                 days=self.days,
                 prediction_window=self.prediction_window,
                 prediction_mode=True,
                 sample_size=self.sample_size
-            )
+            ).process_all()
 
-            processed_data = ticker_data.process_all()
+            # Handle MultiIndex properly
+            if isinstance(processed_data.index, pd.MultiIndex):
+                # Reset MultiIndex and handle the level names
+                processed_data = processed_data.reset_index()
+
+            # Ensure Ticker column is properly formatted as strings
+            if 'Ticker' in processed_data.columns:
+                processed_data['Ticker'] = processed_data['Ticker'].astype(str)
 
             if processed_data is not None and not processed_data.empty:
                 # Save to cache

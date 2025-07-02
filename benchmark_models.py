@@ -38,7 +38,7 @@ except ImportError:
     wandb = None
 
 try:
-    import google.generativeai as genai
+    from google import genai
     GEMINI_AVAILABLE = True
 except ImportError:
     GEMINI_AVAILABLE = False
@@ -54,11 +54,12 @@ logging.basicConfig(level=logging.INFO,
 class ModelBenchmarkRunner:
     """Modular benchmark runner for ML models with W&B integration"""
 
-    def __init__(self, experiment_run: str, models: List[str], years: int = 1, 
-                 out_dir: str = "benchmark_results"):
+    def __init__(self, experiment_run: str, models: List[str], days: int = 1,
+                 out_dir: str = "benchmark_results", sample_size: int = 100):
         self.experiment_run = experiment_run
         self.models = models
-        self.years = years
+        self.days = days
+        self.sample_size = sample_size
         self.out_dir = Path(out_dir)
         self.out_dir.mkdir(exist_ok=True)
 
@@ -67,7 +68,7 @@ class ModelBenchmarkRunner:
         self.initialize_wandb()
 
         # Initialize Gemini
-        self.gemini_model = None
+        self.gemini_model = "gemini-2.5-flash"
         self.initialize_gemini()
 
         # Model results storage
@@ -101,13 +102,11 @@ class ModelBenchmarkRunner:
             return
 
         try:
-            api_key = os.getenv("GEMINI_API_KEY")
-            if not api_key:
+            if not os.getenv("GEMINI_API_KEY"):
                 logging.warning("⚠️  GEMINI_API_KEY not set, LLM reports disabled")
                 return
 
-            genai.configure(api_key=api_key)
-            self.gemini_model = genai.GenerativeModel('gemini-2.0-flash-exp')
+            self.genai_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
             logging.info("✅ Initialized Gemini API")
         except Exception as e:
             logging.warning("⚠️  Could not initialize Gemini: %s", e)
@@ -432,7 +431,9 @@ class ModelBenchmarkRunner:
             Format the response in clear sections with actionable insights.
             """
 
-            response = self.gemini_model.generate_content(prompt)
+            response = self.genai_client.models.generate_content(
+                model=self.gemini_model,
+                contents=prompt)
             return response.text
 
         except Exception as e:
@@ -486,6 +487,15 @@ class ModelBenchmarkRunner:
 
         # Prepare benchmark data
         self.prepare_benchmark_data()
+
+        # Prepare the initial sample set
+        data_retriever = TickerData(
+            indicator_list=None,
+            days=self.days,
+            prediction_window=self.prediction_window,
+            prediction_mode=True,
+            sample_size=self.sample_size
+        )
 
         # Run each model
         for model_name in self.models:
@@ -574,8 +584,9 @@ def main():
                        help="W&B experiment run name")
     parser.add_argument("--models", nargs="+", required=True,
                        help="Model names to benchmark (e.g., Tempus_v2 Tempus_v3)")
-    parser.add_argument("--years", type=int, default=1,
+    parser.add_argument("--days", type=int, default=1,
                        help="Years of data to use for backtesting")
+    parser.add_argument("--sample-size", type=int, default=1000)
     parser.add_argument("--out-dir", default="benchmark_results",
                        help="Output directory for results")
 
@@ -585,8 +596,9 @@ def main():
     runner = ModelBenchmarkRunner(
         experiment_run=args.experiment_run,
         models=args.models,
-        years=args.years,
-        out_dir=args.out_dir
+        days=args.days,
+        out_dir=args.out_dir,
+        sample_size=args.sample_size
     )
 
     runner.run_benchmark()

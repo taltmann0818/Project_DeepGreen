@@ -33,17 +33,14 @@ class TFTDataModule:
         prediction_window: int = 3,
         num_workers: Optional[int] = None,
         use_cache: bool = True,
-        cache_dir: str = "data_cache"
+        cache_dir: str = "data_cache",
+        sample_size: int = 100,
     ):
-        # Load config if not provided
-        if config is None:
-            config = load_model_config()
-
         self.config = config
 
         # Use config values with fallback to parameters
         self.batch_size = batch_size or config.get("BATCH_SIZE", 256)
-        self.sample_size = config.get("SAMPLE_SIZE", 100)
+        self.sample_size = sample_size
         self.max_prediction_length = max_prediction_length or config.get("DECODER_LEN", 3)
         self.max_encoder_length = max_encoder_length or config.get("ENCODER_LEN", 30)
         self.days = days

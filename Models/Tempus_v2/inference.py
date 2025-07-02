@@ -26,7 +26,7 @@ except ImportError:
 
 class TempusV2Inference:
     """Inference class for Tempus v2 model"""
-    def __init__(self, model_dir: str | Path | None = None):
+    def __init__(self):
         self.model_dir = Path(model_dir) if model_dir else Path(__file__).parent
 
         # ── 1. locate & load YAML ──────────────────────────────────────────────
@@ -48,7 +48,7 @@ class TempusV2Inference:
 
     def prepare_features(self, data: pd.DataFrame) -> pd.DataFrame:
         """Prepare features according to model metadata"""
-        required_features = self.metadata['features']
+        required_features = self.constants['TV_KNOWN_REAL'] + ['Ticker','date']
 
         # Check if all required features are present
         missing_features = set(required_features) - set(data.columns)
@@ -81,37 +81,36 @@ class TempusV2Inference:
         """
         const = self.constants
         feature_data = self.prepare_features(data)
+        window_size = int(const['WINDOW_SIZE'])
         # ––––––––––––––– 1 Create ONNX session –––––––––––––––
-        sess_options = ort.SessionOptions()
-        sess_options.enable_cpu_mem_arena = True
         session = ort.InferenceSession(
-            const["ONNX_MODEL_PATH"],
-            sess_options=sess_options,
-            providers=[const['EXEC_PROVIDER']]
+            "Tempus_v2.onnx",
+            providers=["CPUExecutionProvider"],
         )
         input_name = session.get_inputs()[0].name
 
         preds, groups, times = [], [], []
         
-        for i in range(const["WINDOW_SIZE"], len(feature_data)):
+        for i in range(window_size, len(feature_data)):
             # Get feature window (excluding Ticker column)
-            feature_window = feature_data.iloc[i - window_size:i].values.astype(np.float32)
+            values = feature_data.drop(columns=['Ticker','date']).values.astype(np.float32)
 
-            # Add batch dimension: shape = (1, window_size, num_features)
-            input_window = np.expand_dims(feature_window, axis=0)
+            input_window = values[i - window_size:i]
+
+            input_window = np.expand_dims(input_window, axis=0)
 
             # Run inference
-            output = self.session.run(None, {input_name: input_window})
+            output = session.run(None, {input_name: input_window})
 
             preds.append(float(output[0].squeeze()))
             groups.append(feature_data['Ticker'].iloc[i])
-            times.append(feature_data.index[i])
+            times.append(feature_data['date'][i])
 
         # Create results DataFrame
         results_df = pd.DataFrame({
             'Ticker': groups,
             'Predicted': preds
-        }, index=times)
+        }, index=pd.DatetimeIndex(times))
 
         return results_df
 
@@ -131,7 +130,8 @@ def main():
 
         if data is not None:
             # Run inference
-            results = inference.predict(data, window_size=20)
+            results = inference.predict(data)
+            results.to_parquet("predictions.parquet")
             print(f"Generated {len(results)} predictions")
             print(results.head())
         else:
