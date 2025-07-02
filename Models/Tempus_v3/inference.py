@@ -4,7 +4,6 @@ from pytorch_forecasting.data import EncoderNormalizer
 import pandas as pd
 import numpy as np
 from typing import Tuple, Optional
-import torch
 import hashlib
 import sys
 from pathlib import Path
@@ -12,6 +11,7 @@ import yaml
 import os
 import warnings
 from typing import Dict, Any, Optional
+from tqdm.auto import tqdm
 warnings.filterwarnings("ignore")  # avoid printing out absolute paths
 
 # Add project root to path
@@ -22,16 +22,22 @@ sys.path.insert(0, str(project_root))
 model_dir = Path(__file__).parent
 sys.path.insert(0, str(model_dir))
 
+def _find_model(pickle_name: str) -> Path:
+    project_root = Path(__file__).resolve().parents[2]   # ../..
+    for path in project_root.rglob(pickle_name):
+        return path
+    raise FileNotFoundError(f"{pickle_name} not found anywhere under {project_root}")
+
 try:
-    from datamodule import TFTDataModule
+    from datamodule import DataModule
 except ImportError:
     import importlib.util
     spec = importlib.util.spec_from_file_location("datamodule", model_dir / "datamodule.py")
     datamodule_module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(datamodule_module)
-    TFTDataModule = datamodule_module.TFTDataModule
+    DataModule = datamodule_module.DataModule
 
-class TempusV3Inference:
+class Tempusv3Inference:
     """Inference class for Tempus v3 model"""
     def __init__(self, model_dir: str | Path | None = None):
         self.model_dir = Path(model_dir) if model_dir else Path(__file__).parent
@@ -135,11 +141,13 @@ class TempusV3Inference:
         # ––––––––––––––– 1 Create ONNX session –––––––––––––––
         sess_options = ort.SessionOptions()
         sess_options.enable_cpu_mem_arena = True
+        model_path = const["ONNX_MODEL_PATH"]
         session = ort.InferenceSession(
-            const["ONNX_MODEL_PATH"],
+            model_path,
             sess_options=sess_options,
             providers=[const['EXEC_PROVIDER']]
         )
+        print(f"Loaded ONNX Model: {const["ONNX_MODEL_PATH"]}")
     
         input_names = {i.name for i in session.get_inputs()}
         output_name = session.get_outputs()[0].name
@@ -165,7 +173,7 @@ class TempusV3Inference:
         }
     
         preds, groups, times = [], [], []
-    
+        pbar = tqdm(total=len(loader), desc="Running ONNX inference",leave=False)
         for batch_idx, batch in enumerate(loader):
             try:
                 x, _ = batch
@@ -195,11 +203,13 @@ class TempusV3Inference:
                 print(f"Warning: Skipping batch {batch_idx} due to error: {e}")
                 continue
 
+            pbar.update(batch_idx)
 
         if not preds:
             raise RuntimeError("No successful predictions were made. Check your data and model compatibility.")
     
         # ––––––––––––––– 3 concat & tidy –––––––––––––––
+        pbar.close()
         preds_arr = np.concatenate(preds, axis=0)
         groups_arr = np.concatenate(groups, axis=0) 
         times_arr = np.concatenate(times, axis=0) 
@@ -278,15 +288,15 @@ class TempusV3Inference:
 
 def main():
     """Example usage"""
-    inference = TempusV3Inference()
+    inference = Tempusv3Inference()
 
-    if TFTDataModule is None:
-        print("TFTDataModule not available - cannot run example")
+    if DataModule is None:
+        print("DataModule not available - cannot run example")
         return
 
     # Load data using datamodule
     try:
-        datamodule = TFTDataModule(config=inference.constants)
+        datamodule = DataModule(config=inference.constants)
         data = datamodule.prepare_data()
 
         if data is not None:

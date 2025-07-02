@@ -154,9 +154,14 @@ class RegimeDetector:
         Out‐of‐sample prediction using a previously fitted model.
         """
         # re‐store for plotting
+        
+        df = df.reset_index()
         self.df = df.copy()
-        df['Date'] = pd.to_datetime(self.df.index)
+        df['Date'] = pd.to_datetime(self.df['date'])
         self.ma = ma
+
+        if 'Ticker' in df.columns:
+            df['Ticker'] = self.df['Ticker'].astype(str)
 
         X_all, tickers, lengths, idx_maps = self._prepare(df, ma)
         states_all = self.model.predict(X_all, lengths=lengths)
@@ -223,7 +228,7 @@ class RegimeDetector:
             yaxis_title="Close",
             margin=dict(l=20, r=20, t=50, b=20),
         ).show()
-
+        
 """
 Example usage for training:
 

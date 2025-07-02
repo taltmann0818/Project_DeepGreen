@@ -17,7 +17,7 @@ sys.path.insert(0, str(project_root))
 
 from Components.TickerData import TickerData
 
-class TFTDataModule:
+class DataModule:
     """
     Data module for TFT model training that handles data loading, preprocessing,
     and creation of PyTorch Lightning dataloaders.
@@ -62,7 +62,7 @@ class TFTDataModule:
         self.model_path = config.get("ONNX_MODEL_PATH", "")
 
         # Additional columns needed for processing (target and identifier)
-        self.processing_cols = ["Close"] + self.static_categoricals + self.time_varying_known_reals + self.time_varying_unknown_reals
+        self.indicator_list = ['Close'] + self.static_categoricals + self.time_varying_known_reals + self.time_varying_unknown_reals
 
     def _generate_cache_key(self) -> str:
         """Generate a unique cache key based on data path and processing parameters."""
@@ -73,7 +73,7 @@ class TFTDataModule:
             "current_date": current_date,
             "days": self.days,
             "prediction_window": self.prediction_window,
-            "processing_cols": sorted(self.processing_cols),  # Sort for consistency
+            "indicator_list": sorted(self.indicator_list),  # Sort for consistency
             "max_prediction_length": self.max_prediction_length,
             "max_encoder_length": self.max_encoder_length
         }
@@ -113,7 +113,7 @@ class TFTDataModule:
         except (json.JSONDecodeError, KeyError):
             return False
 
-    def _save_to_cache(self, data: pd.DataFrame, raw_data: pd.DataFrame):
+    def _save_to_cache(self, data: pd.DataFrame):
         """Save processed data to cache."""
         if not self.use_cache:
             return
@@ -123,7 +123,6 @@ class TFTDataModule:
         try:
             # Save data as Parquet
             data.to_parquet(data_path, index=False)
-            #raw_data.to_parquet(f"raw_{data_path}", index=False)
 
             # Save metadata
             metadata = {
@@ -164,47 +163,48 @@ class TFTDataModule:
             print(f"Warning: Failed to load cache: {e}")
             return None
 
-    def prepare_data(self) -> pd.DataFrame:
-        """Load and preprocess raw data with caching support."""
-        print("Loading and preprocessing data...")
-
+    def prepare_data(self, raw_data=None) -> pd.DataFrame:
+        """Prepare the data for training/inference"""
         # Try to load from cache first
         cached_data = self._load_from_cache()
         if cached_data is not None:
-            self.training_data = cached_data
             return cached_data
 
-        print("Cache miss or disabled. Processing data from scratch...")
+        if raw_data is not None:
+            data_retriever = TickerData(
+                indicator_list=self.indicator_list,
+                days=self.days,
+                prediction_window=self.prediction_window,
+                prediction_mode=True,
+                sample_size=self.sample_size
+            )
+            processed_data = data_retriever.add_features(df=raw_data)
+            processed_data = data_retriever.merge_data(df=processed_data)
 
-        # Load raw data with all required columns (features + Close + Ticker)
-        data_retriever = TickerData(
-            indicator_list=self.processing_cols,
-            days=self.days,
-            prediction_window=self.prediction_window,
-            prediction_mode=True,
-            sample_size=self.sample_size
-        )
-        training_data = data_retriever.process_all()
-        stock_data = data_retriever.stock_data
+        else:
+            # Use TickerData to process the data
+            processed_data = TickerData(
+                indicator_list=self.indicator_list,
+                days=self.days,
+                prediction_window=self.prediction_window,
+                prediction_mode=True,
+                sample_size=self.sample_size
+            ).process_all()
 
         # Handle MultiIndex properly
-        if isinstance(training_data.index, pd.MultiIndex):
+        if isinstance(processed_data.index, pd.MultiIndex):
             # Reset MultiIndex and handle the level names
-            training_data = training_data.reset_index()
+            processed_data = processed_data.reset_index()
 
         # Ensure Ticker column is properly formatted as strings
-        if 'Ticker' in training_data.columns:
-            training_data['Ticker'] = training_data['Ticker'].astype(str)
-
-        tickers = training_data['Ticker'].unique()
-        tickers = np.random.choice(tickers, 100)
-        training_data = training_data[training_data['Ticker'].isin(tickers)]
+        if 'Ticker' in processed_data.columns:
+            processed_data['Ticker'] = processed_data['Ticker'].astype(str)
 
         # CRITICAL: Filter out tickers with insufficient data
         min_length = self.max_encoder_length + self.max_prediction_length
         print(f"Filtering tickers with at least {min_length} days of data...")
 
-        ticker_counts = training_data.groupby('Ticker').size()
+        ticker_counts = processed_data.groupby('Ticker').size()
         valid_tickers = ticker_counts[ticker_counts >= min_length].index
 
         print(f"Before filtering: {len(ticker_counts)} tickers")
@@ -216,16 +216,30 @@ class TFTDataModule:
                 f"No tickers have at least {min_length} days of data. Consider reducing encoder_length or max_prediction_length.")
 
         # Filter the data to only include valid tickers
-        training_data = training_data[training_data['Ticker'].isin(valid_tickers)]
+        processed_data = processed_data[processed_data['Ticker'].isin(valid_tickers)]
 
         # Create time index for the dataset
-        training_data["time_idx"] = training_data.groupby("Ticker").cumcount()
-        training_data = training_data.replace([np.inf, -np.inf], np.nan).dropna(axis=1)
-        training_data = training_data.sort_values(["Ticker", "date"]).reset_index(drop=False)
+        processed_data["time_idx"] = processed_data.groupby("Ticker").cumcount()
+        processed_data = processed_data.replace([np.inf, -np.inf], np.nan).dropna(axis=1)
+        processed_data = processed_data.sort_values(["Ticker", "date"]).reset_index(drop=False)
 
         # Save to cache
-        self._save_to_cache(training_data, stock_data)
+        self._save_to_cache(processed_data)
+        return processed_data
 
-        self.training_data = training_data
-        print(f"Data prepared successfully. Shape: {training_data.shape}")
-        return training_data
+
+def main():
+    """Example usage"""
+    datamodule = DataModule(days=90, use_cache=True)
+    data = datamodule.prepare_data()
+
+    if data is not None:
+        print(f"Processed data shape: {data.shape}")
+        print(f"Columns: {list(data.columns)}")
+        print(data.head())
+    else:
+        print("No data available")
+
+
+if __name__ == "__main__":
+    main()

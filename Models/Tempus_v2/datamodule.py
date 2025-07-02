@@ -18,8 +18,7 @@ project_root = os.path.dirname(os.path.dirname(current_dir))
 sys.path.insert(0, project_root)
 from Components.TickerData import TickerData
 
-
-class TFTDataModule:
+class DataModule:
     """Simple DataModule for Tempus v2 model"""
 
     def __init__(self, config: dict = None,
@@ -137,8 +136,6 @@ class TFTDataModule:
         if cached_data is not None:
             return cached_data
 
-        print("Processing data for Tempus v2...")
-
         try:
             if raw_data is not None:
                 data_retriever = TickerData(
@@ -149,7 +146,7 @@ class TFTDataModule:
                     sample_size=self.sample_size
                 )
                 processed_data = data_retriever.add_features(df=raw_data)
-                print(processed_data)
+                processed_data = data_retriever.merge_data(df=processed_data)
                 
             else:
                 # Use TickerData to process the data
@@ -170,13 +167,8 @@ class TFTDataModule:
             if 'Ticker' in processed_data.columns:
                 processed_data['Ticker'] = processed_data['Ticker'].astype(str)
 
-            if processed_data is not None and not processed_data.empty:
-                # Save to cache
-                self._save_to_cache(processed_data)
-                return processed_data
-            else:
-                print("Warning: No data was processed")
-                return None
+            self._save_to_cache(processed_data)
+            return processed_data
 
         except Exception as e:
             print(f"Error processing data: {e}")
@@ -184,7 +176,7 @@ class TFTDataModule:
 
 def main():
     """Example usage"""
-    datamodule = TFTDataModule(days=90, use_cache=True)
+    datamodule = DataModule(days=90, use_cache=True)
     data = datamodule.prepare_data()
 
     if data is not None:

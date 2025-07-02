@@ -15,16 +15,22 @@ sys.path.insert(0, str(project_root))
 model_dir = Path(__file__).parent
 sys.path.insert(0, str(model_dir))
 
+def _find_model(pickle_name: str) -> Path:
+    project_root = Path(__file__).resolve().parents[2]   # ../..
+    for path in project_root.rglob(pickle_name):
+        return path
+    raise FileNotFoundError(f"{pickle_name} not found anywhere under {project_root}")
+
 try:
-    from datamodule import TFTDataModule
+    from datamodule import DataModule
 except ImportError:
     import importlib.util
     spec = importlib.util.spec_from_file_location("datamodule", model_dir / "datamodule.py")
     datamodule_module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(datamodule_module)
-    TFTDataModule = datamodule_module.TFTDataModule
+    DataModule = datamodule_module.DataModule
 
-class TempusV2Inference:
+class Tempusv2Inference:
     """Inference class for Tempus v2 model"""
     def __init__(self):
         self.model_dir = Path(model_dir) if model_dir else Path(__file__).parent
@@ -83,10 +89,12 @@ class TempusV2Inference:
         feature_data = self.prepare_features(data)
         window_size = int(const['WINDOW_SIZE'])
         # ––––––––––––––– 1 Create ONNX session –––––––––––––––
+        model_path = _find_model(const["ONNX_MODEL_PATH"])
         session = ort.InferenceSession(
-            "Tempus_v2.onnx",
-            providers=["CPUExecutionProvider"],
+            model_path,
+            providers=["CPUExecutionProvider"]
         )
+        print(f"Loaded ONNX Model: {const["ONNX_MODEL_PATH"]}")
         input_name = session.get_inputs()[0].name
 
         preds, groups, times = [], [], []
@@ -118,13 +126,13 @@ def main():
     """Example usage"""
     inference = TempusV2Inference()
 
-    if TFTDataModule is None:
-        print("TFTDataModule not available - cannot run example")
+    if DataModule is None:
+        print("DataModule not available - cannot run example")
         return
 
     # Load data using datamodule
     try:
-        datamodule = TFTDataModule(config=inference.constants)
+        datamodule = DataModule(config=inference.constants)
         data = datamodule.prepare_data()
 
         if data is not None:

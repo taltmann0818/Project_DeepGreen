@@ -12,6 +12,7 @@ $ python benchmark_models.py --experiment-run "model_comparison_v1" --models Tem
 """
 import argparse
 import logging
+import inspect
 import os
 import sys
 import time
@@ -142,27 +143,40 @@ class ModelBenchmarkRunner:
         raise AttributeError(f"Could not find inference class in {inference_path}")
 
     def load_model_datamodule(self, model_name: str, config: dict):
-        """Load model-specific datamodule"""
         model_dir = Path("Models") / model_name
         datamodule_path = model_dir / "datamodule.py"
-
+    
         if not datamodule_path.exists():
-            logging.warning("⚠️  No datamodule found for %s, using default", model_name)
+            logging.warning("⚠️  No datamodule found for %s", model_name)
             return None
-
-        # Load the datamodule
-        spec = importlib.util.spec_from_file_location(f"{model_name}_datamodule", datamodule_path)
+    
+        spec = importlib.util.spec_from_file_location("datamodule", datamodule_path)
         datamodule_module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(datamodule_module)
-
-        # Get the datamodule class
-        for attr_name in dir(datamodule_module):
-            attr = getattr(datamodule_module, attr_name)
-            if (hasattr(attr, '__class__') and 
-                hasattr(attr, 'prepare_data') and 
-                'DataModule' in attr.__class__.__name__):
-                return attr(config=config, days=self.days, use_cache=True)
-
+    
+        try:
+            spec.loader.exec_module(datamodule_module)
+        except Exception as e:
+            logging.error("❌  Import error in %s: %s", datamodule_path, e)
+            return None          # bail early if the file itself is broken
+    
+        # ── search for a suitable class ────────────────────────────────────────────
+        for obj in datamodule_module.__dict__.values():
+            if (inspect.isclass(obj)
+                    and 'DataModule' in obj.__name__
+                    and hasattr(obj, 'prepare_data')):
+                try:
+                    return obj(                      # instantiate it
+                        config=config,
+                        days=self.days,
+                        use_cache=True,
+                        sample_size=self.sample_size
+                    )
+                except Exception as e:
+                    logging.error("❌  Failed to instantiate %s: %s", obj.__name__, e)
+                    return None
+    
+        # fell through the loop → nothing matched
+        logging.warning("⚠️  No DataModule subclass found in %s", datamodule_path)
         return None
 
     def prepare_benchmark_data(self):
@@ -170,16 +184,15 @@ class ModelBenchmarkRunner:
         try:
             # Use TickerData to get benchmark data
             data_retriever = TickerData(
-                ticker='I:NDX',
-                indicator_list=[],
-                days=self.days
+                indicator_list=None,
+                days=self.days,
+                prediction_mode=True
             )
             
-            benchmark_prices = data_retriever.preprocess_data()
+            benchmark_prices = data_retriever.get_ohlc_for_ticker('I:NDX').reset_index()
             if benchmark_prices is not None and 'Close' in benchmark_prices.columns:
-                benchmark_returns = benchmark_prices['Close'].pct_change().dropna()
-                self.benchmark_data = benchmark_returns.cumsum().reset_index()
-                self.benchmark_data.columns = ['Date', 'bench_cumulative_return']
+                benchmark_prices['bench_cumulative_return'] = benchmark_prices['Close'].pct_change().dropna().cumsum()
+                self.benchmark_data = benchmark_prices[['date','bench_cumulative_return']].dropna()
                 logging.info("✅ Loaded benchmark data (NDX)")
             else:
                 logging.warning("⚠️  Could not load benchmark data")
@@ -304,12 +317,12 @@ class ModelBenchmarkRunner:
         returns_df = returns_df.sort_values(['Ticker', 'Date'])
         returns_df['cum_return'] = returns_df.groupby('Ticker')['Returns'].cumsum()
 
-        strategy_returns = (returns_df.groupby('Date')['cum_return']
+        strategy_returns = (returns_df.groupby('date')['cum_return']
                           .mean()
                           .reset_index(name='strategy_cumulative_return'))
 
-        if 'Date' in strategy_returns.columns:
-            strategy_returns['Date'] = pd.to_datetime(strategy_returns['Date'])
+        if 'date' in strategy_returns.columns:
+            strategy_returns['date'] = pd.to_datetime(strategy_returns['date'])
 
         return strategy_returns
 
@@ -324,7 +337,7 @@ class ModelBenchmarkRunner:
             if results and 'strategy_returns' in results and not results['strategy_returns'].empty:
                 strategy_data = results['strategy_returns']
                 fig.add_trace(go.Scatter(
-                    x=strategy_data['Date'],
+                    x=strategy_data['date'],
                     y=strategy_data['strategy_cumulative_return'],
                     name=model_name,
                     mode='lines'
@@ -333,7 +346,7 @@ class ModelBenchmarkRunner:
         # Add benchmark if available
         if self.benchmark_data is not None:
             fig.add_trace(go.Scatter(
-                x=self.benchmark_data['Date'],
+                x=self.benchmark_data['date'],
                 y=self.benchmark_data['bench_cumulative_return'],
                 name='NDX Benchmark',
                 line=dict(color='grey', dash='dash')
@@ -491,10 +504,8 @@ class ModelBenchmarkRunner:
             prediction_mode=True,
             sample_size=self.sample_size
         )
-        self.stock_data = data_retriever.preprocess_data()
+        self.stock_data = data_retriever.preprocess_data().reset_index()
         logging.info("✅ Finished pulling initial OHLCV data shared among models")
-
-        print(self.stock_data)
 
         # Run each model
         for model_name in self.models:
@@ -509,7 +520,7 @@ class ModelBenchmarkRunner:
                 if datamodule:
                     data = datamodule.prepare_data(self.stock_data)
                     
-                    if not data:
+                    if data.empty:
                         logging.warning("⚠️  No data available for %s", model_name)
                         continue
                 else:

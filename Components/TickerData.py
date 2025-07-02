@@ -2,10 +2,12 @@
 Refactored TickerData class that uses modular components.
 This is the main orchestration class that brings together all the separated modules.
 """
-
+from datetime import datetime, timedelta
 import numpy as np
 import pandas as pd
 from polygon import RESTClient
+from Components.polygon_client_patch import patch_polygon_client
+patch_polygon_client(max_pool_size=50)
 
 from Components.DataModules.data_fetcher import DataFetcher
 from Components.DataModules.technical_indicators import TechnicalIndicators
@@ -14,12 +16,13 @@ from Components.DataModules.calendar_earnings import CalendarEarnings
 from Components.DataModules.market_news import MarketNews
 from Components.MarketRegimes import RegimeDetector
 
-# Add project root to path
-import sys
 from pathlib import Path
-project_root = Path(__file__).parent.parent.parent
-sys.path.insert(0, str(project_root))
-
+def _find_model(pickle_name: str) -> Path:
+    project_root = Path(__file__).resolve().parents[2]   # ../..
+    for path in project_root.rglob(pickle_name):
+        return path
+    raise FileNotFoundError(f"{pickle_name} not found anywhere under {project_root}")
+    
 class TickerData:
     """
     Refactored TickerData class with modular architecture.
@@ -57,17 +60,17 @@ class TickerData:
         self.prediction_window = -abs(prediction_window)
         self.days = days
 
-        self.start_date = kwargs.get('start_date')
-        self.end_date = kwargs.get('end_date')
+        self.start_date = kwargs.get('start_date',None)
+        self.end_date = kwargs.get('end_date', None)
         self.prediction_mode = kwargs.get('prediction_mode', False)
         self.max_workers = kwargs.get('max_workers', None)
         self.sample_size = kwargs.get('sample_size', None)
 
         # Initialize data fetcher
         api_key = 'XizU4KyrwjCA6bxHrR5_eQnUxwFFUnI2'
-        client = RESTClient(api_key, num_pools=50)
+        self.client = RESTClient(api_key, num_pools=50)
         self.data_fetcher = DataFetcher(
-            client=client,
+            client=self.client,
             start_date=self.start_date,
             end_date=self.end_date,
             days=days,
@@ -123,7 +126,7 @@ class TickerData:
 
     def add_features(self, df=None):
         """Add all requested features to the dataset"""
-        if self.dataset_ex_df is None:
+        if self.dataset_ex_df is None and df is None:
             raise ValueError("Data must be preprocessed before adding features")
 
         # Ensure proper datetime index
@@ -171,7 +174,8 @@ class TickerData:
 
         # Add Hidden Markov Model market regimes
         if 'hmm_state' in self.indicator_list:
-            _, df['hmm_state']  = RegimeDetector.load("/Users/thomasaltmann/PycharmProjects/Project DeepGreen/Models/hmm_v2.pkl").predict(self.dataset_ex_df, ma=5)
+            hmm = _find_model("hmm_v2.pkl")
+            _, df['hmm_state']  = RegimeDetector.load(hmm).predict(df, ma=5)
 
         self.dataset_ex_df = df
         return df
@@ -224,10 +228,13 @@ class TickerData:
 
         return df
 
-    def merge_data(self):
+    def merge_data(self, df=None):
         """Merge and finalize the data based on prediction mode"""
-        if self.dataset_ex_df is None:
+        if self.dataset_ex_df is None and df is None:
             raise ValueError("No data available for merging")
+            
+        if df is None:
+            df = self.dataset_ex_df.copy()
 
         cols = ['Ticker']
         if self.prediction_mode:
@@ -236,9 +243,9 @@ class TickerData:
             cols += ['shifted_prices'] + list(self.indicator_list)
 
         # Filter columns that actually exist in the dataframe
-        available_cols = [col for col in cols if col in self.dataset_ex_df.columns]
+        available_cols = [col for col in cols if col in df.columns]
 
-        self.final_df = self.dataset_ex_df[available_cols].replace(
+        self.final_df = df[available_cols].replace(
             [float('inf'), float('-inf')], float('nan')
         ).dropna()
 
@@ -271,3 +278,51 @@ class TickerData:
         }
 
         return summary
+
+    def get_ohlc_for_ticker(self, ticker, multiplier=1, timespan="day", limit=50000):
+        """
+        Fetch daily OHLC bars for `ticker` in one paginated call and
+        align to full_dates, filling zeros on missing days.
+        """
+        if not self.start_date:
+            self.start_date = (datetime.now() - timedelta(days=self.days)).strftime("%Y-%m-%d")
+
+        if not self.end_date:
+            self.end_date = datetime.now().strftime("%Y-%m-%d")
+        
+        aggs_iter = self.client.list_aggs(
+            ticker=ticker,
+            multiplier=multiplier,
+            timespan=timespan,
+            from_=self.start_date,
+            to=self.end_date,
+            limit=limit
+        )  # returns an iterator over all pages :contentReference[oaicite:4]{index=4}
+
+        aggs = pd.DataFrame(aggs_iter)
+        if aggs.empty:
+            # No data: return zero-filled template
+            df_empty = pd.DataFrame(0, columns=["open", "high", "low", "close", "volume"])
+            df_empty.index.name = "date"
+            df_empty["ticker"] = ticker
+            return df_empty
+
+        # Convert timestamp → NY date
+        dt_utc = pd.to_datetime(aggs['timestamp'], unit="ms", utc=True) \
+            .dt.tz_convert('America/New_York')  # convert TZ :contentReference[oaicite:5]{index=5}
+        aggs['date'] = dt_utc.dt.normalize()  # strip time → midnight
+        aggs['Ticker'] = ticker
+
+        daily = (
+            aggs
+            .loc[:, ["Ticker", "date", "open", "high", "low", "close", "volume"]]
+            .set_index("date")
+            .sort_index()
+        )
+
+        # 8) Reindex to full_dates, filling missing days with zeros
+        daily.index.name = "date"
+        daily["Ticker"] = ticker
+        daily = daily.rename(columns={'ticker': 'Ticker','open':'Open','high':'High','low':'Low','close':'Close','volume':'Volume'})
+
+        return daily
