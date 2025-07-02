@@ -5,6 +5,7 @@ This is the main orchestration class that brings together all the separated modu
 
 import numpy as np
 import pandas as pd
+from polygon import RESTClient
 
 from Components.DataModules.data_fetcher import DataFetcher
 from Components.DataModules.technical_indicators import TechnicalIndicators
@@ -51,7 +52,8 @@ class TickerData:
                 Maximum number of worker threads for parallel processing
         """
         # Configuration
-        self.indicator_list = set(indicator_list)
+        if indicator_list is not None:
+            self.indicator_list = set(indicator_list)
         self.prediction_window = -abs(prediction_window)
         self.days = days
 
@@ -63,8 +65,9 @@ class TickerData:
 
         # Initialize data fetcher
         api_key = 'XizU4KyrwjCA6bxHrR5_eQnUxwFFUnI2'
+        client = RESTClient(api_key, num_pools=50)
         self.data_fetcher = DataFetcher(
-            api_key=api_key,
+            client=client,
             start_date=self.start_date,
             end_date=self.end_date,
             days=days,

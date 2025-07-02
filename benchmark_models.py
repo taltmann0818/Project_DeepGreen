@@ -26,7 +26,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
-import quantstats as qs
+import quantstats_lumi as qs
 from tqdm import tqdm
 
 # Optional dependencies
@@ -54,18 +54,20 @@ logging.basicConfig(level=logging.INFO,
 class ModelBenchmarkRunner:
     """Modular benchmark runner for ML models with W&B integration"""
 
-    def __init__(self, experiment_run: str, models: List[str], days: int = 1,
-                 out_dir: str = "benchmark_results", sample_size: int = 100):
+    def __init__(self, experiment_run: str, models: List[str], days: int = 252,
+                 out_dir: str = "benchmark_results", sample_size: int = 100,
+                 prediction_window: int = 3):
         self.experiment_run = experiment_run
         self.models = models
         self.days = days
         self.sample_size = sample_size
+        self.prediction_window = prediction_window
         self.out_dir = Path(out_dir)
         self.out_dir.mkdir(exist_ok=True)
 
         # Initialize W&B
         self.wandb_run = None
-        self.initialize_wandb()
+        #self.initialize_wandb()
 
         # Initialize Gemini
         self.gemini_model = "gemini-2.5-flash"
@@ -87,7 +89,7 @@ class ModelBenchmarkRunner:
                 name=self.experiment_run,
                 config={
                     "models": self.models,
-                    "years": self.years,
+                    "days": self.days,
                     "experiment_run": self.experiment_run
                 }
             )
@@ -139,7 +141,7 @@ class ModelBenchmarkRunner:
 
         raise AttributeError(f"Could not find inference class in {inference_path}")
 
-    def load_model_datamodule(self, model_name: str):
+    def load_model_datamodule(self, model_name: str, config: dict):
         """Load model-specific datamodule"""
         model_dir = Path("Models") / model_name
         datamodule_path = model_dir / "datamodule.py"
@@ -159,7 +161,7 @@ class ModelBenchmarkRunner:
             if (hasattr(attr, '__class__') and 
                 hasattr(attr, 'prepare_data') and 
                 'DataModule' in attr.__class__.__name__):
-                return attr(years=self.years, use_cache=True)
+                return attr(config=config, days=self.days, use_cache=True)
 
         return None
 
@@ -167,15 +169,15 @@ class ModelBenchmarkRunner:
         """Prepare benchmark data (NDX index)"""
         try:
             # Use TickerData to get benchmark data
-            ticker_data = TickerData(
+            data_retriever = TickerData(
                 ticker='I:NDX',
                 indicator_list=[],
-                years=self.years
+                days=self.days
             )
-
-            benchmark_prices = ticker_data.get_ohlc_for_ticker('I:NDX')
-            if benchmark_prices is not None and 'close' in benchmark_prices.columns:
-                benchmark_returns = benchmark_prices['close'].pct_change().dropna()
+            
+            benchmark_prices = data_retriever.preprocess_data()
+            if benchmark_prices is not None and 'Close' in benchmark_prices.columns:
+                benchmark_returns = benchmark_prices['Close'].pct_change().dropna()
                 self.benchmark_data = benchmark_returns.cumsum().reset_index()
                 self.benchmark_data.columns = ['Date', 'bench_cumulative_return']
                 logging.info("✅ Loaded benchmark data (NDX)")
@@ -191,18 +193,18 @@ class ModelBenchmarkRunner:
         logging.info("🔮 Running backtest for %s", model_name)
 
         # Run inference
-        predictions = inference_class.predict(data, window_size=20, use_cache=True)
+        predictions = inference_class.predict(data)
 
         # Merge with price data for backtesting
-        price_columns = ['open', 'high', 'low', 'close', 'volume']
-        available_price_cols = [col for col in price_columns if col in data.columns]
+        price_columns = ['Open', 'High', 'Low', 'Close', 'Volume']
+        available_price_cols = [col for col in price_columns if col in self.stock_data.columns]
 
         if not available_price_cols:
-            raise ValueError(f"No price data available for backtesting in {model_name}")
+            raise ValueError(f"No OHLCV data available for backtesting in {model_name}")
 
         backtest_data = pd.merge(
             predictions,
-            data[available_price_cols + ['Ticker']],
+            self.stock_data[available_price_cols + ['Ticker']],
             left_index=True, right_index=True, how='inner'
         )
 
@@ -216,12 +218,6 @@ class ModelBenchmarkRunner:
 
             if len(ticker_data) < 50:  # Skip if insufficient data
                 continue
-
-            # Rename columns for BackTesting class
-            ticker_data = ticker_data.rename(columns={
-                'open': 'Open', 'high': 'High', 'low': 'Low', 
-                'close': 'Close', 'volume': 'Volume'
-            })
 
             try:
                 bt = BackTesting(
@@ -263,8 +259,7 @@ class ModelBenchmarkRunner:
             return {
                 'results_df': results_df,
                 'returns_df': returns_df,
-                'strategy_returns': strategy_returns,
-                'model_info': inference_class.get_model_info()
+                'strategy_returns': strategy_returns
             }
         else:
             logging.warning("⚠️  No successful backtests for %s", model_name)
@@ -415,7 +410,7 @@ class ModelBenchmarkRunner:
 
             Experiment: {self.experiment_run}
             Models Tested: {', '.join(self.models)}
-            Testing Period: {self.years} year(s)
+            Testing Period: {self.days} day(s)
 
             Performance Summary:
             {json.dumps(summary_data, indent=2, default=str)}
@@ -496,6 +491,10 @@ class ModelBenchmarkRunner:
             prediction_mode=True,
             sample_size=self.sample_size
         )
+        self.stock_data = data_retriever.preprocess_data()
+        logging.info("✅ Finished pulling initial OHLCV data shared among models")
+
+        print(self.stock_data)
 
         # Run each model
         for model_name in self.models:
@@ -504,22 +503,17 @@ class ModelBenchmarkRunner:
 
                 # Load model components
                 inference_class = self.load_model_inference(model_name)
-                datamodule = self.load_model_datamodule(model_name)
+                datamodule = self.load_model_datamodule(model_name, inference_class.constants)
 
                 # Prepare data
                 if datamodule:
-                    datamodule.prepare_data()
-                    data = datamodule.get_inference_data()
+                    data = datamodule.prepare_data(self.stock_data)
+                    
+                    if not data:
+                        logging.warning("⚠️  No data available for %s", model_name)
+                        continue
                 else:
-                    # Fallback to default data loading
-                    ticker_data = TickerData(
-                        indicator_list=['ema_20', 'ema_50', 'ema_100', 'stoch_rsi14', 'macd', 'hmm_state', 'Close'],
-                        years=self.years
-                    )
-                    data = ticker_data.process_all()
-
-                if data is None or data.empty:
-                    logging.warning("⚠️  No data available for %s", model_name)
+                    logging.warning("⚠️  No datamodule available for %s", model_name)
                     continue
 
                 # Run backtest
@@ -560,7 +554,7 @@ class ModelBenchmarkRunner:
         logging.info("💾 Saved LLM report: %s", report_path)
 
         # Publish to W&B
-        self.publish_wandb_report(plots, llm_report)
+        #self.publish_wandb_report(plots, llm_report)
 
         # Save summary
         summary_path = self.out_dir / "benchmark_summary.json"
@@ -580,13 +574,14 @@ class ModelBenchmarkRunner:
 
 def main():
     parser = argparse.ArgumentParser(description="Modular ML Model Benchmark Runner")
-    parser.add_argument("--experiment-run", required=True,
-                       help="W&B experiment run name")
+    #parser.add_argument("--experiment-run", required=True,help="W&B experiment run name")
     parser.add_argument("--models", nargs="+", required=True,
                        help="Model names to benchmark (e.g., Tempus_v2 Tempus_v3)")
-    parser.add_argument("--days", type=int, default=1,
-                       help="Years of data to use for backtesting")
-    parser.add_argument("--sample-size", type=int, default=1000)
+    parser.add_argument("--days", type=int, default=252,
+                       help="Days of data to use for backtesting")
+    parser.add_argument("--horizon", default=3,
+                   help="Forecast horizon for models")
+    parser.add_argument("--sample-size", type=int, default=100)
     parser.add_argument("--out-dir", default="benchmark_results",
                        help="Output directory for results")
 
@@ -594,11 +589,12 @@ def main():
 
     # Run benchmark
     runner = ModelBenchmarkRunner(
-        experiment_run=args.experiment_run,
+        experiment_run=None,
         models=args.models,
         days=args.days,
         out_dir=args.out_dir,
-        sample_size=args.sample_size
+        sample_size=args.sample_size,
+        prediction_window=args.horizon
     )
 
     runner.run_benchmark()

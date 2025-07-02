@@ -4,7 +4,6 @@ Handles all API interactions with Polygon for fetching stock data, news, and mar
 """
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from polygon import RESTClient
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
@@ -16,7 +15,7 @@ from dateutil.easter import easter
 class DataFetcher:
     """Handles all data fetching operations from Polygon API"""
 
-    def __init__(self, api_key, start_date=None, end_date=None, sample_size=None, days=1):
+    def __init__(self, client, start_date=None, end_date=None, sample_size=None, days=1):
         """
         Initialize the DataFetcher with API credentials and date range.
 
@@ -31,7 +30,7 @@ class DataFetcher:
         years : int, default=1
             Number of years of historical data to fetch if dates not provided
         """
-        self.client = RESTClient(api_key,num_pools=50)
+        self.client = client
         self.days = days
         self.sample_size = sample_size
 

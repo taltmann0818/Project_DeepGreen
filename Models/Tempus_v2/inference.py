@@ -109,7 +109,7 @@ class TempusV2Inference:
         # Create results DataFrame
         results_df = pd.DataFrame({
             'Ticker': groups,
-            'Predicted': preds
+            'predicted': preds
         }, index=pd.DatetimeIndex(times))
 
         return results_df
@@ -125,8 +125,7 @@ def main():
     # Load data using datamodule
     try:
         datamodule = TFTDataModule(config=inference.constants)
-        datamodule.prepare_data()
-        data = datamodule.get_inference_data()
+        data = datamodule.prepare_data()
 
         if data is not None:
             # Run inference

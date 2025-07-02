@@ -130,7 +130,7 @@ class TFTDataModule:
             print(f"Warning: Could not load from cache: {e}")
             return None
 
-    def prepare_data(self):
+    def prepare_data(self, raw_data=None):
         """Prepare the data for training/inference"""
         # Try to load from cache first
         cached_data = self._load_from_cache()
@@ -140,14 +140,26 @@ class TFTDataModule:
         print("Processing data for Tempus v2...")
 
         try:
-            # Use TickerData to process the data
-            processed_data = TickerData(
-                indicator_list=self.indicator_list,
-                days=self.days,
-                prediction_window=self.prediction_window,
-                prediction_mode=True,
-                sample_size=self.sample_size
-            ).process_all()
+            if raw_data is not None:
+                data_retriever = TickerData(
+                    indicator_list=self.indicator_list,
+                    days=self.days,
+                    prediction_window=self.prediction_window,
+                    prediction_mode=True,
+                    sample_size=self.sample_size
+                )
+                processed_data = data_retriever.add_features(df=raw_data)
+                print(processed_data)
+                
+            else:
+                # Use TickerData to process the data
+                processed_data = TickerData(
+                    indicator_list=self.indicator_list,
+                    days=self.days,
+                    prediction_window=self.prediction_window,
+                    prediction_mode=True,
+                    sample_size=self.sample_size
+                ).process_all()
 
             # Handle MultiIndex properly
             if isinstance(processed_data.index, pd.MultiIndex):
@@ -169,18 +181,6 @@ class TFTDataModule:
         except Exception as e:
             print(f"Error processing data: {e}")
             return None
-
-    def get_inference_data(self) -> pd.DataFrame:
-        """Get data formatted for inference with proper features and indexing."""
-        # Try to load from cache first
-        cached_data = self._load_from_cache()
-        if cached_data is not None:
-            return cached_data
-
-        # If no cache, prepare data
-        data = self.prepare_data()
-        return data
-
 
 def main():
     """Example usage"""

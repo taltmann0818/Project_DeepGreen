@@ -252,7 +252,28 @@ class TempusV3Inference:
             .reset_index(drop=True)
         )
 
-        return predictions
+        h3 = predictions.query("horizon == 3")
+
+        # ------------------------------------------------------------------
+        # 3 )  Wide-format by quantile
+        # ------------------------------------------------------------------
+        pivot = (
+            h3.pivot_table(index=["date", "Ticker"],
+                           columns="quantile",
+                           values="prediction")
+               .rename_axis(None, axis=1)
+        )
+
+        result = pd.DataFrame(index=pivot.index)
+        result["predicted"]    = pivot[np.median(quantiles)]    # median
+        result["q_low"]        = pivot[np.min(quantiles)]       # 2 % quantile
+        result["q_high"]       = pivot[np.max(quantiles)]       # 98 % quantile
+        
+        sigma_3d              = (result["q_high"] - result["q_low"]) / (2 * Z_98)
+        result["sigma_daily"] = sigma_3d / np.sqrt(3)
+        result = result.reset_index().set_index('date')
+
+        return result
         
 
 def main():
