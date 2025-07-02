@@ -12,7 +12,7 @@ azure-identity~=1.21.0
 quantstats-lumi==1.0.1
 numba~=0.59.0
 ipython~=8.12.3
-lxml~=4.6.3
+lxml~=5.2.1
 polygon-api-client~=1.14.6
 wandb~=0.20.1
 google-genai~=1.23.0
