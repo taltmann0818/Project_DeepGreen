@@ -14,10 +14,6 @@ from typing import Dict, Any, Optional
 from tqdm.auto import tqdm
 warnings.filterwarnings("ignore")  # avoid printing out absolute paths
 
-# Add project root to path
-project_root = Path(__file__).parent.parent.parent
-sys.path.insert(0, str(project_root))
-
 # Add current model directory to path for local imports
 model_dir = Path(__file__).parent
 sys.path.insert(0, str(model_dir))
@@ -80,7 +76,7 @@ class Tempusv3Inference:
             "ONNX_MODEL_PATH":     str(c["onnx_model_name"]["value"]),
             "EXEC_PROVIDER":       c.get("execution_provider", "CPUExecutionProvider"),
             "BATCH_SIZE":          int(c["batch_size"]["value"]),
-            "NUM_WORKERS":         int(c.get("num_workers", 30)),
+            "NUM_WORKERS":         int(c.get("num_workers", 0)),
             "SAMPLE_SIZE":         100,
             # Anything else you put in YAML is still available via self.config
         }
@@ -97,13 +93,13 @@ class Tempusv3Inference:
             self.data[const["TIME_IDX"]] = (
                 self.data.groupby(const["GROUP_IDS"]).cumcount().astype("int32")
             )
-    
+
         target_normalizer = EncoderNormalizer(
             method="standard",
             center=True,
             transformation="log",
         )
-    
+
         dataset = TimeSeriesDataSet(
             self.data,
             time_idx=const['TIME_IDX'],
@@ -132,26 +128,23 @@ class Tempusv3Inference:
         """
         Run ONNX-exported TFT on a `TimeSeriesDataSet` and return **quantile**
         forecasts in tidy (long) format.
-    
+
         Returns columns:
             Ticker, date, horizon, quantile, prediction
         """
         const = self.constants
         tft_dataset = self.prepare_features(data)
         # ––––––––––––––– 1 Create ONNX session –––––––––––––––
-        sess_options = ort.SessionOptions()
-        sess_options.enable_cpu_mem_arena = True
-        model_path = const["ONNX_MODEL_PATH"]
+        model_path = _find_model(const["ONNX_MODEL_PATH"])
         session = ort.InferenceSession(
             model_path,
-            sess_options=sess_options,
-            providers=[const['EXEC_PROVIDER']]
+            providers=["CoreMLExecutionProvider"]
         )
-        print(f"Loaded ONNX Model: {const["ONNX_MODEL_PATH"]}")
-    
+        print(f"Loaded ONNX Model: {const['ONNX_MODEL_PATH']}")
+
         input_names = {i.name for i in session.get_inputs()}
         output_name = session.get_outputs()[0].name
-    
+
         # ––––––––––––––– 2 Dataloader –––––––––––––––
         loader = tft_dataset.to_dataloader(
             train=False,
@@ -160,7 +153,7 @@ class Tempusv3Inference:
             num_workers=const['NUM_WORKERS'],
             drop_last=False
         )
-    
+
         # map PTF names → ONNX names
         alias = {
             "encoder_cont":     "enc_cont",
@@ -171,10 +164,14 @@ class Tempusv3Inference:
             "decoder_lengths":  "dec_len",
             "target_scale":     "target_scale",
         }
-    
+
         preds, groups, times = [], [], []
-        pbar = tqdm(total=len(loader), desc="Running ONNX inference",leave=False)
-        for batch_idx, batch in enumerate(loader):
+        for batch_idx, batch in enumerate(
+                tqdm(loader,
+                     total=len(loader),  # lets tqdm know how many batches to expect
+                     desc="Running ONNX inference",
+                     leave=True)
+        ):
             try:
                 x, _ = batch
                 ort_inputs = {alias.get(k, k): v.detach().cpu().numpy()
@@ -203,23 +200,20 @@ class Tempusv3Inference:
                 print(f"Warning: Skipping batch {batch_idx} due to error: {e}")
                 continue
 
-            pbar.update(batch_idx)
-
         if not preds:
             raise RuntimeError("No successful predictions were made. Check your data and model compatibility.")
-    
+
         # ––––––––––––––– 3 concat & tidy –––––––––––––––
-        pbar.close()
         preds_arr = np.concatenate(preds, axis=0)
         groups_arr = np.concatenate(groups, axis=0) 
         times_arr = np.concatenate(times, axis=0) 
-    
+
         N, T, Q = preds_arr.shape
         if Q != len(quantiles):
             raise ValueError(
                 f"Model output {Q} quantiles vs. requested {len(quantiles)}: {quantiles}"
             )
-    
+
         # one row per (group, time_idx[h], horizon=h+1, q)
         flat_len   = N * T * Q
         group_id   = np.repeat(groups_arr, T * Q)
@@ -232,14 +226,14 @@ class Tempusv3Inference:
         if self.id2ticker is None:
             tickers_sorted = sorted(self.data["Ticker"].unique())
             self.id2ticker = {i: t for i, t in enumerate(tickers_sorted)}
-            
+
         if self.date_lookup is None:
             self.date_lookup = (
-                self.data.loc[:, ["Ticker", const["TIME_IDX"], "date"]]
+                self.data.loc[:, ["Ticker", const["TIME_IDX"], "date", "Close"]]
                 .drop_duplicates()
                 .set_index(["Ticker", const["TIME_IDX"]])
             )
-        
+
         predictions = (
             pd.DataFrame(
                 {
@@ -257,7 +251,7 @@ class Tempusv3Inference:
                 how="left",
             )
             .drop(columns="group_id")
-            .loc[:, ["Ticker", "date", "time_idx", "horizon", "quantile", "prediction"]]
+            .loc[:, ["Ticker", "date", "time_idx", "horizon", "quantile", "prediction", "Close"]]
             .sort_values(["Ticker", "date", "horizon"])
             .reset_index(drop=True)
         )
@@ -275,16 +269,20 @@ class Tempusv3Inference:
         )
 
         result = pd.DataFrame(index=pivot.index)
-        result["predicted"]    = pivot[np.median(quantiles)]    # median
+        result["Predicted"]    = pivot[np.median(quantiles)]    # median
         result["q_low"]        = pivot[np.min(quantiles)]       # 2 % quantile
         result["q_high"]       = pivot[np.max(quantiles)]       # 98 % quantile
-        
+
+        Z_98 = 2.33
         sigma_3d              = (result["q_high"] - result["q_low"]) / (2 * Z_98)
         result["sigma_daily"] = sigma_3d / np.sqrt(3)
-        result = result.reset_index().set_index('date')
+        result = result.reset_index().merge(predictions[['Ticker','date','Close']], on=["Ticker", "date"], how="left").drop_duplicates()
+        result['pred_return'] = (result['Predicted'] - result['Close']) / result['Close'] # Updating to use implied returns instead of median quantile raw prediction
+        result['q_low'] = (result['q_low'] - result['Close']) / result['Close'] # Updating to use implied returns instead of low quantile raw prediction
+        result['q_high'] = (result['q_high'] - result['Close']) / result['Close'] # Updating to use implied returns instead of high quantile raw prediction
 
-        return result
-        
+        return result.set_index('date') #.drop(columns='Close')
+
 
 def main():
     """Example usage"""

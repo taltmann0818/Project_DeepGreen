@@ -29,7 +29,7 @@ class DataModule:
         batch_size: int = None,
         max_prediction_length: int = None,
         max_encoder_length: int = None,
-        days: int = 90,
+        days: int = 252,
         prediction_window: int = 3,
         num_workers: Optional[int] = None,
         use_cache: bool = True,

@@ -6,6 +6,7 @@ import numpy as np
 import onnxruntime as ort
 from pathlib import Path
 from typing import Dict, Any, Optional
+from tqdm import tqdm
 
 # Add project root to path
 project_root = Path(__file__).parent.parent.parent
@@ -74,14 +75,14 @@ class Tempusv2Inference:
             "WINDOW_SIZE":         str(c["window_size"]["value"]),
             "EXEC_PROVIDER":       c.get("execution_provider", "CPUExecutionProvider"),
             "BATCH_SIZE":          int(c["batch_size"]["value"]),
-            "NUM_WORKERS":         int(c.get("num_workers", 30)),
+            "NUM_WORKERS":         int(c.get("num_workers", 0)),
             "SAMPLE_SIZE":         100,
         }
-    
+
     def predict(self, data: pd.DataFrame) -> pd.DataFrame:
         """
         Run ONNX-exported model on dateset and return 1-point prediction.
-    
+
         Returns columns:
             Ticker, date, prediction
         """
@@ -94,12 +95,14 @@ class Tempusv2Inference:
             model_path,
             providers=["CPUExecutionProvider"]
         )
-        print(f"Loaded ONNX Model: {const["ONNX_MODEL_PATH"]}")
+        print(f"Loaded ONNX Model: {const['ONNX_MODEL_PATH']}")
         input_name = session.get_inputs()[0].name
 
         preds, groups, times = [], [], []
-        
-        for i in range(window_size, len(feature_data)):
+        total_iterations = len(feature_data) - window_size
+        for i in tqdm(range(window_size, len(feature_data)),
+                      desc="Processing predictions",
+                      total=total_iterations):
             # Get feature window (excluding Ticker column)
             values = feature_data.drop(columns=['Ticker','date']).values.astype(np.float32)
 
@@ -117,14 +120,14 @@ class Tempusv2Inference:
         # Create results DataFrame
         results_df = pd.DataFrame({
             'Ticker': groups,
-            'predicted': preds
+            'Predicted': preds
         }, index=pd.DatetimeIndex(times))
 
         return results_df
 
 def main():
     """Example usage"""
-    inference = TempusV2Inference()
+    inference = Tempusv2Inference()
 
     if DataModule is None:
         print("DataModule not available - cannot run example")
