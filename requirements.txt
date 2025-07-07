@@ -14,7 +14,6 @@ ipython~=8.22.2
 lxml~=5.2.1
 polygon-api-client~=1.14.6
 wandb~=0.20.1
-google-genai~=1.23.0
 onnxruntime~=1.22.0
 pyarrow~=16.1.0
 cvxpy~=1.4.0
