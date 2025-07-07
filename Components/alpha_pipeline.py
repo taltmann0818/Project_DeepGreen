@@ -25,14 +25,15 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-from scipy import linalg
-from scipy.stats import linregress
+import statsmodels.api as sm
 from typing import Dict, List, Optional
 import logging
 from Components.TickerData import TickerData
 from Components.DataModules.sector_analysis import SectorAnalysis
 from polygon import RESTClient
 
+VOL_EPS = 1e-4       # protects against divide‑by‑zero in σ‑scaling
+OUTLIER_CLIP = 10.0  # final z‑scores clipped to ±10 σ
 
 class AlphaVectorPipeline:
     """Comprehensive alpha generation pipeline with data enrichment capabilities."""
@@ -42,14 +43,12 @@ class AlphaVectorPipeline:
             volume_threshold: float = 1_000_000.0,
             factor_cols: List[str] | None = None,
             sigma_col: str = "sigma_daily",
-            return_col: str = "pred_return",
             polygon_api_key: str = 'XizU4KyrwjCA6bxHrR5_eQnUxwFFUnI2',
-            min_observations: int = 30,
-    ) -> None:
+    ):
         """Parameters
         ----------
         volume_threshold
-            \$ADV level at which no liquidity haircut is applied.
+            level at which no liquidity haircut is applied.
         factor_cols
             Names of exposure columns to neutralise.
         sigma_col
@@ -58,15 +57,11 @@ class AlphaVectorPipeline:
             Column containing predicted returns.
         polygon_api_key
             API key for Polygon.io market cap data.
-        min_observations
-            Minimum observations required for beta calculation.
         """
         self.volume_threshold = volume_threshold
         self.factor_cols = factor_cols or []
         self.sigma_col = sigma_col
-        self.return_col = return_col
         self.polygon_api_key = polygon_api_key
-        self.min_observations = min_observations
 
         # Initialize data retriever for benchmark data
         self.data_retriever = None
@@ -108,18 +103,9 @@ class AlphaVectorPipeline:
             # Find overlapping dates (automatically handles NaNs)
             common_dates = ticker_data.index.intersection(market_returns.index)
 
-            if len(common_dates) < self.min_observations:
-                betas[ticker] = np.nan
-                continue
-
             # Get aligned returns (no NaNs)
             ticker_rets = ticker_data.loc[common_dates].dropna()
             market_rets = market_returns.loc[ticker_rets.index]
-
-            # Final check after dropping NaNs
-            if len(ticker_rets) < self.min_observations:
-                betas[ticker] = np.nan
-                continue
 
             # Compute beta using covariance method
             try:
@@ -147,85 +133,7 @@ class AlphaVectorPipeline:
         """Compute z-score normalization"""
         return (series - series.mean()) / series.std(ddof=0)
 
-    def _add_constant(self, X: np.ndarray) -> np.ndarray:
-        """Add constant column to design matrix (replaces statsmodels.api.add_constant)"""
-        ones = np.ones((X.shape[0], 1))
-        return np.column_stack([ones, X])
-
-    def _ols_regression(self, X: np.ndarray, y: np.ndarray) -> np.ndarray:
-        """
-        Perform OLS regression and return residuals.
-
-        Parameters
-        ----------
-        X : np.ndarray
-            Design matrix (n_samples, n_features)
-        y : np.ndarray
-            Target vector (n_samples,)
-
-        Returns
-        -------
-        np.ndarray
-            Residuals from the regression
-        """
-        try:
-            # Use scipy's lstsq for more robust computation
-            coeffs, residuals, rank, s = linalg.lstsq(X, y)
-            fitted_values = X @ coeffs
-            return y - fitted_values
-        except Exception as e:
-            # If regression fails, return original y values
-            print(f"Regression failed: {e}")
-            return y
-
-    def _process_group(self, group: pd.DataFrame) -> pd.DataFrame:
-        """Process a single date group for factor neutralization.
-
-        This helper method encapsulates the logic for processing each date group,
-        making the code more modular and easier to maintain.
-
-        Parameters
-        ----------
-        group : pd.DataFrame
-            DataFrame containing data for a single date
-
-        Returns
-        -------
-        pd.DataFrame
-            Processed group with alpha_pure column added
-        """
-        if len(group) < 2:
-            group["alpha_pure"] = group["ir_norm"]
-            return group
-
-        # Handle NaN values
-        group = group.copy()
-        group["ir_norm"] = group["ir_norm"].fillna(0.0)
-        for col in self.factor_cols:
-            group[col] = group[col].fillna(0.0)
-
-        y = group["ir_norm"].astype(float).values
-
-        # Check if we have any factor columns
-        if not self.factor_cols:
-            # If no factors, alpha_pure = ir_norm (no neutralization)
-            group["alpha_pure"] = y
-            return group
-
-        X = group[self.factor_cols].astype(float).values
-        X = self._add_constant(X)
-
-        try:
-            residuals = self._ols_regression(X, y)
-            group["alpha_pure"] = residuals
-            return group
-        except Exception as e:
-            # Log error and return original group with ir_norm as alpha_pure
-            print(f"Error in regression: {e}")
-            group["alpha_pure"] = group["ir_norm"]
-            return group
-
-    def alpha_signals(self, pred_df: pd.DataFrame) -> Dict[pd.Timestamp, Dict[str, float]]:
+    def alpha_signals(self, pred_df: pd.DataFrame) -> Tuple[Dict[pd.Timestamp, Dict[str, float]], pd.DataFrame]:
         """Execute the full pipeline.
 
         Parameters
@@ -242,7 +150,7 @@ class AlphaVectorPipeline:
             optimiser.
         """
         # Validate required columns exist in pred_df
-        required_pred_cols = ["date", "Ticker", self.return_col, "q_low", "q_high", self.sigma_col]
+        required_pred_cols = ["date", "Ticker", "pred_return", "q_low", "q_high", self.sigma_col]
         missing_cols = [col for col in required_pred_cols if col not in pred_df.columns]
         if missing_cols:
             raise ValueError(f"Missing required columns in pred_df: {missing_cols}")
@@ -252,7 +160,7 @@ class AlphaVectorPipeline:
         df["date"] = pd.to_datetime(df["date"])
 
         # ---------------- 1. Raw expected return -------------------------
-        df["mu"] = df[self.return_col]
+        df["mu"] = df["pred_return"].astype(float)
 
         # ---------------- 2. Tradability haircut ------------------------
         #df["haircut"] = np.minimum(1.0, df[self.adv_col] / self.volume_threshold)
@@ -260,80 +168,50 @@ class AlphaVectorPipeline:
 
         # ---------------- 3. Risk‑scale to IR units ----------------------
         # Avoid division by zero
-        df["ir"] = df["mu"] / df[self.sigma_col].replace(0.0, np.nan)
+        sigma = df[self.sigma_col].replace(0.0, VOL_EPS).astype(float)
+        df["ir"] = df["mu"] / sigma
 
         # ---------------- 4. X‑section normalisation --------------------
         df["ir_norm"] = df.groupby("date")["ir"].transform(
             lambda x: (x - x.mean()) / x.std(ddof=0)
         )
+        df["ir_norm"] = df["ir_norm"].clip(-OUTLIER_CLIP, OUTLIER_CLIP)
 
         # ---------------- 5. Factor / sector neutralisation -------------
-        pure_alpha_frames = []
-        for date, grp in df.groupby("date", sort=False):
-            # Skip empty groups or groups with insufficient data
-            if len(grp) < 2:
-                continue
+        def _neutralise(group: pd.DataFrame) -> pd.Series:
+            y = group["ir_norm"].astype(float)
+            X = group[self.factor_cols].astype(float)
+            X = sm.add_constant(X, has_constant="add")
+            beta = np.linalg.pinv(X.values) @ y.values
+            resid = y - X @ beta
+            return resid
 
-            # Handle NaN values
-            grp = grp.copy()
-            grp["ir_norm"] = grp["ir_norm"].fillna(0.0)
-            for col in self.factor_cols:
-                grp[col] = grp[col].fillna(0.0)
-
-            y = grp["ir_norm"].astype(float).values
-
-            # Check if we have any factor columns
-            if not self.factor_cols:
-                # If no factors, alpha_pure = ir_norm (no neutralization)
-                tmp = grp.copy()
-                tmp["alpha_pure"] = y
-                pure_alpha_frames.append(tmp)
-                print(f"No beta factor(s) neutralization for alpha vector")
-                continue
-
-            X = grp[self.factor_cols].astype(float).values
-            X = self._add_constant(X)
-
-            try:
-                residuals = self._ols_regression(X, y)
-                tmp = grp.copy()
-                tmp["alpha_pure"] = residuals
-                pure_alpha_frames.append(tmp)
-            except Exception as e:
-                # Log error and skip this group
-                print(f"Error processing group for date {date}: {e}")
-                continue
-
-        if not pure_alpha_frames:
-            raise ValueError("No data groups were successfully processed")
-
-        df = pd.concat(pure_alpha_frames, ignore_index=True)
+        df["alpha_pure"] = df.replace(np.nan, 0.0).groupby("date", group_keys=False).apply(_neutralise)
 
         # ---------------- 6. Shrinkage / confidence weighting ------------
-        width = df["q_high"] - df["q_low"]
-        width = width.clip(lower=1e-8)  # Ensure positive width with small minimum to avoid division issues
-        confidence = 1.0 / width
-        confidence = confidence.replace([np.inf, -np.inf], np.nan)
-        confidence = confidence.fillna(confidence.median())
-        confidence = confidence.groupby(df["date"]).transform(
-            lambda x: x / x.max() if x.max() > 0 else x
-        )
+        width = (df["q_high"] - df["q_low"]).replace(0.0, np.nan)
+        confidence = (1.0 / width).groupby(df["date"]).transform(lambda x: x / x.max())
         df["alpha_shrunk"] = df["alpha_pure"] * confidence
+
+        # 7) Final mean‑zero, unit‑σ standardisation ---------------------------
+        df["alpha_final"] = df.groupby("date")["alpha_shrunk"].transform(
+            lambda x: ((x - x.mean()) / x.std(ddof=0)).clip(-OUTLIER_CLIP, OUTLIER_CLIP)
+        )       
 
         # ---------------- 7. Pack for the optimiser ----------------------
         if "date" in df.columns and not pd.api.types.is_datetime64_dtype(df["date"]):
             df["date"] = pd.to_datetime(df["date"])
+            df = df["date"].sort_values(ascending=True)
 
-        # More memory-efficient packing - process one group at a time
-        packed: Dict[pd.Timestamp, Dict[str, float]] = {}
-        for date, group in df.groupby("date", sort=False):
-            date_key = pd.Timestamp(date) if not isinstance(date, pd.Timestamp) else date
-            ticker_values = dict(zip(group["Ticker"], group["alpha_shrunk"]))
-            packed[date_key] = ticker_values
+        # Pack for optimiser ----------------------------------------------------
+        packed: Dict[pd.Timestamp, Dict[str, float]] = {
+            d: g.set_index("Ticker")["alpha_final"].to_dict()
+            for d, g in df.groupby("date", sort=False)
+        }
 
-        return packed
+        return packed, df
 
-    def run(self, predictions: pd.DataFrame) -> Dict[pd.Timestamp, Dict[str, float]]:
+    def run(self, predictions: pd.DataFrame) -> Tuple[Dict[pd.Timestamp, Dict[str, float]], pd.DataFrame]:
         """
         Process raw prediction file and generate alpha signals with full data enrichment.
 
@@ -426,13 +304,11 @@ class AlphaVectorPipeline:
 
         # 6. Update factor columns to include all enrichment factors
         if not self.factor_cols:
-            self.factor_cols = sector_columns + ['smb_exposure', 'MktBeta']
+            self.factor_cols = sector_columns + ['MktBeta'] + ['smb_exposure']
 
         # 7. Generate alpha signals using the existing run method
-        alpha_dict = self.alpha_signals(predictions)
-        logging.info(f"Generated alpha signals for {len(alpha_dict)} dates")
 
-        return alpha_dict
+        return self.alpha_signals(predictions)
 
 
 # -------------------------------------------------------------------------

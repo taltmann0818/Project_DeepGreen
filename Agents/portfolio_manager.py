@@ -33,7 +33,7 @@ class PortfolioManagerAgent:
         alpaca_api_key: str = 'PKVTMHC7LYMYM0PI6A1B',
         alpaca_api_secret: str = 'hYWD1Ij51TBlIrYgqtIpaWfSBmfTSmwjvJ3deM0O',
         paper: bool = True,
-        risk_aversion: float = 5.0,
+        risk_aversion: float = 0.5,
         turnover_penalty: float = 0.01,
         max_position_pct: float = 0.05,
         max_sector_pct: float = 0.25,
@@ -184,27 +184,6 @@ class PortfolioManagerAgent:
 
         return linear_costs + impact_costs
 
-    def _build_sector_constraints(self, tickers: List[str]) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Build sector exposure constraint matrices.
-        Returns A_sector, b_sector such that A_sector @ w <= b_sector
-        """
-        sectors = list(set(self.sector_map.get(ticker, 'Other') for ticker in tickers))
-        n_sectors = len(sectors)
-        n_assets = len(tickers)
-
-        # Create sector exposure matrix
-        A_sector = np.zeros((n_sectors, n_assets))
-        for i, sector in enumerate(sectors):
-            for j, ticker in enumerate(tickers):
-                if self.sector_map.get(ticker, 'Other') == sector:
-                    A_sector[i, j] = 1.0
-
-        # Sector limits
-        b_sector = np.full(n_sectors, self.max_sector_pct)
-
-        return A_sector, b_sector
-
     def _estimate_risk_model(self, price_history: pd.DataFrame) -> pd.DataFrame:
         """
         Estimate covariance matrix using robust methods.
@@ -242,13 +221,12 @@ class PortfolioManagerAgent:
 
         return pd.DataFrame(cov_diagonal, index=cov_matrix.index, columns=cov_matrix.columns)
 
-    def optimize_portfolio_qp(
-            self,
-            alpha_vector: pd.Series,
-            cov_matrix: pd.DataFrame,
-            current_weights: pd.Series,
-            sector_constraints: bool = False
-    ) -> pd.Series:
+    def _solve_qp(
+        self,
+        alpha: pd.Series,
+        cov: pd.DataFrame,
+        w_prev: pd.Series,
+    ) -> Optional[pd.Series]:
         """
         Quadratic Programming optimization: max w^T α - (1/2) λ w^T Σ w - TC(w)
 
@@ -261,183 +239,42 @@ class PortfolioManagerAgent:
         Returns:
             Optimal portfolio weights
         """
-        tickers = alpha_vector.index.tolist()
+        tickers = alpha.index.tolist()
         n = len(tickers)
-
+        if n == 0:
+            return None
+            
         # Align data
-        alpha = alpha_vector.values
-        Sigma = cov_matrix.loc[tickers, tickers].values
-        w_prev = current_weights.reindex(tickers).fillna(0.0).values
+        A = alpha.values
+        Sigma = cov.loc[tickers, tickers].values
+        w_old = w_prev.reindex(tickers).fillna(0.0).values
 
         # CVXPY optimization variable
         w = cp.Variable(n)
-
-        # Objective function: max w^T α - (1/2) λ w^T Σ w - TC(w)
-        alpha_term = alpha @ w
-        risk_term = 0.5 * self.risk_aversion * cp.quad_form(w, Sigma)
-
-        # Transaction cost approximation (simplified for robustness)
-        turnover = cp.norm1(w - w_prev)
-        tc_penalty = (self.transaction_cost_bps + self.market_impact_coeff) * turnover
-
-        objective = cp.Maximize(alpha_term - risk_term - tc_penalty)
-
-        # Base constraints
+        obj = cp.Maximize(A @ w - 0.5 * self.risk_aversion * cp.quad_form(w, Sigma) -
+                           (self.transaction_cost_bps + self.market_impact_coeff) * cp.norm1(w - w_old))
         constraints = [
-            cp.sum(w) == 1.0,  # Fully invested
-            w >= 0.0,  # Long-only
+            w >= 0.0,
+            w <= self.max_position_pct,
+            cp.sum(w) == 1.0,
         ]
-
-        # Position size limits - make them feasible
-        # Ensure position limits allow for full investment
-        max_pos = self.max_position_pct
-
-        # Calculate minimum position limit needed for feasibility
-        min_needed_per_asset = 1.0 / n  # Equal weight
-
-        # If position limits are too restrictive, relax them
-        if max_pos * n < 1.0:
-            # Need to relax position limits to allow full investment
-            current_max_pos = max(max_pos, min_needed_per_asset * 1.5)  # 50% above equal weight
-            constraints.append(w <= current_max_pos)
-            print(f"Warning: Position limits relaxed to {current_max_pos:.3f} for feasibility")
-        else:
-            current_max_pos = max_pos
-            constraints.append(w <= current_max_pos)
-
-        # Sector constraints with feasibility check
-        if sector_constraints and len(set(self.sector_map.get(t, 'Other') for t in tickers)) > 1:
-            try:
-                A_sector, b_sector = self._build_sector_constraints(tickers)
-
-                # Check if sector constraints are feasible
-                if A_sector.shape[0] > 0:
-
-                    # Ensure sector limits are feasible
-                    for i in range(len(b_sector)):
-                        sector_assets = np.sum(A_sector[i, :])
-                        if sector_assets > 0:
-                            # Minimum needed for this sector (assuming equal weight within sector)
-                            min_needed_for_sector = current_max_pos * sector_assets
-                            # Ensure sector limit allows for reasonable allocation
-                            b_sector[i] = max(b_sector[i], min_needed_for_sector, 0.1)  # At least 10%
-
-                    # Only add sector constraints if they don't conflict with position limits
-                    total_sector_capacity = np.sum(b_sector)
-                    if total_sector_capacity >= 1.0:  # Ensure we can invest 100%
-                        constraints.append(A_sector @ w <= b_sector)
-                    else:
-                        print(f"Warning: Sector constraints too restrictive (total capacity: {total_sector_capacity:.2f}), skipping")
-
-            except Exception as e:
-                print(f"Warning: Could not build sector constraints: {e}")
-                sector_constraints = False
-
-        # Only add turnover constraint if it's feasible and we have previous positions
-        if np.any(w_prev > 1e-6) and self.max_turnover < 2.0:  # Turnover of 2.0 means complete rebalancing
-            constraints.append(turnover <= self.max_turnover)
-
-        # Solve optimization with better error handling
-        problem = cp.Problem(objective, constraints)
-
+        prob = cp.Problem(obj, constraints)
         try:
-            # Check constraint feasibility before solving
-            #print(f"Optimization setup: {n} assets, {len(constraints)} constraints")
-            #print(f"Position limits: max={max_pos:.3f}, sum constraint allows: {max_pos * n:.3f}")
-
-            # Try OSQP first with relaxed tolerances
-            problem.solve(
-                solver=cp.OSQP,
-                verbose=False,
-                warm_start=True,
-                eps_abs=1e-4,  # Relaxed from 1e-5
-                eps_rel=1e-4,  # Relaxed from 1e-5
-                max_iter=20000,  # Increased iterations
-                rho=0.1,  # Penalty parameter
-                adaptive_rho=True  # Adaptive penalty
-            )
-
-            if problem.status == cp.INFEASIBLE:
-                print("Problem is infeasible. Diagnosing...")
-
-                # Try without turnover constraint
-                if len(constraints) > 3:  # More than basic constraints
-                    print("Retrying without turnover constraint...")
-                    basic_constraints = [
-                        cp.sum(w) == 1.0,
-                        w >= 0.0,
-                        w <= max(0.5, 1.0 / n + 0.1)  # Very relaxed position limits
-                    ]
-                    basic_problem = cp.Problem(objective, basic_constraints)
-                    basic_problem.solve(solver=cp.OSQP, verbose=False)
-
-                    if basic_problem.status in [cp.OPTIMAL, cp.OPTIMAL_INACCURATE]:
-                        w_opt = np.array(basic_problem.variables()[0].value).flatten()
-                        w_opt = np.maximum(w_opt, 0.0)
-                        w_opt = w_opt / w_opt.sum()
-                        return pd.Series(w_opt, index=tickers)
-
-            if problem.status not in [cp.OPTIMAL, cp.OPTIMAL_INACCURATE]:
-                print(f"OSQP failed with status: {problem.status}, trying ECOS...")
-                # Try ECOS solver as backup
-                problem.solve(solver=cp.ECOS, verbose=False)
-
-            if problem.status not in [cp.OPTIMAL, cp.OPTIMAL_INACCURATE]:
-                print(f"Optimization failed with status: {problem.status}")
-                print(f"Constraint summary:")
-                print(f"  - Assets: {n}")
-                print(f"  - Max position: {max_pos:.3f}")
-                print(f"  - Sector constraints: {sector_constraints}")
-                print(f"  - Current weights sum: {w_prev.sum():.3f}")
-                print(f"  - Alpha range: [{alpha.min():.6f}, {alpha.max():.6f}]")
-
-                # Try a simpler optimization without sector constraints
-                if sector_constraints:
-                    print("Retrying without sector constraints...")
-                    return self.optimize_portfolio_qp(
-                        alpha_vector, cov_matrix, current_weights, sector_constraints=False
-                    )
-
-                # Final fallback: create a simple feasible portfolio
-                print("Using simple fallback portfolio...")
-                # Use alpha signals but ensure feasibility
-                alpha_normalized = alpha - alpha.min()  # Make all non-negative
-                if alpha_normalized.sum() > 0:
-                    # Alpha-weighted but capped at reasonable limits
-                    raw_weights = alpha_normalized / alpha_normalized.sum()
-                    # Cap individual positions at 20% to ensure diversification
-                    max_weight = min(0.2, 1.0 / max(n, 5))
-                    capped_weights = np.minimum(raw_weights, max_weight)
-                    # Renormalize
-                    fallback_weights = capped_weights / capped_weights.sum()
-                else:
-                    # Equal weight fallback
-                    fallback_weights = np.ones(n) / n
-                return pd.Series(fallback_weights, index=tickers)
-
-            # Extract and clean solution
-            w_opt = np.array(w.value).flatten()
-            w_opt = np.maximum(w_opt, 0.0)  # Ensure non-negative
-            w_opt = w_opt / w_opt.sum()  # Renormalize
-
-            # Final validation
-            if np.any(np.isnan(w_opt)) or np.any(w_opt < 0):
-                print("Warning: Invalid solution detected, using fallback")
-                return pd.Series(np.ones(n) / n, index=tickers)
-
-            return pd.Series(w_opt, index=tickers)
-
-        except Exception as e:
-            print(f"Optimization error: {e}")
-            # Fallback to equal weights
-            fallback_weights = np.ones(n) / n
-            return pd.Series(fallback_weights, index=tickers)
+            prob.solve(solver=cp.OSQP, verbose=False)
+            if prob.status not in {cp.OPTIMAL, cp.OPTIMAL_INACCURATE}:
+                return None
+            sol = np.maximum(w.value, 0.0)
+            sol /= sol.sum()
+            return pd.Series(sol, index=tickers)
+        except Exception:
+            return None
 
     def rebalance(
         self,
         alpha_signals: Dict[str, float],
         price_map: Dict[str, float],
         price_history: pd.DataFrame,
+        max_long_positions: int = 50,
     ) -> Dict[str, dict]:
         """
         Rebalance portfolio using pure alpha signals and QP optimization.
@@ -451,96 +288,89 @@ class PortfolioManagerAgent:
         Returns:
             Dict with trade execution results
         """
-        if not alpha_signals:
-            print("No alpha signals provided")
+        # --- 0) Quick sanity – prune missing prices ----------------------
+        universe = [t for t in alpha_signals if t in price_map and price_map[t] > 0]
+        if not universe:
+            print("No tradable tickers with prices – aborting rebalance.")
             return {}
+            
+        # Sort by *positive* alpha and keep top‑K ------------------------
+        pos_alpha = {t: a for t, a in alpha_signals.items() if a > 0.0 and t in universe}
+        if not pos_alpha:
+            print("No positive‑alpha names – nothing to buy.")
+            return {}
+        top_tickers = sorted(pos_alpha, key=pos_alpha.get, reverse=True)[:max_long_positions]
 
-        # Filter tickers with valid prices and alpha signals
-        tickers = [t for t in alpha_signals.keys() if t in price_map and price_map[t] > 0]
+        # All other tickers are forced to weight 0 -----------------------
+        pruned_alpha = {t: alpha_signals[t] for t in top_tickers}
+        tickers = top_tickers  # canonical order
+
+        # Align price history subset ------------------------------------
+        missing_hist = [t for t in tickers if t not in price_history.columns]
+        if missing_hist:
+            print(f"Price history missing for {len(missing_hist)} tickers → dropped: {missing_hist[:5]}…")
+            tickers = [t for t in tickers if t not in missing_hist]
+            pruned_alpha = {t: pruned_alpha[t] for t in tickers}
         if len(tickers) < 2:
-            print(f"Insufficient valid tickers: {len(tickers)}")
+            print("Too few tickers after pruning – rebalance skipped.")
             return {}
 
-        # Create alpha vector
-        alpha_vector = pd.Series({t: alpha_signals[t] for t in tickers})
-
-        # Filter price history to available tickers
-        available_tickers = [t for t in tickers if t in price_history.columns]
-        if len(available_tickers) < len(tickers):
-            print(f"Price history missing for {len(tickers) - len(available_tickers)} tickers")
-            tickers = available_tickers
-            alpha_vector = alpha_vector.reindex(tickers)
-
-        if len(tickers) < 2:
-            print("Insufficient tickers with price history")
-            return {}
+        alpha_vec = pd.Series(pruned_alpha, index=tickers)
 
         # Estimate risk model
         price_hist_subset = price_history[tickers].dropna()
         if len(price_hist_subset) < 30:
             print("Insufficient price history for risk estimation")
             return {}
-
-        cov_matrix = self._estimate_risk_model(price_hist_subset)
+        cov = price_hist_subset.pct_change().dropna().cov()
 
         # Get current portfolio state
         acct = self.get_account_info()
         current_pos = self.get_current_positions()
         pv = acct['portfolio_value']
-
-        # Calculate current weights
-        current_weights = pd.Series({
-            t: current_pos.get(t, 0) * price_map.get(t, 0) / pv for t in tickers
-        })
+        curr_w = pd.Series({t: curr_pos.get(t, 0) * price_map[t] / pv for t in tickers})
 
         # QP Optimization
-        try:
-            optimal_weights = self.optimize_portfolio_qp(
-                alpha_vector=alpha_vector,
-                cov_matrix=cov_matrix,
-                current_weights=current_weights,
-                sector_constraints=False  # Disabled for better feasibility
-            )
+        optimal_weights = self._solve_qp(alpha_vec, cov, curr_w)
+        if w_opt is None:
+            print("QP failed – rebalance skipped.")
+            return {}
+        
+        # Calculate position targets
+        reserve = self.reserve_fraction * pv
+        investable = max(acct['cash'] - reserve, 0) + pv * (1 - self.reserve_fraction)
 
-            # Calculate position targets
-            reserve = self.reserve_fraction * pv
-            investable = max(acct['cash'] - reserve, 0) + pv * (1 - self.reserve_fraction)
+        # Dollar targets
+        target_dollars = optimal_weights * investable
 
-            # Dollar targets
-            target_dollars = optimal_weights * investable
+        # Share targets
+        target_shares = target_dollars / pd.Series(price_map).reindex(tickers)
 
-            # Share targets
-            target_shares = target_dollars / pd.Series(price_map).reindex(tickers)
+        # Filter out positions below minimum size
+        min_shares = self.min_position_size / pd.Series(price_map).reindex(tickers)
+        target_shares = target_shares.where(target_shares >= min_shares, 0.0)
 
-            # Filter out positions below minimum size
-            min_shares = self.min_position_size / pd.Series(price_map).reindex(tickers)
-            target_shares = target_shares.where(target_shares >= min_shares, 0.0)
+        # Renormalize after filtering
+        if target_shares.sum() > 0:
+            total_value = (target_shares * pd.Series(price_map).reindex(tickers)).sum()
+            if total_value > 0:
+                target_shares = target_shares * (investable / total_value)
 
-            # Renormalize after filtering
-            if target_shares.sum() > 0:
-                total_value = (target_shares * pd.Series(price_map).reindex(tickers)).sum()
-                if total_value > 0:
-                    target_shares = target_shares * (investable / total_value)
+        # Calculate trades
+        current_shares = pd.Series({t: current_pos.get(t, 0) for t in tickers})
+        trade_sizes = target_shares - current_shares
 
-            # Calculate trades
-            current_shares = pd.Series({t: current_pos.get(t, 0) for t in tickers})
-            trade_sizes = target_shares - current_shares
+        # Filter significant trades only
+        min_trade_value = 10.0  # Minimum $10 trade
+        min_trade_shares = min_trade_value / pd.Series(price_map).reindex(tickers)
+        trade_sizes = trade_sizes.where(np.abs(trade_sizes) >= min_trade_shares, 0.0)
 
-            # Filter significant trades only
-            min_trade_value = 10.0  # Minimum $10 trade
-            min_trade_shares = min_trade_value / pd.Series(price_map).reindex(tickers)
-            trade_sizes = trade_sizes.where(np.abs(trade_sizes) >= min_trade_shares, 0.0)
+        trade_dict = {t: float(trade_sizes[t]) for t in tickers if abs(trade_sizes[t]) > 1e-6}
+        #logging.info(f"Portfolio optimization result: {trade_dict}")
 
-            trade_dict = {t: float(trade_sizes[t]) for t in tickers if abs(trade_sizes[t]) > 1e-6}
-            #logging.info(f"Portfolio optimization result: {trade_dict}")
-
-            # Execute trades
-            if trade_dict:
-                return self.execute_trades(trade_dict, price_map)
-            else:
-                print("No significant trades to execute")
-                return {}
-
-        except Exception as e:
-            print(f"Portfolio optimization failed: {e}")
+        # Execute trades
+        if trade_dict:
+            return self.execute_trades(trade_dict, price_map)
+        else:
+            print("No significant trades to execute")
             return {}

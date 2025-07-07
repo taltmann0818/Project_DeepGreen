@@ -136,9 +136,12 @@ class Tempusv3Inference:
         tft_dataset = self.prepare_features(data)
         # ––––––––––––––– 1 Create ONNX session –––––––––––––––
         model_path = _find_model(const["ONNX_MODEL_PATH"])
+        opts = ort.SessionOptions()
+        opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
         session = ort.InferenceSession(
             model_path,
             providers=["CoreMLExecutionProvider"]
+            sess_options=opts
         )
         print(f"Loaded ONNX Model: {const['ONNX_MODEL_PATH']}")
 

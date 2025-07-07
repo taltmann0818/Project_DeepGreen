@@ -32,6 +32,9 @@ class CustomBacktestingEngine:
         transaction_cost_bps: float = 5.0,
         market_impact_coeff: float = 0.0,
         reserve_fraction: float = 0.02,
+        rebalance_every: int = 3,
+        lookback_window: int = 60,
+        max_long_positions: int = 30,
         min_position_size: float = 0.01,
     ):
         """
@@ -49,9 +52,12 @@ class CustomBacktestingEngine:
             Additional parameters passed to PortfolioManagerAgent
         """
         self.initial_capital = initial_capital
+        self.rebalance_every = rebalance_every
+        self.lookback_window = lookback_window
+        self.max_long_positions = max_long_positions
 
         # Initialize portfolio manager
-        self.portfolio_manager = PortfolioManagerAgent(
+        self.pm = PortfolioManagerAgent(
             alpaca_api_key=alpaca_api_key,
             alpaca_api_secret=alpaca_api_secret,
             paper=True,
@@ -67,14 +73,13 @@ class CustomBacktestingEngine:
         )
 
         # Set fixed capital for backtesting
-        self.portfolio_manager.capital = initial_capital
-
+        self.pm.capital = initial_capital
+        
         # Initialize tracking variables
-        self.trade_records = []
-        self.portfolio_history = []
-        self.returns_history = []
-        self.current_positions = {}  # Track simulated positions
-        self.cash = initial_capital  # Track simulated cash
+        self.cash = initial_capital
+        self.positions: Dict[str, float] = {}
+        self.records: List[Dict] = []
+        self.trades: List[Dict] = []
 
         # Setup logging
         logging.basicConfig(level=logging.INFO)
@@ -130,229 +135,101 @@ class CustomBacktestingEngine:
         """
         logging.info(f"Starting backtest with {len(alpha_dict)} dates...")
 
-        # Prepare price data
-        price_history, price_map = self.prepare_price_data(stock_data)
+        # 1) Build price history pivot & map -----------------------------
+        price_history = stock_data.pivot(index="date", columns="Ticker", values="Close").sort_index()
+        price_map_by_date = price_history.to_dict("index")
+        date_index = price_history.index.tolist()
 
-        # Filter stock data to only include tickers in alpha signals
-        all_tickers = set()
-        for signals in alpha_dict.values():
-            all_tickers.update(signals.keys())
+        pv_prev = self.initial_capital
 
-        filtered_stock_data = stock_data[stock_data['Ticker'].isin(all_tickers)]
+        for step, (date, alpha_raw) in enumerate(sorted(alpha_dict.items())):
+            # Pick closest trading date <= alpha date --------------------
+            px_date = date if date in price_map_by_date else _closest_prev_date(date_index, date)
+            if px_date is None:
+                logging.warning(f"No price data before {date} – skipping." )
+                continue
+            prices_today = price_map_by_date[px_date]
 
-        # Initialize portfolio tracking
-        current_portfolio_value = self.initial_capital
-        previous_portfolio_value = self.initial_capital
+            # ---------------- Mark‑to‑market every day ------------------
+            pv_positions = sum(qty * prices_today.get(t, 0.0) for t, qty in self.positions.items())
+            pv_today = pv_positions + self.cash
+            daily_ret = (pv_today - pv_prev) / pv_prev if pv_prev > 0 else 0.0
+            self.records.append({
+                "date": date,
+                "portfolio_value": pv_today,
+                "daily_return": np.clip(daily_ret, -0.99, 1.0),
+                "num_positions": len(self.positions),
+            })
+            pv_prev = pv_today
 
-        # Iterate through each date in the alpha dictionary
-        for date, alpha_signals in tqdm(alpha_dict.items(), desc="Processing dates"):
-            try:
-                # Get the price map for this specific date
-                if date in price_map:
-                    current_price_map = price_map[date]
-                else:
-                    # Try to find the closest date if exact match not found
-                    available_dates = list(price_map.keys())
-                    if not available_dates:
-                        continue
-                    closest_date = min(available_dates, key=lambda x: abs((x - date).days))
-                    current_price_map = price_map[closest_date]
-                    logging.warning(f"Using closest date {closest_date} for alpha date {date}")
-
-                # Filter alpha signals to only include tickers with available prices
-                filtered_alpha = {
-                    ticker: alpha for ticker, alpha in alpha_signals.items()
-                    if ticker in current_price_map and current_price_map[ticker] > 0
-                }
-
-                if len(filtered_alpha) < 2:
-                    logging.debug(f"Skipping date {date}: insufficient valid tickers ({len(filtered_alpha)})")
-                    # Record no change in portfolio value
-                    self.returns_history.append({
-                        'date': date,
-                        'portfolio_value': current_portfolio_value,
-                        'daily_return': 0.0,
-                        'num_positions': 0
-                    })
-                    continue
-
-                # Get optimal weights from portfolio manager
-                tickers = list(filtered_alpha.keys())
-                alpha_vector = pd.Series(filtered_alpha)
-
-                # Filter price history to available tickers
-                available_tickers = [t for t in tickers if t in price_history.columns]
-                if len(available_tickers) < len(tickers):
-                    tickers = available_tickers
-                    alpha_vector = alpha_vector.reindex(tickers)
-
-                if len(tickers) < 2:
-                    continue
-
-                # Estimate risk model
-                price_hist_subset = price_history[tickers].dropna()
-                if len(price_hist_subset) < 10:
-                    continue
-
-                cov_matrix = self.portfolio_manager._estimate_risk_model(price_hist_subset)
-
-                # Calculate current weights
-                current_portfolio_value = sum(
-                    pos * current_price_map.get(ticker, 0) 
-                    for ticker, pos in self.current_positions.items()
-                ) + self.cash
-
-                current_weights = pd.Series({
-                    t: self.current_positions.get(t, 0) * current_price_map.get(t, 0) / current_portfolio_value 
-                    for t in tickers
-                })
-
-                # Get optimal weights
-                optimal_weights = self.portfolio_manager.optimize_portfolio_qp(
-                    alpha_vector=alpha_vector,
-                    cov_matrix=cov_matrix,
-                    current_weights=current_weights,
-                    sector_constraints=False
-                )
-
-                # Calculate target positions in shares
-                investable_capital = current_portfolio_value * 0.98  # Keep 2% cash reserve
-                target_dollar_positions = optimal_weights * investable_capital
-                target_share_positions = target_dollar_positions / pd.Series(current_price_map).reindex(tickers)
-
-                # Calculate trades needed
-                current_share_positions = pd.Series({t: self.current_positions.get(t, 0) for t in tickers})
-                trade_shares = target_share_positions - current_share_positions
-
-                # Execute trades and record them
-                trades_executed = 0
-                executed_trades = {}
-
-                for ticker in tickers:
-                    trade_qty = trade_shares.get(ticker, 0)
-                    if abs(trade_qty) > 0.01:  # Only execute significant trades
-                        price = current_price_map.get(ticker, 0)
-
-                        # Record the trade before execution
-                        side = 'buy' if trade_qty > 0 else 'sell'
-                        executed_trades[ticker] = {
-                            'side': side,
-                            'qty': abs(trade_qty),
-                            'price': price,
-                            'status': 'executed'
-                        }
-
-                        # Update positions
-                        self.current_positions[ticker] = target_share_positions.get(ticker, 0)
-
-                        # Update cash (negative for buys, positive for sells)
-                        self.cash -= trade_qty * price
-                        trades_executed += 1
-
-                        # Remove zero positions
-                        if abs(self.current_positions[ticker]) < 0.01:
-                            self.current_positions.pop(ticker, None)
-
-                # Optional: Log execution info for monitoring
-                if len(self.returns_history) < 3:
-                    logging.debug(f"Date {date}: Executed {trades_executed} trades, Cash: ${self.cash:.2f}, Positions: {len(self.current_positions)}")
-
-                # Calculate portfolio value after trades
-                portfolio_value_from_positions = sum(
-                    pos * current_price_map.get(ticker, 0) 
-                    for ticker, pos in self.current_positions.items()
-                )
-                current_portfolio_value = portfolio_value_from_positions + self.cash
-
-                # Calculate daily return with safeguards
-                if previous_portfolio_value > 0:
-                    daily_return = (current_portfolio_value - previous_portfolio_value) / previous_portfolio_value
-                    # Cap extreme returns to prevent numerical issues
-                    daily_return = max(min(daily_return, 1.0), -0.99)  # Cap at +100% and -99%
-                else:
-                    daily_return = 0.0
-
-                # Record portfolio state
-                self.returns_history.append({
-                    'date': date,
-                    'portfolio_value': current_portfolio_value,
-                    'daily_return': daily_return,
-                    'num_positions': len(self.current_positions)
-                })
-
-                # Record executed trades
-                for ticker, trade_info in executed_trades.items():
-                    trade_record = {
-                        'date': date,
-                        'ticker': ticker,
-                        'side': trade_info['side'],
-                        'qty': trade_info['qty'],
-                        'price': trade_info['price'],
-                        'dollar_amount': trade_info['qty'] * trade_info['price'],
-                        'alpha_signal': filtered_alpha.get(ticker, 0),
-                        'status': trade_info['status']
-                    }
-                    self.trade_records.append(trade_record)
-
-                # Record alpha signals for tickers with no trades
-                for ticker, alpha_val in filtered_alpha.items():
-                    if ticker not in executed_trades:
-                        trade_record = {
-                            'date': date,
-                            'ticker': ticker,
-                            'side': 'no_trade',
-                            'qty': 0,
-                            'price': current_price_map.get(ticker, 0),
-                            'dollar_amount': 0,
-                            'alpha_signal': alpha_val,
-                            'status': 'no_trade'
-                        }
-                        self.trade_records.append(trade_record)
-
-                previous_portfolio_value = current_portfolio_value
-
-            except Exception as e:
-                logging.error(f"Error processing date {date}: {str(e)}")
-                # Record no change for this date
-                self.returns_history.append({
-                    'date': date,
-                    'portfolio_value': current_portfolio_value,
-                    'daily_return': 0.0,
-                    'num_positions': 0
-                })
+            # ---------------- Rebalance on schedule ----------------------
+            if step % self.rebalance_every != 0:
                 continue
 
+            # Filter to tickers with valid prices -----------------------
+            alpha = {t: a for t, a in alpha_raw.items() if t in prices_today and prices_today[t] > 0}
+            if not alpha:
+                continue
+
+            # Top‑K positive alpha --------------------------------------
+            pos_alpha = {t: a for t, a in alpha.items() if a > 0}
+            top = sorted(pos_alpha, key=pos_alpha.get, reverse=True)[: self.max_long_positions]
+            if len(top) < 2:
+                logging.debug(f"{date}: <2 positive alphas – skip rebalance")
+                continue
+            alpha_vec = pd.Series({t: alpha[t] for t in top})
+
+            # Covariance matrix -----------------------------------------
+            hist_window = price_history[top].iloc[-self.lookback_window :].dropna()
+            if len(hist_window) < 30:
+                continue
+            cov = hist_window.pct_change().dropna().cov()
+
+            # Current weights in aligned order --------------------------
+            pv_curr = pv_today if pv_today > 0 else 1.0
+            w_prev = pd.Series({t: self.positions.get(t, 0) * prices_today[t] / pv_curr for t in top})
+
+            # Solve QP ---------------------------------------------------
+            weights = self.pm._solve_qp(alpha_vec, cov, w_prev)
+            if weights is None:
+                continue
+
+            # Translate weights → target shares -------------------------
+            investable = pv_curr * (1.0 - self.pm.reserve_fraction)
+            tgt_dollars = weights * investable
+            tgt_shares = tgt_dollars / pd.Series({t: prices_today[t] for t in top})
+
+            # Compute trades -------------------------------------------
+            trades = tgt_shares - pd.Series({t: self.positions.get(t, 0.0) for t in top})
+            for t, dq in trades.items():
+                if abs(dq) < 1e-2:
+                    continue
+                trade_val = dq * prices_today[t]
+                side = "buy" if dq > 0 else "sell"
+                self.trades.append({
+                    "date": date,
+                    "ticker": t,
+                    "side": side,
+                    "qty": abs(dq),
+                    "price": prices_today[t],
+                    "dollar": abs(trade_val),
+                    "alpha": alpha_vec[t],
+                })
+                # Update cash & positions ------------------------------
+                self.cash -= trade_val
+                new_pos = self.positions.get(t, 0.0) + dq
+                if abs(new_pos) < 1e-2:
+                    self.positions.pop(t, None)
+                else:
+                    self.positions[t] = new_pos
+
         # Convert returns history to DataFrame
-        returns_df = pd.DataFrame(self.returns_history)
-
-        if len(returns_df) > 0:
-            returns_df = returns_df.sort_values('date').reset_index(drop=True)
-            returns_df['cumulative_return'] = (1 + returns_df['daily_return']).cumprod() - 1
-
-            logging.info(f"Backtest completed:")
-            logging.info(f"Total records: {len(returns_df)}")
-            #logging.info(f"Date range: {returns_df['date'].min()} to {returns_df['date'].max()}")
-            logging.info(f"Final portfolio value: ${returns_df['portfolio_value'].iloc[-1]:,.2f}")
-            logging.info(f"Total return: {returns_df['cumulative_return'].iloc[-1]:.2%}")
-
-        return returns_df
-
-    def get_trade_summary(self) -> pd.DataFrame:
-        """
-        Get summary of all trades executed during backtest.
-
-        Returns
-        -------
-        pd.DataFrame
-            DataFrame with all trade records
-        """
-        if not self.trade_records:
-            return pd.DataFrame()
-
-        trades_df = pd.DataFrame(self.trade_records)
-        trades_df = trades_df.sort_values(['date', 'ticker']).reset_index(drop=True)
-
-        return trades_df
+        df = pd.DataFrame(self.records).sort_values("date").reset_index(drop=True)
+        df["cumulative_return"] = (1 + df["daily_return"]).cumprod() - 1
+        logging.info(
+            f"Back‑test done: PV = ${pv_prev:,.0f}, Total Return = {df['cumulative_return'].iloc[-1]:.2%}"
+        )
+        return df
 
     def get_performance_metrics(self, returns_df: pd.DataFrame) -> Dict[str, float]:
         """
@@ -376,7 +253,9 @@ class CustomBacktestingEngine:
             'num_trades': len(self.trade_records),
             'avg_positions': returns_df['num_positions'].mean()
         }
-
+    
+    def trade_log(self) -> pd.DataFrame:
+        return pd.DataFrame(self.trades)
 
 # Example usage and testing
 if __name__ == "__main__":
