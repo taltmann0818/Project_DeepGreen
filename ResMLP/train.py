@@ -41,6 +41,32 @@ torch.backends.cudnn.allow_tf32 = True
 torch.backends.cuda.enable_flash_sdp(True)
 
 
+# train.py
+import pytorch_lightning as pl
+from resmlp_lightning import ResMLP
+from datamodule_cs      import CrossSectionDM
+
+dm = CrossSectionDM(root="features_cs", batch_size=1)    # 1 macro-batch/step
+model = ResMLP(n_features=len(dm.feats),
+              lr=1e-3,
+              wd=1e-2
+              d=384,
+              n_blocks=10)
+
+trainer = pl.Trainer(
+    max_epochs=15,
+    accelerator="gpu",
+    devices=1,
+    precision="bf16-mixed",       # lightning auto-casts to bf16 if supported
+    deterministic=False,
+    gradient_clip_val=0.5,
+    accumulate_grad_batches=4,    # ≈ 4×512 = 2 K tickers / step
+    callbacks=[pl.callbacks.ModelCheckpoint(
+                 monitor="val_loss", mode="min", filename="resmlp-best")]
+)
+trainer.fit(model, dm)
+
+
 class AdamWWarmupTFT(TemporalFusionTransformer):
     """
     Temporal-Fusion-Transformer that trains with:

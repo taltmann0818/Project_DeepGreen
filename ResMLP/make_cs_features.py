@@ -1,10 +1,69 @@
-import pandas as pd, numpy as np, pyarrow as pa, pyarrow.parquet as pq
+import pandas as pd
+import numpy as np
+from typing import Tuple, Optional
+import torch
+import hashlib
 from pathlib import Path
-from datetime import date, timedelta
+import json
+import os
+from Components.TickerData import TickerData
+import warnings
+warnings.filterwarnings("ignore")  # avoid printing out absolute paths
 
-ROOT = Path("features_cs")           # partition root
-START = date(2022, 1, 3)             # first trading day to (re)build
-END   = date.today() - timedelta(days=1)
+# Add project root to path
+import sys
+project_root = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(project_root))
+
+from Components.TickerData import TickerData
+
+class DataModule:
+    """
+    Data module for cross-sectional ResNLP model training that handles data loading, preprocessing, and creation of PyTorch Lightning dataloaders.
+    """
+
+    def __init__(
+        self,
+        config: dict = None,
+        batch_size: int = None,
+        max_prediction_length: int = None,
+        max_encoder_length: int = None,
+        days: int = 252,
+        prediction_window: int = 3,
+        num_workers: Optional[int] = None,
+        use_cache: bool = True,
+        cache_dir: str = "data_cache",
+        sample_size: int = 100,
+    ):
+        self.config = config
+
+        # Use config values with fallback to parameters
+        self.batch_size = batch_size or config.get("BATCH_SIZE", 256)
+        self.sample_size = sample_size
+        self.max_prediction_length = max_prediction_length or config.get("DECODER_LEN", 3)
+        self.max_encoder_length = max_encoder_length or config.get("ENCODER_LEN", 30)
+        self.days = days
+        self.prediction_window = prediction_window
+        self.num_workers = num_workers or max(1, os.cpu_count() // 2)
+        self.use_cache = use_cache
+        self.cache_dir = Path(cache_dir)
+
+        # Create cache directory if it doesn't exist
+        if self.use_cache:
+            self.cache_dir.mkdir(exist_ok=True)
+
+        # Get feature columns from config
+        self.static_categoricals = config.get("STATIC_CATS", [])
+        self.time_varying_known_reals = config.get("TV_KNOWN_REAL", [])
+        self.time_varying_unknown_reals = config.get("TV_UNKNOWN_REAL", [])
+
+        # Model path from config
+        self.model_path = config.get("ONNX_MODEL_PATH", "")
+
+        # Additional columns needed for processing (target and identifier)
+        self.indicator_list = ['Close'] + self.static_categoricals + self.time_varying_known_reals + self.time_varying_unknown_reals
+
+
 
 # ---------- 1.  helpers --------------------------------------------------
 def pct_rank(s: pd.Series) -> pd.Series:
@@ -43,6 +102,8 @@ for d in pd.bdate_range(START, END):
     df = df.set_index("ticker")
     df["ret_1m"] = mom_1m
     # … add 1-w, 3-m, volatility, RSI, etc.
+
+    #Peer residuals	Return_i − sector_mean_return at t-1
 
     # 2.4 cross-sectional ranks (do *after* filling NaNs) ------------------
     rank_cols = ["ret_1m", "pe_ttm", "adv20", "iv_atm_1d"]
