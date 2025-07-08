@@ -9,7 +9,7 @@ class ResBlock(nn.Module):
         self.net = nn.Sequential(
             nn.LayerNorm(d),
             nn.Linear(d, d * 4),
-            nn.GELU(),
+            nn.SiLU(),
             nn.Dropout(p),
             nn.Linear(d * 4, d)
         )

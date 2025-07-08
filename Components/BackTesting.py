@@ -1,4 +1,6 @@
 from __future__ import annotations
+
+import bisect
 import pandas as pd
 import numpy as np
 from datetime import datetime
@@ -13,6 +15,13 @@ try:
 except ImportError:
     PORTFOLIO_MANAGER_AVAILABLE = False
     PortfolioManagerAgent = None
+
+def _closest_prev_date(dates: List[pd.Timestamp], target: pd.Timestamp) -> Optional[pd.Timestamp]:
+    """Return the closest **prior** date in *dates* ≤ target, or None."""
+    idx = bisect.bisect_right(dates, target)
+    if idx == 0:
+        return None
+    return dates[idx - 1]
 
 class CustomBacktestingEngine:
     """
@@ -250,7 +259,7 @@ class CustomBacktestingEngine:
 
         return {
             'total_return': returns_df['cumulative_return'].iloc[-1],
-            'num_trades': len(self.trade_records),
+            'num_trades': len(pd.DataFrame(self.trades)),
             'avg_positions': returns_df['num_positions'].mean()
         }
     

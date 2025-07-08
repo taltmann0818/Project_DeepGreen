@@ -29,6 +29,7 @@ from plotly.subplots import make_subplots
 import quantstats_lumi as qs
 from tqdm import tqdm
 from google import genai
+from google.genai import types
 import quantstats_lumi as qs
 
 # Optional dependencies
@@ -58,7 +59,7 @@ class ModelBenchmarkRunner:
         self.experiment_run = experiment_run
         self.models = models
         self.days = days
-        self.sample_size = 6000 #sample_size
+        self.sample_size = 2000 #sample_size
         self.prediction_window = prediction_window
         self.run_name = run_name or f"benchmark_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         self.out_dir = Path(out_dir)
@@ -298,14 +299,8 @@ class ModelBenchmarkRunner:
         # Run inference to get predictions
         predictions = inference_class.predict(data)
 
-        # Initialize alpha pipeline to process raw predictions
-        alpha_pipeline = AlphaVectorPipeline(
-            factor_cols=None,  # Will be auto-determined during processing
-            polygon_api_key='XizU4KyrwjCA6bxHrR5_eQnUxwFFUnI2'
-        )
-
         # Process predictions to generate alpha signals
-        alpha_dict = alpha_pipeline.run(predictions)
+        alpha_dict, alpha_df = AlphaVectorPipeline(polygon_api_key='XizU4KyrwjCA6bxHrR5_eQnUxwFFUnI2').run(predictions)
         logging.info(f"Generated alpha signals for {len(alpha_dict)} dates")
 
         if not alpha_dict:
@@ -315,8 +310,8 @@ class ModelBenchmarkRunner:
         # Initialize custom backtesting engine
         backtesting_engine = CustomBacktestingEngine(
             initial_capital=10000.0,
-            risk_aversion=5.0,
-            max_position_pct=0.15,
+            risk_aversion=0.5,
+            max_position_pct=0.35,
             transaction_cost_bps=5.0
         )
 
@@ -337,14 +332,11 @@ class ModelBenchmarkRunner:
             # Calculate comprehensive metrics using quantstats_lumi
             metrics = self._calculate_quantstats_metrics(strategy_returns, self.benchmark_returns, model_name)
 
-            # Get trade summary
-            trade_summary = backtesting_engine.get_trade_summary()
-
             return {
                 'results_df': pd.DataFrame([metrics]),
                 'returns_df': returns_df,
                 'strategy_returns': returns_df,
-                'trade_summary': trade_summary,
+                'trade_summary': backtesting_engine.trade_log,
                 'alpha_signals': alpha_dict
             }
 
@@ -522,30 +514,52 @@ class ModelBenchmarkRunner:
 
         try:
             # Prepare data summary for LLM
-            prompt = f"""
-            As a quantitative finance expert, analyze the following model benchmark results and provide a comprehensive report with recommendations.
-
-            Experiment: {self.experiment_run}
-            Models Tested: {', '.join(self.models)}
-            Testing Period: {self.days} day(s)
-
-            Performance Summary:
-            {json.dumps(summary_data, indent=2, default=str)}
-
-            Please provide:
-            1. Executive Summary of findings
-            2. Detailed analysis of each model's performance
-            3. Comparative analysis highlighting strengths and weaknesses
-            4. Risk assessment and drawdown analysis
-            5. Clear recommendation on which model(s) to adopt and why
-            6. Suggestions for further testing or improvements
-
-            Format the response in clear sections with actionable insights.
-            """
+            config = types.GenerateContentConfig(
+                system_instruction=[
+                    f"""You are a quantitative finance AI analyst at a hedge fund analyzing deep learning experiments for generating alpha on U.S. equities. 
+                    Analyze the following model benchmark results and provide a concise report with recommendations.
+                    1. Emphasize models that generate positive returns.
+                    2. Ensure that returns are not out weighted by risk. Risk is important to mitigate.
+                    3. Be analytical and provide a concise evaluation of the model's performance.
+                    4. Evaluate technical insights of the model training including its loss and performance.
+                    5. Structure your report with an executive summary, model performance analysis, risk assessment, and actionable recommendations.
+                    """,
+                    f"""When providing your reasoning, be thorough and specific by:
+                    1. Exhibit a concise and succinct writing style that's data-driven.
+                    2. Don't be speculative. Focus on the actual results and their significance for advancing research and training on the model.
+                    3. Have an academic tone of voice.
+                    """,
+                    "Return a least 3 rational, actionable recommendations for the model training, architecture, or new features to improve alpha generation."
+                ],
+                response_mime_type="application/json",
+                response_schema={
+                    "type": "OBJECT",
+                    "properties": {
+                        "overall_recommendation": {"type": "STRING", "enum": ["ADOPT", "DISCARD"]},
+                        "exec_summary": {"type": "STRING"},
+                        "performance_analysis": {"type": "STRING"},
+                        "risk_assessment": {"type": "STRING"},
+                        "recommendations": {"type": "ARRAY", "items": {"type": "STRING"}}
+                    },
+                    "required": ["overall_recommendation", "exec_summary", "performance_analysis","risk_assessment","recommendations"],
+                },
+            )
 
             response = self.genai_client.models.generate_content(
                 model=self.gemini_model,
-                contents=prompt)
+                contents=f"""
+                As a quantitative finance expert, analyze the following model benchmark results and provide a concise report with recommendations.
+
+                Experiment: {self.experiment_run}
+                Models Tested: {', '.join(self.models)}
+                Testing Period: {self.days} day(s)
+    
+                Performance Summary:
+                {json.dumps(summary_data, indent=2, default=str)}
+                """,
+                config=config,
+            )
+
             return response.text
 
         except Exception as e:

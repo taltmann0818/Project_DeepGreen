@@ -26,7 +26,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import statsmodels.api as sm
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 import logging
 from Components.TickerData import TickerData
 from Components.DataModules.sector_analysis import SectorAnalysis
@@ -205,7 +205,7 @@ class AlphaVectorPipeline:
 
         # Pack for optimiser ----------------------------------------------------
         packed: Dict[pd.Timestamp, Dict[str, float]] = {
-            d: g.set_index("Ticker")["alpha_final"].to_dict()
+            d: g.set_index("Ticker")["alpha_pure"].to_dict()
             for d, g in df.groupby("date", sort=False)
         }
 
@@ -307,7 +307,6 @@ class AlphaVectorPipeline:
             self.factor_cols = sector_columns + ['MktBeta'] + ['smb_exposure']
 
         # 7. Generate alpha signals using the existing run method
-
         return self.alpha_signals(predictions)
 
 

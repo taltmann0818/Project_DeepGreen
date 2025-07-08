@@ -140,7 +140,7 @@ class Tempusv3Inference:
         opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
         session = ort.InferenceSession(
             model_path,
-            providers=["CoreMLExecutionProvider"]
+            providers=["CoreMLExecutionProvider"],
             sess_options=opts
         )
         print(f"Loaded ONNX Model: {const['ONNX_MODEL_PATH']}")
