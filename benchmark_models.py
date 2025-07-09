@@ -53,18 +53,24 @@ class ModelBenchmarkRunner:
     """Modular benchmark runner for ML models with W&B integration"""
 
     def __init__(self, experiment_run: str, models: List[str], days: int = 252,
-                 out_dir: str = "benchmark_results", sample_size: int = 6000,
+                 out_dir: str = "benchmark_results", sample_size: int = 1200,
                  prediction_window: int = 3, run_name: str = None,
                  use_wandb: bool = False, use_gemini: bool = False):
         self.experiment_run = experiment_run
         self.models = models
         self.days = days
-        self.sample_size = 2000 #sample_size
+        self.sample_size = 3000 #sample_size
         self.prediction_window = prediction_window
         self.run_name = run_name or f"benchmark_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         self.out_dir = Path(out_dir)
         self.out_dir.mkdir(exist_ok=True)
+        self.cache_dir = Path(f"{self.out_dir}/data_cache")
+        self.cache_dir.mkdir(exist_ok=True)
         self.riskFreeRate = 0.04348 # 10yr U.S. Treasury Yield
+        self.initial_capital = 10000.0
+        self.risk_aversion = 0.5
+        self.max_position_pct = 0.35
+        self.transaction_cost_bps = 5.0
 
         # Initialize W&B
         self.use_wandb = use_wandb
@@ -84,8 +90,8 @@ class ModelBenchmarkRunner:
         # Data caching
         self.stock_data = None
         self.benchmark_returns = None
-        self.stock_data_cache_path = self.out_dir / "stock_data_cache.parquet"
-        self.benchmark_data_cache_path = self.out_dir / "benchmark_data_cache.parquet"
+        self.stock_data_cache_path = self.cache_dir / "stock_data_cache.parquet"
+        self.benchmark_data_cache_path = self.cache_dir / "benchmark_data_cache.parquet"
 
     def initialize_wandb(self):
         """Initialize Weights & Biases - find existing run by name instead of creating new one"""
@@ -111,12 +117,12 @@ class ModelBenchmarkRunner:
                     id=existing_run.id,
                     resume="allow",
                     config={
-                        "models": self.models,
-                        "days": self.days,
-                        "experiment_run": self.experiment_run,
-                        "run_name": self.run_name,
-                        "prediction_window": self.prediction_window,
-                        "sample_size": self.sample_size
+                        "backtest_days": self.days,
+                        "backtest_sample_size": self.sample_size,
+                        "backtest_initial_capital": self.initial_capital,
+                        "backtest_risk_aversion": self.risk_aversion,
+                        "backtest_max_position_pct": self.max_position_pct,
+                        "backtest_transaction_cost_bps": self.transaction_cost_bps
                     }
                 )
                 logging.info("✅ Found and resumed existing W&B run: %s (ID: %s)", self.run_name, existing_run.id)
@@ -126,12 +132,12 @@ class ModelBenchmarkRunner:
                     project="tft-us-equities",
                     name=self.run_name,
                     config={
-                        "models": self.models,
-                        "days": self.days,
-                        "experiment_run": self.experiment_run,
-                        "run_name": self.run_name,
-                        "prediction_window": self.prediction_window,
-                        "sample_size": self.sample_size
+                        "backtest_days": self.days,
+                        "backtest_sample_size": self.sample_size,
+                        "backtest_initial_capital": self.initial_capital,
+                        "backtest_risk_aversion": self.risk_aversion,
+                        "backtest_max_position_pct": self.max_position_pct,
+                        "backtest_transaction_cost_bps": self.transaction_cost_bps
                     }
                 )
                 logging.info("✅ Created new W&B run: %s", self.run_name)
@@ -207,7 +213,8 @@ class ModelBenchmarkRunner:
                         config=config,
                         days=self.days,
                         use_cache=True,
-                        sample_size=self.sample_size
+                        sample_size=self.sample_size,
+                        cache_dir=self.cache_dir
                     )
                 except Exception as e:
                     logging.error("❌  Failed to instantiate %s: %s", obj.__name__, e)
@@ -303,16 +310,19 @@ class ModelBenchmarkRunner:
         alpha_dict, alpha_df = AlphaVectorPipeline(polygon_api_key='XizU4KyrwjCA6bxHrR5_eQnUxwFFUnI2').run(predictions)
         logging.info(f"Generated alpha signals for {len(alpha_dict)} dates")
 
+        # Save to cache
+        self._save_benchmark_data_to_cache(alpha_df)
+
         if not alpha_dict:
             logging.warning("⚠️  No alpha signals generated for %s", model_name)
             return None
 
         # Initialize custom backtesting engine
         backtesting_engine = CustomBacktestingEngine(
-            initial_capital=10000.0,
-            risk_aversion=0.5,
-            max_position_pct=0.35,
-            transaction_cost_bps=5.0
+            initial_capital=self.initial_capital,
+            risk_aversion=self.risk_aversion,
+            max_position_pct=self.max_position_pct,
+            transaction_cost_bps=self.transaction_cost_bps
         )
 
         # Run backtest using alpha signals
@@ -336,7 +346,7 @@ class ModelBenchmarkRunner:
                 'results_df': pd.DataFrame([metrics]),
                 'returns_df': returns_df,
                 'strategy_returns': returns_df,
-                'trade_summary': backtesting_engine.trade_log,
+                'trade_summary': backtesting_engine.trade_log(),
                 'alpha_signals': alpha_dict
             }
 
@@ -392,59 +402,65 @@ class ModelBenchmarkRunner:
 
         return metrics
 
-    def create_comparison_plots(self) -> Dict[str, go.Figure]:
+    def create_comparison_plots(self) -> None:
         """Create comparison plots for all models"""
         plots = {}
 
-        # Performance comparison plot
-        fig = go.Figure()
-
-        for model_name, results in self.model_results.items():
-            if results and 'strategy_returns' in results and not results['strategy_returns'].empty:
-                # Extract daily returns from the returns DataFrame
-                returns_df = results['strategy_returns']
-                if 'date' in returns_df.columns and 'daily_return' in returns_df.columns:
-                    # Create a proper time series for plotting
-                    strategy_returns = returns_df.set_index('date')['daily_return']
-                    cumulative_returns = (1 + strategy_returns).cumprod() - 1
-
-                    fig.add_trace(go.Scatter(
-                        x=cumulative_returns.index,
-                        y=cumulative_returns,
-                        name=model_name,
-                        mode='lines'
-                    ))
-                else:
-                    # Fallback: assume it's already a returns series
-                    strategy_data = results['strategy_returns']
-                    if hasattr(strategy_data, 'index') and hasattr(strategy_data, 'cumsum'):
-                        fig.add_trace(go.Scatter(
-                            x=strategy_data.index,
-                            y=strategy_data.cumsum(),
-                            name=model_name,
-                            mode='lines'
-                        ))
-
-        # Add benchmark if available
-        if self.benchmark_returns is not None:
-            benchmark_cumulative = (1 + self.benchmark_returns).cumprod() - 1
-            fig.add_trace(go.Scatter(
-                x=benchmark_cumulative.index,
-                y=benchmark_cumulative,
-                name='NDX Benchmark',
-                line=dict(color='grey', dash='dash')
-            ))
-
-        fig.update_layout(
-            title='Model Performance Comparison',
-            xaxis_title='Date',
-            yaxis_title='Cumulative Return',
-            yaxis_tickformat='.1%',
-            height=600,
-            template='plotly_white'
+        series_dict: Dict[str, pd.Series] = {}
+        # --- benchmark ----------------------------------------------------
+        bench = self.benchmark_returns
+        if isinstance(bench, pd.DataFrame):
+            if {"date", "daily_return"}.issubset(bench.columns):
+                bench = bench.set_index("date")["daily_return"]
+            else:
+                raise ValueError(
+                    "benchmark_returns DataFrame must have ['date', 'daily_return'] columns"
+                )
+        elif isinstance(bench, (list, tuple)):
+            bench = pd.Series(bench)
+    
+        if not isinstance(bench, pd.Series):
+            raise ValueError(
+                "`self.benchmark_returns` must be a Series, list/tuple, or a "
+                "DataFrame with ['date','daily_return'].  Got type "
+                f"{type(self.benchmark_returns)}"
+            )
+    
+        series_dict["NDX Benchmark"] = (1 + bench).cumprod() - 1
+    
+        # --- models -------------------------------------------------------
+        for model_name, res in self.model_results.items():
+            if (
+                res
+                and "strategy_returns" in res
+                and not res["strategy_returns"].empty
+                and {"date", "daily_return"}.issubset(res["strategy_returns"].columns)
+            ):
+                s = res["strategy_returns"].set_index("date")["daily_return"]
+                series_dict[model_name] = (1 + s).cumprod() - 1
+    
+        if len(series_dict) <= 1:
+            raise ValueError("No valid model/benchmark return series to plot.")
+    
+        # ------------------------------------------------------------------
+        # 2. Align on the same date index & drop NaNs
+        # ------------------------------------------------------------------
+        cum_df = (
+            pd.concat(series_dict, axis=1)
+            .sort_index()        # chronological
+            .dropna(how="all")   # drop rows where *every* col is NaN
+            .ffill()             # forward-fill gaps (line charts hate NaNs)
         )
-
-        plots['performance_comparison'] = fig
+        self.wandb_run.log(
+            {
+                "performance_comparison": wandb.plot.line_series(
+                    xs=cum_df.index.astype(str).tolist(),
+                    ys=[cum_df[col].tolist() for col in cum_df],
+                    keys=cum_df.columns.tolist(),
+                    title="Model vs Benchmark Cumulative Return"
+                )
+            }
+        )
 
         # Metrics comparison - fixed for new data structure
         metrics_data = []
@@ -560,7 +576,7 @@ class ModelBenchmarkRunner:
                 config=config,
             )
 
-            return response.text
+            return response.parsed
 
         except Exception as e:
             logging.error("❌ Error generating LLM report: %s", e)
@@ -578,20 +594,15 @@ class ModelBenchmarkRunner:
                 project_name="tft-us-equities",
                 run_name=self.run_name
             )
-
-            # Create HTML export path
-            html_export_path = self.out_dir / f"{self.run_name}_enterprise_report.html"
-
-            # Create the enterprise report
-            report = report_generator.create_enterprise_report(
+            # Create the Weights & Biases report
+            report = report_generator.create_wandb_report(
                 llm_summary=llm_report,
                 benchmark_plots=plots,
-                wandb_run=self.wandb_run,
-                export_path=str(html_export_path)
+                wandb_run=self.wandb_run
             )
 
             if report:
-                logging.info("✅ Published enterprise report to W&B and exported HTML")
+                logging.info(f"✅ W&B report created and saved to run {self.run_name}")
 
                 # Log summary metrics to W&B run
                 summary_metrics = {}
@@ -609,10 +620,10 @@ class ModelBenchmarkRunner:
                 #self.wandb_run.log(summary_metrics)
 
             else:
-                logging.error("❌ Failed to create enterprise report")
+                logging.error("❌ Failed to create W&B report")
 
         except Exception as e:
-            logging.error("❌ Error publishing enterprise report: %s", e)
+            logging.error("❌ Error publishing W&B report: %s", e)
 
     def run_benchmark(self):
         """Run the complete benchmark process"""
@@ -684,21 +695,23 @@ class ModelBenchmarkRunner:
         summary_data = {
             model_name: {
                 'sharpe_ratio': results['results_df']['sharpe_ratio'] if results and 'results_df' in results and not results['results_df'].empty else 0,
+                'sortino_ratio': results['results_df']['sortino_ratio'] if results and 'results_df' in results and not
+results['results_df'].empty else 0,
                 'total_return': results['results_df']['total_return'] if results and 'results_df' in results and not results['results_df'].empty else 0,
+                'cagr': results['results_df']['cagr'] if results and 'results_df' in results and not
+results['results_df'].empty else 0,
                 'max_drawdown': results['results_df']['max_drawdown'] if results and 'results_df' in results and not results['results_df'].empty else 0,
                 'alpha': results['results_df']['Alpha'] if results and 'results_df' in results and not
-                results['results_df'].empty else 0
+                results['results_df'].empty else 0,
+                'beta': results['results_df']['Beta'] if results and 'results_df' in results and not
+results['results_df'].empty else 0,
+                'dvar': results['results_df']['dVaR'] if results and 'results_df' in results and not
+results['results_df'].empty else 0
             }
             for model_name, results in self.model_results.items()
         }
 
         llm_report = self.generate_llm_report(summary_data)
-
-        # Save LLM report
-        report_path = self.out_dir / "llm_analysis_report.txt"
-        with open(report_path, 'w') as f:
-            f.write(llm_report)
-        logging.info("💾 Saved LLM report: %s", report_path)
 
         # Publish to W&B
         if self.use_wandb:

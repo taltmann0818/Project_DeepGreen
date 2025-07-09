@@ -147,55 +147,6 @@ class WandbReportGenerator:
 
         return markdown
 
-    def add_benchmark_plots_to_report(self, plots: Dict[str, go.Figure], wandb_run):
-        """
-        Add benchmark plots to the report by first logging them as PNG artifacts,
-        then adding them to the report as wr.Image URIs
-        """
-        if not plots:
-            self.logger.warning("No benchmark plots provided")
-            return
-
-        plot_uris = {}
-
-        try:
-            # Log plots as PNG artifacts first
-            for plot_name, fig in plots.items():
-                # Save plot as PNG temporarily
-                temp_path = f"/tmp/{plot_name}.png"
-                fig.write_image(temp_path, format="png", width=1200, height=800)
-
-                # Log as artifact
-                artifact = wandb.Artifact(f"{plot_name}_plot", type="plot")
-                artifact.add_file(temp_path)
-                wandb_run.log_artifact(artifact)
-
-                # Get the artifact URI for the report
-                plot_uris[plot_name] = artifact.get_path(f"{plot_name}.png").download()
-
-                self.logger.info(f"Logged benchmark plot as PNG artifact: {plot_name}")
-
-        except Exception as e:
-            self.logger.error(f"Error logging benchmark plots as artifacts: {e}")
-
-        # Add benchmark results section to report
-        benchmark_markdown = "\n## Benchmark Results\n\n"
-        benchmark_markdown += "### Performance Comparison\n"
-        benchmark_markdown += "The following charts show the comparative performance of all tested models:\n\n"
-
-        self.report.blocks.append(wr.MarkdownBlock(text=benchmark_markdown))
-
-        # Add plots to report using PNG URIs with wr.Image()
-        for plot_name, fig in plots.items():
-            try:
-                if plot_name in plot_uris:
-                    # Use PNG artifact URI with wr.Image()
-                    image = wr.Image(plot_uris[plot_name])
-                    self.report.blocks.append(image)
-                    self.logger.info(f"Added benchmark plot to report as PNG image: {plot_name}")
-            except Exception as e:
-                self.logger.warning(f"Could not add benchmark plot {plot_name} to report: {e}")
-
     def add_training_plots_to_report(self, target_run):
         """
         Add model training plot artifacts from the run to the report
@@ -262,8 +213,8 @@ class WandbReportGenerator:
                         except Exception as e2:
                             self.logger.warning(f"Could not add plot {plot_file.name}: {e2}")
 
-    def create_enterprise_report(self, llm_summary: str, benchmark_plots: Dict[str, go.Figure], 
-                               wandb_run, export_path: Optional[str] = None):
+    def create_wandb_report(self, llm_summary: str, benchmark_plots: Dict[str, go.Figure], 
+                               wandb_run):
         """
         Create a comprehensive enterprise-grade report with all components
 
@@ -286,96 +237,43 @@ class WandbReportGenerator:
             # Create the main report
             self.report = wr.Report(
                 project=self.project_name,
-                title=f"Enterprise Model Performance Report - {self.run_name}",
+                title=f"Model Performance Report - {self.run_name}",
                 description=f"Comprehensive analysis of model performance, benchmarks, and training metrics for run {self.run_name}",
                 width='fluid'
             )
 
             # 1. Executive Summary (LLM Analysis)
-            executive_summary = f"# Executive Summary\n\n{llm_summary}\n\n"
+            executive_summary = f"# Executive Summary\n\n{llm_summary['exec_summary']}\n\n"
             self.report.blocks.append(wr.MarkdownBlock(text=executive_summary))
 
-            # 2. Model Training Metrics
-            metrics_markdown = self.create_metrics_markdown_table(target_run, target_metrics, previous_run, previous_metrics)
-            self.report.blocks.append(wr.MarkdownBlock(text=metrics_markdown))
+            performance_analysis = f"# 1.1 Performance Analysis\n\n{llm_summary['performance_analysis']}\n\n"
+            self.report.blocks.append(wr.MarkdownBlock(text=performance_analysis))
 
-            # 3. Benchmark Results (including plots)
-            self.add_benchmark_plots_to_report(benchmark_plots, wandb_run)
+            risk_assessment = f"# 1.2 Risk Assessment\n\n{llm_summary['risk_assessment']}\n\n"
+            self.report.blocks.append(wr.MarkdownBlock(text=risk_assessment))
+
+            recommendations = f"# 1.3 Recommendation(s)\n\n{llm_summary['recommendations']}\n\n"
+            self.report.blocks.append(wr.MarkdownBlock(text=recommendations))
+
+
+            # 2. Model Training Metrics
+            metrics_table = self.create_metrics_markdown_table(target_run, target_metrics, previous_run, previous_metrics)
+            metrics_markdown = f"# 2.1 Training Performance\n\n{metrics_table}\n\n"
+            self.report.blocks.append(wr.MarkdownBlock(text=metrics_markdown))
+                        # 5. Training Plots and Visualizations
+            self.add_training_plots_to_report(target_run)
 
             # 4. Model Training Hyperparameters
-            hyperparams_markdown = self.create_hyperparameters_markdown_table(target_run)
+            hyperparams_table = self.create_hyperparameters_markdown_table(target_run)
+            hyperparams_markdown = f"# 2.2 Training Parameters\n\n{hyperparams_table}\n\n"
             self.report.blocks.append(wr.MarkdownBlock(text=hyperparams_markdown))
 
-            # 5. Training Plots and Visualizations
-            self.add_training_plots_to_report(target_run)
 
             # Save the report
             self.report.save()
-            self.logger.info("✅ Enterprise report created and saved to W&B")
-
-            # Export as HTML if path provided
-            if export_path:
-                self.export_html_report(export_path)
 
             return self.report
 
         except Exception as e:
-            self.logger.error(f"Error creating enterprise report: {e}")
+            self.logger.error(f"Error creating W&B report: {e}")
             return None
-
-    def export_html_report(self, export_path: str):
-        """
-        Export the report as HTML to the specified path
-
-        Args:
-            export_path: Path where to save the HTML report
-        """
-        try:
-            if not self.report:
-                self.logger.error("No report available to export")
-                return
-
-            # Create export directory if it doesn't exist
-            export_dir = Path(export_path).parent
-            export_dir.mkdir(parents=True, exist_ok=True)
-
-            # Get report URL and save as HTML
-            report_url = self.report.url
-
-            # Create a simple HTML wrapper with the report content
-            html_content = f"""
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <title>Enterprise Model Performance Report - {self.run_name}</title>
-                <meta charset="utf-8">
-                <style>
-                    body {{ font-family: Arial, sans-serif; margin: 20px; }}
-                    .report-header {{ text-align: center; margin-bottom: 30px; }}
-                    .report-link {{ margin: 20px 0; padding: 10px; background-color: #f0f0f0; border-radius: 5px; }}
-                </style>
-            </head>
-            <body>
-                <div class="report-header">
-                    <h1>Enterprise Model Performance Report</h1>
-                    <h2>Run: {self.run_name}</h2>
-                    <p>Generated on: {wandb.util.generate_id()}</p>
-                </div>
-
-                <div class="report-link">
-                    <p><strong>Interactive W&B Report:</strong> <a href="{report_url}" target="_blank">{report_url}</a></p>
-                    <p>This report contains comprehensive model analysis including metrics, benchmarks, and visualizations.</p>
-                </div>
-
-                <iframe src="{report_url}" width="100%" height="800px" frameborder="0"></iframe>
-            </body>
-            </html>
-            """
-
-            with open(export_path, 'w', encoding='utf-8') as f:
-                f.write(html_content)
-
-            self.logger.info(f"✅ HTML report exported to: {export_path}")
-
-        except Exception as e:
-            self.logger.error(f"Error exporting HTML report: {e}")
