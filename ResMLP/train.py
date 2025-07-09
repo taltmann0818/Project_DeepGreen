@@ -2,38 +2,19 @@ import os
 import argparse
 import mlflow
 import torch
-import torch.nn as nn
 import matplotlib.pyplot as plt
 import numpy as np
 from pathlib import Path
 from typing import Dict, Any, Optional
 import datetime
 import hashlib
-from torch.optim import AdamW
-import torch.optim.lr_scheduler as sched
-
-import lightning.pytorch as pl
+from resmlp_lightning import ResMLP
+from datamodule_cs      import CrossSectionDM
 from lightning.pytorch import Trainer
 from lightning.pytorch.loggers import WandbLogger
 from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping, LearningRateMonitor
+from pytorch_forecasting import MAE, RMSE, MAPE, SMAPE
 import sys
-try:
-    from Callbacks.convergence_logging import ConvergenceLoggingCallback
-except ImportError:
-    # Add parent directory to path if running from TFT directory
-    parent_dir = Path(__file__).parent.parent
-    if str(parent_dir) not in sys.path:
-        sys.path.insert(0, str(parent_dir))
-    from Callbacks.convergence_logging import ConvergenceLoggingCallback
-
-
-from pytorch_forecasting import TemporalFusionTransformer
-from pytorch_forecasting.metrics import QuantileLoss, MAE, RMSE, MAPE
-
-try:
-    from TFT.tft_datamodule import TFTDataModule
-except ImportError:
-    from tft_datamodule import TFTDataModule
 
 # Enable optimizations
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -41,75 +22,10 @@ torch.backends.cudnn.allow_tf32 = True
 torch.backends.cuda.enable_flash_sdp(True)
 
 
-# train.py
-import pytorch_lightning as pl
-from resmlp_lightning import ResMLP
-from datamodule_cs      import CrossSectionDM
-
 dm = CrossSectionDM(root="features_cs", batch_size=1)    # 1 macro-batch/step
-model = ResMLP(n_features=len(dm.feats),
-              lr=1e-3,
-              wd=1e-2
-              d=384,
-              n_blocks=10)
-
-trainer = pl.Trainer(
-    max_epochs=15,
-    accelerator="gpu",
-    devices=1,
-    precision="bf16-mixed",       # lightning auto-casts to bf16 if supported
-    deterministic=False,
-    gradient_clip_val=0.5,
-    accumulate_grad_batches=4,    # ≈ 4×512 = 2 K tickers / step
-    callbacks=[pl.callbacks.ModelCheckpoint(
-                 monitor="val_loss", mode="min", filename="resmlp-best")]
-)
-trainer.fit(model, dm)
 
 
-class AdamWWarmupTFT(TemporalFusionTransformer):
-    """
-    Temporal-Fusion-Transformer that trains with:
-        • AdamW optimizer
-        •  linear warm-up (1000 steps → base-lr)
-        •  cosine annealing to 0
-    """
-
-    def configure_optimizers(self):
-        # ===== 1. Optimizer =====
-        base_lr      = self.hparams.get("learning_rate", 1e-4)
-        weight_decay = self.hparams.get("weight_decay", 2e-2)
-        optimizer = AdamW(
-            self.parameters(),
-            lr          = base_lr,
-            weight_decay= weight_decay,
-        )
-
-        # ===== 2. Warm-up + Cosine decay =====
-        warmup_steps  = 500
-        total_steps   = self.trainer.estimated_stepping_batches
-        scheduler = sched.SequentialLR(
-            optimizer,
-            schedulers = [
-                sched.LinearLR(optimizer, start_factor=1e-3, total_iters=warmup_steps),
-                sched.CosineAnnealingLR(
-                    optimizer,
-                    T_max = max(total_steps - warmup_steps, 1),
-                    eta_min=3e-4,
-                ),
-            ],
-            milestones = [warmup_steps],              # switch point
-        )
-
-        return {
-            "optimizer"  : optimizer,
-            "lr_scheduler": {
-                "scheduler": scheduler,
-                "interval" : "step",   # Lightning calls it every train-step
-            },
-        }
-
-class TFTTrainer:
+class ResNetTrainer:
     """
     Modular TFT trainer with MLFlow and WandB integration for rapid experimentation.
     """
@@ -130,7 +46,7 @@ class TFTTrainer:
     def setup_directories(self):
         """Create necessary directories."""
         Path("ckpts").mkdir(exist_ok=True)
-        Path("TFT/Models").mkdir(parents=True, exist_ok=True)
+        Path("models").mkdir(parents=True, exist_ok=True)
         Path("plots").mkdir(exist_ok=True)
 
     def setup_logging(self):
@@ -143,8 +59,8 @@ class TFTTrainer:
                 wandb_config["experiment_notes"] = self.config["notes"]
 
             self.wandb_logger = WandbLogger(
-                project=self.config.get("wandb_project", "tft-us-equities"),
-                name=self.config.get("experiment_name", "tft_experiment"),
+                project=self.config.get("wandb_project", "resNET-equities"),
+                name=self.config.get("experiment_name", "resNET_experiment"),
                 log_model=True,
                 config=wandb_config,
                 notes=self.config.get("notes", "")
@@ -167,7 +83,7 @@ class TFTTrainer:
             except AttributeError:
                 from mlflow.tracking import set_tracking_uri as _set_tracking_uri
                 _set_tracking_uri(azure_uri)
-            experiment_name = self.config.get("mlflow_experiment", "tft_quant")
+            experiment_name = self.config.get("mlflow_experiment", "resNET_quant")
             try:
                 mlflow.set_experiment(experiment_name)
             except AttributeError:
@@ -194,25 +110,12 @@ class TFTTrainer:
         print("Data preparation completed!")
 
     def create_model(self):
-        """Create TFT model from dataset, optionally wrapped with RevIN."""
+        """Create ResNET model from dataset"""
         training_dataset = self.data_module.get_training_dataset()
 
-        # Create model using custom TFT class
-        self.model = AdamWWarmupTFT.from_dataset(
-            training_dataset,
-            learning_rate=self.config["learning_rate"],
-            hidden_size=self.config["hidden_size"],
-            attention_head_size=self.config["attention_head_size"],
-            dropout=self.config["dropout"],
-            hidden_continuous_size=self.config["hidden_continuous_size"],
-            lstm_layers=self.config["lstm_layers"],
-            loss=QuantileLoss(),
-            #log_interval=10,
-            reduce_on_plateau_patience=self.config["reduce_on_plateau_patience"],
-            # Remove the optimizer parameter since we're handling it in configure_optimizers
-            # optimizer=self.config["optimizer"],  # Remove this line
-            weight_decay=self.config["weight_decay"]
-        )
+        self.model = ResMLP(n_features=len(training_dataset.feats),
+                       lr=self.config["learning_rate"], wd=self.config["weight_decay"], d=self.config["width"],
+                       n_blocks=self.config["blocks"], dropout=self.config["dropout"])
 
         print(f"Model created with {sum(p.numel() for p in self.model.parameters())} parameters")
 
@@ -247,14 +150,6 @@ class TFTTrainer:
         lr_logger = LearningRateMonitor()
         callbacks.append(lr_logger)
 
-        # Custom convergence callback
-        conv_cb = ConvergenceLoggingCallback(
-            monitor="val_loss",
-            target_loss=0.05,  # ← pick or leave None
-            log_interval=1
-        )
-        #callbacks.append(conv_cb)
-
         # Setup trainer
         trainer_kwargs = {
             "max_epochs": self.config["epochs"],
@@ -265,8 +160,8 @@ class TFTTrainer:
             "accumulate_grad_batches": self.config["accumulate_grad_batches"],
             "val_check_interval": self.config.get("val_check_interval", 0.25),
             "enable_checkpointing": True,
+            "deterministic": False,
             "callbacks": callbacks,
-            "detect_anomaly": False,
         }
 
         # Add WandB logger if enabled
@@ -310,7 +205,7 @@ class TFTTrainer:
             )
 
             # Log model to MLFlow
-            mlflow.pytorch.log_model(self.model, artifact_path="pt_model")
+            #mlflow.pytorch.log_model(self.model, artifact_path="pt_model")
 
             print("Model training completed!")
             return self.trainer.checkpoint_callback.best_model_path
@@ -320,13 +215,13 @@ class TFTTrainer:
         print("Evaluating model...")
 
         # Load best model
-        best_model = TemporalFusionTransformer.load_from_checkpoint(best_model_path)
+        best_model = ResMLP.load_from_checkpoint(best_model_path)
 
         # Get validation dataloader
         _, val_dataloader = self.data_module.get_dataloaders()
 
         # Calculate metrics
-        metrics = {"MAE": MAE(), "RMSE": RMSE(), "MAPE": MAPE()}
+        metrics = {"MAE": MAE(), "RMSE": RMSE(), "MAPE": MAPE(), "SMAPE": SMAPE()}
         device = torch.device('cpu')
         best_model = best_model.to(device)
         best_model.eval()
@@ -465,106 +360,6 @@ class TFTTrainer:
         print(f"Prediction plots saved to: {plot_paths}")
         return plot_paths
 
-    def plot_variable_importance(self, model):
-        """Plot variable importance."""
-        print("Generating variable importance plot...")
-
-        _, val_dataloader = self.data_module.get_dataloaders()
-
-        # Get raw predictions for interpretation
-        raw = model.predict(
-            val_dataloader,
-            mode="raw",
-            return_x=True,
-            trainer_kwargs={"accelerator": "cpu"}
-        )
-
-        x, out = raw.x, raw.output
-
-        if isinstance(out.get("prediction"), list):
-            out["prediction"] = torch.stack(out["prediction"], dim=1)
-
-        # Generate interpretation
-        interpretation = model.interpret_output(out, reduction="sum")
-
-        # Extract variable importance data for custom charts
-        importance_data = {}
-        try:
-            # Try to extract numerical importance values from interpretation
-            if hasattr(interpretation, 'keys'):
-                for key in interpretation.keys():
-                    if hasattr(interpretation[key], 'cpu'):
-                        importance_values = interpretation[key].cpu().numpy()
-                    else:
-                        importance_values = interpretation[key]
-
-                    if hasattr(importance_values, 'flatten'):
-                        importance_data[key] = importance_values.flatten()
-                    else:
-                        importance_data[key] = importance_values
-        except Exception as e:
-            print(f"Warning: Could not extract importance data: {e}")
-
-        # Plot interpretation - handle both dict and figure returns
-        plot_result = model.plot_interpretation(interpretation)
-
-        # Handle different return types from plot_interpretation
-        if isinstance(plot_result, dict):
-            # If it's a dict, try to extract figures
-            figs = []
-            for key, value in plot_result.items():
-                if hasattr(value, 'savefig'):  # It's a matplotlib figure
-                    figs.append((key, value))
-
-            if not figs:
-                print("Warning: No matplotlib figures found in interpretation plot result")
-                return None
-
-            # Save all figures
-            plot_paths = []
-            for i, (key, fig) in enumerate(figs):
-                if len(figs) > 1:
-                    plot_path = f"plots/variable_importance_{key}.png"
-                else:
-                    plot_path = "plots/variable_importance.png"
-                fig.savefig(plot_path, dpi=150, bbox_inches='tight')
-                plot_paths.append(plot_path)
-
-                # Log plot to MLFlow
-                if self.config.get("use_mlflow", True):
-                    mlflow.log_artifact(plot_path)
-
-                # Log plot to WandB
-                if self.wandb_logger:
-                    import wandb
-                    wandb_key = f"variable_importance_{key}"
-                    wandb.log({wandb_key: wandb.Image(plot_path)})
-
-                plt.close(fig)
-
-            print(f"Variable importance plots saved to: {plot_paths}")
-            return plot_paths[0] if len(plot_paths) == 1 else plot_paths
-
-        elif hasattr(plot_result, 'savefig'):  # It's a matplotlib figure
-            plot_path = "plots/variable_importance.png"
-            plot_result.savefig(plot_path, dpi=150, bbox_inches='tight')
-
-            # Log plot to MLFlow
-            if self.config.get("use_mlflow", True):
-                mlflow.log_artifact(plot_path)
-
-            # Log plot to WandB
-            if self.wandb_logger:
-                import wandb
-                wandb.log({"variable_importance": wandb.Image(plot_path)})
-
-            plt.close(plot_result)
-            print(f"Variable importance plot saved to: {plot_path}")
-            return plot_path
-        else:
-            print(f"Warning: Unexpected return type from plot_interpretation: {type(plot_result)}")
-            return None
-
     def export_onnx(self, model, model_name: str = "tft_model.onnx"):
         """Export model to ONNX format."""
         print("Exporting model to ONNX...")
@@ -583,28 +378,6 @@ class TFTTrainer:
 
         batch_cpu = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in sample_x.items()}
 
-        # Create ONNX wrapper
-        class TFTONNXWrapper(nn.Module):
-            def __init__(self, tft_core):
-                super().__init__()
-                self.tft = tft_core
-
-            def forward(self, enc_cont, enc_cat, dec_cont, dec_cat, enc_len, dec_len, target_scale):
-                batch = {
-                    "encoder_cont": enc_cont,
-                    "encoder_cat": enc_cat,
-                    "decoder_cont": dec_cont,
-                    "decoder_cat": dec_cat,
-                    "encoder_lengths": enc_len,
-                    "decoder_lengths": dec_len,
-                    "target_scale": target_scale,
-                }
-                out = self.tft(batch)
-                return out["prediction"]
-
-        wrapper = TFTONNXWrapper(model)
-        wrapper.eval()
-
         example_inputs = (
             batch_cpu["encoder_cont"],
             batch_cpu["encoder_cat"],
@@ -615,7 +388,7 @@ class TFTTrainer:
             batch_cpu["target_scale"],
         )
 
-        onnx_path = f"TFT/Models/{self.config.get("onnx_model_name","model.onnx")}"
+        onnx_path = f"TFT/Models/{self.config.get('onnx_model_name','model.onnx')}"
 
         dynamic_axes = {
             "enc_cont": {0: "batch", 1: "enc_time"},
@@ -629,7 +402,7 @@ class TFTTrainer:
         }
 
         torch.onnx.export(
-            wrapper,
+            model,
             example_inputs,
             onnx_path,
             input_names=["enc_cont", "enc_cat", "dec_cont", "dec_cat", "enc_len", "dec_len", "target_scale"],
@@ -651,15 +424,13 @@ class TFTTrainer:
             model_artifact = wandb.Artifact(
                 name="TEMPUS_tft",
                 type="model",
-                description="Temporal Fusion Transformer model for financial time series forecasting",
+                description="ResNET model for financial time series forecasting",
                 metadata={
                     **self.config,
-                    "model_type": "TemporalFusionTransformer",
-                    "framework": "pytorch_forecasting",
+                    "model_type": "Deep Learning Residual neural network with Multilayer Perceptron",
+                    "framework": "pytorch_lighting",
                     "export_format": "onnx",
-                    "target": "Close",
-                    "max_encoder_length": self.data_module.max_encoder_length,
-                    "max_prediction_length": self.data_module.max_prediction_length
+                    "target": "Close"
                 }
             )
 
@@ -673,8 +444,8 @@ class TFTTrainer:
             # Also link it to the model registry for easy access
             try:
                 # Create or update model registry entry
-                wandb.run.link_artifact(model_artifact, "model-registry/TEMPUS_tft")
-                print("Model logged to registry as TEMPUS_tft with automatic versioning")
+                wandb.run.link_artifact(model_artifact, "model-registry/TEMPUS_resNET")
+                print("Model logged to registry as TEMPUS_resNET with automatic versioning")
             except Exception as e:
                 print(f"Warning: Could not link to model registry: {e}")
                 print("Model artifact logged successfully without registry linking")
@@ -682,95 +453,9 @@ class TFTTrainer:
         print(f"ONNX model exported to: {onnx_path}")
         return onnx_path
 
-    def create_dataset_artifact(self):
-        """Create and log dataset artifact to wandb."""
-        if not self.wandb_logger:
-            return None
-
-        print("Creating dataset artifact...")
-
-        try:
-            import wandb
-
-            # Get dataset information
-            if hasattr(self.data_module, 'training_data') and self.data_module.training_data is not None:
-                data = self.data_module.training_data
-
-                # Dynamically extract feature names from training dataset
-                features = {}
-                if hasattr(self.data_module, 'training_dataset') and self.data_module.training_dataset:
-                    dataset = self.data_module.training_dataset
-
-                    # Get actual feature names from the dataset
-                    if hasattr(dataset, 'static_categoricals') and dataset.static_categoricals:
-                        features["static_categoricals"] = dataset.static_categoricals
-                    else:
-                        features["static_categoricals"] = []
-
-                    if hasattr(dataset, 'time_varying_known_reals') and dataset.time_varying_known_reals:
-                        features["time_varying_known_reals"] = dataset.time_varying_known_reals
-                    else:
-                        features["time_varying_known_reals"] = []
-
-                    if hasattr(dataset, 'time_varying_unknown_reals') and dataset.time_varying_unknown_reals:
-                        features["time_varying_unknown_reals"] = dataset.time_varying_unknown_reals
-                    else:
-                        features["time_varying_unknown_reals"] = []
-
-                    # Get target name
-                    target = dataset.target if hasattr(dataset, 'target') else "Close"
-
-                # Create dataset artifact
-                # Create dataset artifact
-                dataset_artifact = wandb.Artifact(
-                    name="tempus_dataset",
-                    type="dataset",
-                    description="TFT training dataset with financial features and technical indicators",
-                    metadata={
-                        "shape": list(data.shape),
-                        "columns": list(data.columns),
-                        "num_tickers": data['Ticker'].nunique() if 'Ticker' in data.columns else 0,
-                        "date_range": {
-                            "start": str(data['date'].min()) if 'date' in data.columns else None,
-                            "end": str(data['date'].max()) if 'date' in data.columns else None
-                        },
-                        "features": features,
-                        "target": target,
-                        "max_encoder_length": self.data_module.max_encoder_length,
-                        "max_prediction_length": self.data_module.max_prediction_length,
-                        "batch_size": self.data_module.batch_size,
-                        "total_features": len(features.get("static_categoricals", [])) +
-                                          len(features.get("time_varying_known_reals", [])) +
-                                          len(features.get("time_varying_unknown_reals", []))
-                    }
-                )
-
-                # Save a sample of the data to the artifact
-                sample_data = data.head(1000)  # Save first 1000 rows as sample
-                sample_path = "dataset_sample.csv"
-                sample_data.to_csv(sample_path, index=False)
-                dataset_artifact.add_file(sample_path)
-
-                # Log the artifact
-                wandb.log_artifact(dataset_artifact)
-                print("Dataset artifact logged successfully")
-
-                # Clean up temporary file
-                if os.path.exists(sample_path):
-                    os.remove(sample_path)
-
-                return dataset_artifact
-
-        except Exception as e:
-            print(f"Warning: Could not create dataset artifact: {e}")
-            return None
-
     def run_full_pipeline(self):
         """Run the complete training and evaluation pipeline."""
-        print("Starting full TFT training pipeline...")
-
-        # Create and log dataset artifact
-        dataset_artifact = self.create_dataset_artifact()
+        print("Starting full ResNET training pipeline...")
 
         # Train model
         best_model_path = self.train()
@@ -780,10 +465,9 @@ class TFTTrainer:
 
         # Generate plots
         prediction_plots = self.plot_predictions(best_model, num_examples=self.config.get("num_prediction_plots", 5))
-        importance_plot = self.plot_variable_importance(best_model)
 
         # Export ONNX
-        onnx_path = self.export_onnx(best_model, f"{self.config.get("experiment_name","tft_model")}.onnx")
+        onnx_path = self.export_onnx(best_model, f"{self.config.get('experiment_name','tft_model')}.onnx")
 
         print("Full pipeline completed successfully!")
 
@@ -791,9 +475,7 @@ class TFTTrainer:
             "best_model_path": best_model_path,
             "metrics": metrics,
             "prediction_plots": prediction_plots,
-            "importance_plot": importance_plot,
-            "onnx_path": onnx_path,
-            "dataset_artifact": dataset_artifact
+            "onnx_path": onnx_path
         }
 
 
@@ -804,10 +486,10 @@ def generate_auto_experiment_name(config: Dict[str, Any]) -> str:
     # Create a short hash of key parameters
     key_params = {
         "lr": config.get("learning_rate", 0.002),
-        "hs": config.get("hidden_size", 192),
-        "bs": config.get("batch_size", 256),
-        "dropout": config.get("dropout", 0.12),
-        "epochs": config.get("epochs", 30)
+        "d": config.get("depth", 256),
+        "b": config.get("blocks", 8),
+        "dropout": config.get("dropout", 0.1),
+        "epochs": config.get("epochs", 10)
     }
 
     # Create hash from parameters
@@ -821,23 +503,16 @@ def get_default_config():
     """Get default configuration for TFT training."""
     return {
         # Model parameters
-        "epochs": 10,
-        "batch_size": 256,
-        "hidden_size": 192,
-        "hidden_continuous_size": 160,
-        "learning_rate": 2e-3,
-        "lr_scheduler": "cosine_warm_restarts",
-        "weight_decay": 1e-3,
-        "attention_head_size": 8,
-        "dropout": 0.25,
-        "lstm_layers": 2,
-        "gradient_clip": 0.1,
-        "accumulate_grad_batches": 1,
+        "epochs": 15,
+        "width": 384,
+        "blocks": 8,
+        "learning_rate": 1e-3,
+        "weight_decay": 1e-2,
+        "dropout": 0.1,
+        "gradient_clip": 0.5,
+        "accumulate_grad_batches": 4,
 
         # Data parameters
-        "data_path": "raw_data_4k.csv",
-        "max_prediction_length": 3,
-        "max_encoder_length": 30,
         "years": 5,
         "prediction_window": 3,
         "use_cache": True,
@@ -846,7 +521,7 @@ def get_default_config():
         # Training parameters
         "accelerator": "gpu",
         "precision": "bf16-mixed",
-        "optimizer": "lion",
+        "optimizer": "Adafactor",
         "val_check_interval": 0.25,
         "early_stopping": True,
         "early_stopping_patience": 5,
@@ -856,20 +531,16 @@ def get_default_config():
         # Logging parameters
         "use_wandb": True,
         "use_mlflow": True,
-        "wandb_project": "tft-us-equities",
-        "mlflow_experiment": "/Shared/tft_experiments",
+        "wandb_project": "resNET-equities",
+        "mlflow_experiment": "/Shared/resnet_experiments",
         "mlflow_uri": "azureml://eastus.api.azureml.ms/mlflow/v1.0/subscriptions/6d500bb9-25c2-4821-a253-a860046398df/resourceGroups/Project_DeepGreen/providers/Microsoft.MachineLearningServices/workspaces/DeepGreen",
         "experiment_name": "tft_experiment",
-
-        # Output parameters
-        "num_prediction_plots": 5,
-        #"onnx_model_name": "tft_model.onnx",
     }
 
 
 def parse_args():
     """Parse command line arguments."""
-    parser = argparse.ArgumentParser(description="Train TFT model with MLFlow and WandB logging")
+    parser = argparse.ArgumentParser(description="Train ResNET model with MLFlow and WandB logging")
 
     # Data parameters
     parser.add_argument("--no-cache", action="store_true", help="Disable data caching")
@@ -879,8 +550,8 @@ def parse_args():
     parser.add_argument("--experiment-name", type=str, default=None, help="Experiment name (auto-generated if not provided)")
     parser.add_argument("--auto-name", action="store_true", help="Force auto-generation of experiment name")
     parser.add_argument("--notes", type=str, default="", help="Experiment notes/context for logging")
-    parser.add_argument("--wandb-project", type=str, default="tft-us-equities", help="WandB project name")
-    parser.add_argument("--mlflow-experiment", type=str, default="tft-quant", help="MLFlow experiment name")
+    parser.add_argument("--wandb-project", type=str, default="resNET-equities", help="WandB project name")
+    parser.add_argument("--mlflow-experiment", type=str, default="resNet-quant", help="MLFlow experiment name")
     parser.add_argument("--no-wandb", action="store_true", help="Disable WandB logging")
     parser.add_argument("--no-mlflow", action="store_true", help="Disable MLFlow logging")
     #parser.add_argument("--onnx-name", type=str, default="tft_model.onnx", help="ONNX model filename")
@@ -912,15 +583,15 @@ def main():
         config["experiment_name"] = generate_auto_experiment_name(config)
     else:
         config["experiment_name"] = args.experiment_name
-    config["onnx_model_name"] = f"{config["experiment_name"]}.onnx"
+    config["onnx_model_name"] = f"{config['experiment_name']}.onnx"
 
-    print("TFT Training Configuration:")
+    print("ResNET Training Configuration:")
     for key, value in config.items():
         print(f"  {key}: {value}")
     print()
 
     # Create trainer and run pipeline
-    trainer = TFTTrainer(config)
+    trainer = ResNetTrainer(config)
     results = trainer.run_full_pipeline()
 
     print("\nTraining Results:")

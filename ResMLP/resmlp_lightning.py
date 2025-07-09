@@ -1,7 +1,7 @@
 # resmlp_lightning.py
-# resmlp_lightning.py
 import torch, torch.nn as nn, torch.nn.functional as F
 from timm.models.layers import DropPath
+import torch.optim.lr_scheduler as sched
 from kan import KANLinear
 import pytorch_lightning as pl
 import torchmetrics
@@ -33,12 +33,12 @@ class XCovTokenMix(nn.Module):
 
 class ResMLP(pl.LightningModule):
     def __init__(self, n_features: int, d: int = 256, n_blocks: int = 8,
-                 lr: float = 1e-3, wd: float = 1e-2):
+                 lr: float = 1e-3, wd: float = 1e-2, dropout: float = 0.1):
         super().__init__()
         self.save_hyperparameters()
         self.proj   = nn.Linear(n_features, d)
         self.blocks = nn.Sequential(
-            *[ResBlock(d, p=0.1) if i%2==0 
+            *[ResBlock(d, p=dropout) if i%2==0
               else XCovTokenMix(d)
               for i in range(n_blocks)]
         )
@@ -77,9 +77,22 @@ class ResMLP(pl.LightningModule):
             prog_bar=True)
 
     def configure_optimizers(self):
+        warmup_steps = 500
         opt = torch.optim.Adafactor(
             self.parameters(),
             lr=self.hparams.lr,
             weight_decay=self.hparams.wd)
-        sch = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=4_000, eta_min=1e-5)
+        total_steps = self.trainer.estimated_stepping_batches
+        sch = sched.SequentialLR(
+            opt,
+            schedulers=[
+                sched.LinearLR(opt, start_factor=1e-3, total_iters=warmup_steps),
+                sched.CosineAnnealingLR(
+                    opt,
+                    T_max=max(total_steps - warmup_steps, 1),
+                    eta_min=1e-5,
+                ),
+            ],
+            milestones=[warmup_steps],  # switch point
+        )
         return [opt], [sch]
