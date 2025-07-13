@@ -1,0 +1,30 @@
+batch_size:
+    value: 256
+cache_dir:
+    value: data_cache
+dataset_parameters:
+    value:
+        rank_cols:
+            - ret_1m
+            - ps_ratio
+            - pb_ratio
+            - pfcf_ratio
+            - pe_ratio
+            - eps
+            - graham_number
+            - interest_coverage
+            - fcf_per_share
+            - bv_per_share
+            - roic
+            - ev_ebitda
+            - gross_mrg
+            - net_mrg
+            - current_ratio
+            - debt_ratio
+            - dte
+            - roe
+window_size:
+    value: 20
+onnx_model_name:
+    value: Tempus_v2.fp8.onnx
+

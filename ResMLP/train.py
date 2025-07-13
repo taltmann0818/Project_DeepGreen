@@ -9,7 +9,7 @@ from typing import Dict, Any, Optional
 import datetime
 import hashlib
 from resmlp_lightning import ResMLP
-from datamodule_cs      import CrossSectionDM
+from datamodule import DataModule
 from lightning.pytorch import Trainer
 from lightning.pytorch.loggers import WandbLogger
 from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping, LearningRateMonitor
@@ -20,10 +20,6 @@ import sys
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 torch.backends.cuda.enable_flash_sdp(True)
-
-
-dm = CrossSectionDM(root="features_cs", batch_size=1)    # 1 macro-batch/step
-
 
 class ResNetTrainer:
     """
@@ -91,29 +87,20 @@ class ResNetTrainer:
                 _set_experiment(experiment_name)
 
     def prepare_data(self):
-        """Prepare data using TFTDataModule."""
-        print("Preparing data...")
-        self.data_module = TFTDataModule(
-            data_path=self.config.get("data_path", "raw_data_4k.csv"),
+        """Prepare data using CrossSectionalDataModule."""
+        self.data_module = DataModule(
             batch_size=self.config["batch_size"],
-            max_prediction_length=self.config.get("max_prediction_length", 3),
-            max_encoder_length=self.config.get("max_encoder_length", 30),
-            years=self.config.get("years", 5),
+            days=self.config.get("days", 252),
             prediction_window=self.config.get("prediction_window", 3),
             num_workers=self.config.get("num_workers", None),
-            use_cache=self.config.get("use_cache", True),
+            #use_cache=self.config.get("use_cache", True),
             cache_dir=self.config.get("cache_dir", "data_cache")
         )
-
-        # Setup datasets and dataloaders
-        self.data_module.setup_dataloaders()
         print("Data preparation completed!")
 
     def create_model(self):
         """Create ResNET model from dataset"""
-        training_dataset = self.data_module.get_training_dataset()
-
-        self.model = ResMLP(n_features=len(training_dataset.feats),
+        self.model = ResMLP(n_features=len(self.data_module.feature_cols),
                        lr=self.config["learning_rate"], wd=self.config["weight_decay"], d=self.config["width"],
                        n_blocks=self.config["blocks"], dropout=self.config["dropout"])
 
@@ -194,14 +181,10 @@ class ResNetTrainer:
                 mlflow.set_tag("notes", self.config["notes"])
                 mlflow.set_tag("experiment_context", self.config["notes"])
 
-            # Get dataloaders
-            train_dataloader, val_dataloader = self.data_module.get_dataloaders()
-
             # Train model
             self.trainer.fit(
                 self.model,
-                train_dataloaders=train_dataloader,
-                val_dataloaders=val_dataloader,
+                datamodule=self.data_module,
             )
 
             # Log model to MLFlow
@@ -218,7 +201,7 @@ class ResNetTrainer:
         best_model = ResMLP.load_from_checkpoint(best_model_path)
 
         # Get validation dataloader
-        _, val_dataloader = self.data_module.get_dataloaders()
+        val_dataloader = self.data_module.val_dataloader()
 
         # Calculate metrics
         metrics = {"MAE": MAE(), "RMSE": RMSE(), "MAPE": MAPE(), "SMAPE": SMAPE()}
@@ -255,120 +238,15 @@ class ResNetTrainer:
 
         return results, best_model
 
-    def plot_predictions(self, model, num_examples: int = 5):
-        """Plot prediction examples."""
-        print(f"Generating {num_examples} prediction plots...")
-
-        _, val_dataloader = self.data_module.get_dataloaders()
-
-        # Get raw predictions
-        raw = model.predict(
-            val_dataloader,
-            mode="raw",
-            return_x=True,
-            trainer_kwargs={"accelerator": "cpu"}
-        )
-
-        x, out = raw.x, raw.output
-
-        if isinstance(out.get("prediction"), list):
-            out["prediction"] = torch.stack(out["prediction"], dim=1)
-
-        # Generate plots
-        plot_paths = []
-        prediction_data = []
-
-        for idx in range(min(num_examples, out["prediction"].size(0))):
-            fig = model.plot_prediction(
-                x,
-                out,
-                idx=idx,
-                add_loss_to_title=True,
-                show_future_observed=True
-            )
-
-            plot_path = f"plots/prediction_{idx}.png"
-            fig.savefig(plot_path, dpi=150, bbox_inches='tight')
-            plot_paths.append(plot_path)
-            plt.close(fig)
-
-            # Extract prediction data for wandb table
-            try:
-                # Get actual and predicted values for this example
-                if hasattr(x, 'get') and 'target' in x:
-                    actual_values = x['target'][idx].cpu().numpy() if hasattr(x['target'][idx], 'cpu') else x['target'][idx]
-                else:
-                    actual_values = None
-
-                predicted_values = out["prediction"][idx].cpu().numpy() if hasattr(out["prediction"][idx], 'cpu') else out["prediction"][idx]
-
-                # Create data row for this prediction
-                pred_row = {
-                    "example_id": idx,
-                    "predicted_values": predicted_values.tolist() if hasattr(predicted_values, 'tolist') else predicted_values,
-                    "plot_path": plot_path
-                }
-
-                if actual_values is not None:
-                    pred_row["actual_values"] = actual_values.tolist() if hasattr(actual_values, 'tolist') else actual_values
-
-                prediction_data.append(pred_row)
-            except Exception as e:
-                print(f"Warning: Could not extract prediction data for example {idx}: {e}")
-
-        # Log plots to MLFlow
-        if self.config.get("use_mlflow", True):
-            for plot_path in plot_paths:
-                mlflow.log_artifact(plot_path)
-
-        # Log plots and prediction data to WandB
-        if self.wandb_logger:
-            import wandb
-
-            # Log individual plot images
-            for i, plot_path in enumerate(plot_paths):
-                wandb.log({f"prediction_plot_{i}": wandb.Image(plot_path)})
-
-            # Create and log prediction table
-            if prediction_data:
-                try:
-                    # Create table columns
-                    columns = ["example_id", "predicted_values"]
-                    if "actual_values" in prediction_data[0]:
-                        columns.append("actual_values")
-                    columns.append("plot_image")
-
-                    # Create table data
-                    table_data = []
-                    for row in prediction_data:
-                        table_row = [
-                            row["example_id"],
-                            str(row["predicted_values"])[:100] + "..." if len(str(row["predicted_values"])) > 100 else str(row["predicted_values"])
-                        ]
-                        if "actual_values" in row:
-                            table_row.append(str(row["actual_values"])[:100] + "..." if len(str(row["actual_values"])) > 100 else str(row["actual_values"]))
-                        table_row.append(wandb.Image(row["plot_path"]))
-                        table_data.append(table_row)
-
-                    # Create and log table
-                    predictions_table = wandb.Table(columns=columns, data=table_data)
-                    wandb.log({"predictions_table": predictions_table})
-                    print("Prediction data logged to wandb table")
-                except Exception as e:
-                    print(f"Warning: Could not create wandb predictions table: {e}")
-
-        print(f"Prediction plots saved to: {plot_paths}")
-        return plot_paths
-
     def export_onnx(self, model, model_name: str = "tft_model.onnx"):
         """Export model to ONNX format."""
         print("Exporting model to ONNX...")
 
-        _, val_dataloader = self.data_module.get_dataloaders()
+        val_dataloader = self.data_module.val_dataloader()
 
         # Get sample batch
-        batch = next(iter(val_dataloader))
-        sample_x, sample_y = batch
+        batch, _ = next(iter(self.data_module.val_dataloader()))
+        example_inputs = batch["features"].to("cpu")
 
         # Move to CPU
         device = torch.device('cpu')
@@ -376,40 +254,18 @@ class ResNetTrainer:
         model.eval()
         model.freeze()
 
-        batch_cpu = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in sample_x.items()}
-
-        example_inputs = (
-            batch_cpu["encoder_cont"],
-            batch_cpu["encoder_cat"],
-            batch_cpu["decoder_cont"],
-            batch_cpu["decoder_cat"],
-            batch_cpu["encoder_lengths"],
-            batch_cpu["decoder_lengths"],
-            batch_cpu["target_scale"],
-        )
-
         onnx_path = f"TFT/Models/{self.config.get('onnx_model_name','model.onnx')}"
 
-        dynamic_axes = {
-            "enc_cont": {0: "batch", 1: "enc_time"},
-            "enc_cat": {0: "batch", 1: "enc_time"},
-            "dec_cont": {0: "batch", 1: "dec_time"},
-            "dec_cat": {0: "batch", 1: "dec_time"},
-            "enc_len": {0: "batch"},
-            "dec_len": {0: "batch"},
-            "target_scale": {0: "batch"},
-            "output": {0: "batch", 1: "dec_time"},
-        }
-
-        torch.onnx.export(
+        torch.onnx.dynamo_export(
             model,
             example_inputs,
             onnx_path,
-            input_names=["enc_cont", "enc_cat", "dec_cont", "dec_cat", "enc_len", "dec_len", "target_scale"],
-            output_names=["output"],
-            dynamic_axes=dynamic_axes,
+            export_args=(),
+            dynamic_shapes={
+                "x" : {0: "batch", 1: "n_tokens"},  # names the dynamic dims
+                "output_0": {0: "batch", 1: "n_tokens"}
+            },
             opset_version=17,
-            do_constant_folding=True,
         )
 
         # Log ONNX model to MLFlow
@@ -422,7 +278,7 @@ class ResNetTrainer:
 
             # Create model artifact with proper registry naming and versioning
             model_artifact = wandb.Artifact(
-                name="TEMPUS_tft",
+                name="TEMPUS_resnet",
                 type="model",
                 description="ResNET model for financial time series forecasting",
                 metadata={
@@ -513,10 +369,11 @@ def get_default_config():
         "accumulate_grad_batches": 4,
 
         # Data parameters
-        "years": 5,
+        "days": 255,
         "prediction_window": 3,
         "use_cache": True,
         "cache_dir": "data_cache",
+        "batch_size": 1,
 
         # Training parameters
         "accelerator": "gpu",

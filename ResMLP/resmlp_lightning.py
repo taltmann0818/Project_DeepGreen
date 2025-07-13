@@ -1,8 +1,8 @@
 # resmlp_lightning.py
 import torch, torch.nn as nn, torch.nn.functional as F
-from timm.models.layers import DropPath
+from timm.layers import DropPath
 import torch.optim.lr_scheduler as sched
-from kan import KANLinear
+#from kan import KANLinear
 import pytorch_lightning as pl
 import torchmetrics
 
@@ -11,7 +11,8 @@ class ResBlock(nn.Module):
         super().__init__()
         self.norm = nn.RMSNorm(d)
         self.mlp  = nn.Sequential(
-            KANLinear(d, d*4, edge_activation='gelu'),
+            #KANLinear(d, d*4, edge_activation='gelu'),
+            nn.Linear(d, d*4, bias=False),
             nn.SiLU(),
             nn.Dropout(p),
             nn.Linear(d*4, d, bias=False),

@@ -9,20 +9,21 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 import logging
 from typing import Union
+import math
 
 class FundementalData:
-    def __init__(self, tickers, years=5, **kwargs):
+    def __init__(self, tickers, days=252, **kwargs):
         """
         Initialize the FundamentalData class with a ticker symbol and number of past days to fetch.
         """
-        self.client = RESTClient("XizU4KyrwjCA6bxHrR5_eQnUxwFFUnI2",num_pools=40)
+        self.client = RESTClient("1XhvFUa1rtoOvVsCuXQQL7a0kl79TU9Q")
         self.tickers = tickers
 
         self.current_date = kwargs.get('end_date', datetime.today())
-        self.past_date = kwargs.get('start_date', datetime.today() - timedelta(days=years*365))
+        self.past_date = kwargs.get('start_date', datetime.today() - timedelta(days))
         self.fetch_market_cap = kwargs.get("fetch_market_cap", True)
         self.fetch_stock_price = kwargs.get("fetch_stock_price", True)
-        self.workers = kwargs.get("workers", 20)
+        self.workers = kwargs.get("workers", 10)
 
     def _ticker(self, ticker):
         try:
@@ -142,79 +143,108 @@ class FundementalData:
         except Exception as err:
             logging.warning(f"[get_close_price] {ticker} failed for {asof}: {err}")
             return pd.DataFrame()
-    
-    def get_fundamentals(self):
-        fundementals = pd.DataFrame()
-        fundementals['ticker'] = self.financial_data['ticker']
-        fundementals['company_name'] = self.financial_data['company_name']
-        fundementals['2digit_SIC_code'] = self.financial_data['2digit_SIC_code']
-        fundementals['4digit_SIC_code'] = self.financial_data['4digit_SIC_code']
-        fundementals['filing_date'] = self.financial_data['filing_date']
-        fundementals['end_date'] = self.financial_data['end_date']
-        fundementals['fiscal_period'] = self.financial_data['fiscal_period']
-        fundementals['fiscal_year'] = self.financial_data['fiscal_year']
-        fundementals['return_on_equity'] = self.financial_data['income_statement.net_income_loss.value'] / self.financial_data[
-            'balance_sheet.equity.value']
-        fundementals['operating_margin'] = self.financial_data['income_statement.operating_income_loss.value'] / self.financial_data[
-            'income_statement.revenues.value']
-        fundementals['debt_to_equity'] = self.financial_data['balance_sheet.liabilities.value'] / self.financial_data[
-            'balance_sheet.equity.value']
-        fundementals['debt_ratio'] = self.financial_data['balance_sheet.liabilities.value'] / self.financial_data[
-            'balance_sheet.assets.value']
-        fundementals['current_ratio'] = self.financial_data['balance_sheet.current_assets.value'] / self.financial_data[
-            'balance_sheet.current_liabilities.value']
-        fundementals['enterprise_value'] = self.financial_data['market_cap'] + self.financial_data['balance_sheet.liabilities.value'] - self.financial_data['balance_sheet.cash.value']
-        fundementals['ebit'] = self.financial_data['income_statement.net_income_loss.value'] + self.financial_data[
-            'income_statement.income_tax_expense_benefit.value'] + self.financial_data[
-                                   'income_statement.interest_and_debt_expense.value']
-        fundementals['ebitda'] = fundementals['ebit'] + self.financial_data[
-            'income_statement.depreciation_and_amortization.value']
-        fundementals['free_cash_flow'] = self.financial_data['cash_flow_statement.net_cash_flow_from_operating_activities.value']-self.financial_data['cash_flow_statement.net_cash_flow_from_investing_activities.value']
-        fundementals['free_cash_flow_per_share'] = fundementals['free_cash_flow'] / self.financial_data[
-            'income_statement.basic_average_shares.value']
-        fundementals['net_margin'] = self.financial_data['income_statement.net_income_loss.value'] / self.financial_data[
-            'income_statement.revenues.value']
-        fundementals['book_value'] = self.financial_data['balance_sheet.assets.value'] - self.financial_data['balance_sheet.intangible_assets.value'] - self.financial_data['balance_sheet.liabilities.value']
-        fundementals['return_on_invested_capital'] = (self.financial_data['income_statement.net_income_loss.value'] - self.financial_data[
-            'income_statement.common_stock_dividends.value']) / (self.financial_data['balance_sheet.equity.value'] + self.financial_data[
-            'balance_sheet.liabilities.value'])
-        fundementals['gross_margin'] = (self.financial_data['income_statement.revenues.value'] - self.financial_data[
-            'income_statement.costs_and_expenses.value']) / self.financial_data['income_statement.revenues.value']
-        fundementals['working_capital'] = self.financial_data['balance_sheet.current_assets.value'] - self.financial_data[
-            'balance_sheet.current_liabilities.value']
-        # Line items needed
-        fundementals['earnings_per_share'] = self.financial_data['income_statement.basic_earnings_per_share.value']
-        fundementals['revenue'] = self.financial_data['income_statement.revenues.value']
-        fundementals['net_income'] = self.financial_data['income_statement.net_income_loss.value']
-        fundementals['total_assets'] = self.financial_data['balance_sheet.assets.value']
-        fundementals['total_liabilities'] = self.financial_data['balance_sheet.liabilities.value']
-        fundementals['total_debt'] = self.financial_data['balance_sheet.liabilities.value']
-        fundementals['current_assets'] = self.financial_data['balance_sheet.current_assets.value']
-        fundementals['current_liabilities'] = self.financial_data['balance_sheet.current_liabilities.value']
-        fundementals['dividends_and_other_cash_distributions'] = self.financial_data[
-            'income_statement.preferred_stock_dividends_and_other_adjustments.value']
-        fundementals['issuance_or_purchase_of_equity_shares'] = self.financial_data[
-            'cash_flow_statement.net_cash_flow_from_financing_activities.value']
-        fundementals['outstanding_shares'] = self.financial_data['income_statement.basic_average_shares.value']
-        fundementals['capital_expenditure'] = self.financial_data[
-            'cash_flow_statement.net_cash_flow_from_investing_activities.value']
-        fundementals['operating_expense'] = self.financial_data['income_statement.operating_expenses.value']
-        fundementals['cash_and_equivalents'] = self.financial_data['balance_sheet.cash.value']
-        fundementals['shareholders_equity'] = self.financial_data['balance_sheet.equity.value']
-        fundementals['research_and_development'] = self.financial_data['income_statement.research_and_development.value']
-        fundementals['goodwill_and_intangible_assets'] = self.financial_data['balance_sheet.intangible_assets.value']
-        fundementals['operating_income'] = self.financial_data['income_statement.operating_income_loss.value']
-        fundementals['depreciation_and_amortization'] = self.financial_data[
-            'income_statement.depreciation_and_amortization.value']
-        fundementals['earnings_per_share'] = self.financial_data['income_statement.basic_earnings_per_share.value']
-        fundementals['intangible_assets'] = self.financial_data['balance_sheet.intangible_assets.value']
-        fundementals['interest_expense'] = self.financial_data['income_statement.interest_expense_operating.value']
-        if self.fetch_market_cap:
-            fundementals['market_cap'] = self.financial_data['market_cap']
-        if self.fetch_stock_price:
-            fundementals['share_price'] = self.financial_data['share_price']
 
-        return fundementals.set_index('end_date')
+    def _safe_div(self, num: pd.Series, den: pd.Series) -> pd.Series:
+        num = pd.to_numeric(num, errors="coerce")
+        den = pd.to_numeric(den, errors="coerce")
+    
+        res = num.div(den.replace(0, np.nan))
+        return res.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        
+    def get_fundamentals(self) -> pd.DataFrame:
+        fd = self.financial_data             # alias for brevity
+        
+        out = pd.DataFrame({
+            "Ticker":         fd["ticker"],
+            "filing_date":    fd["filing_date"],
+            "date":           fd["end_date"],
+            "fiscal_period":  fd["fiscal_period"],
+            "fiscal_year":    fd["fiscal_year"],
+
+            # profitability & leverage
+            "roe":            self._safe_div(fd["income_statement.net_income_loss.value"],
+                                              fd["balance_sheet.equity.value"]),
+            "dte":            self._safe_div(fd["balance_sheet.liabilities.value"],
+                                              fd["balance_sheet.equity.value"]),
+            "debt_ratio":     self._safe_div(fd["balance_sheet.liabilities.value"],
+                                              fd["balance_sheet.assets.value"]),
+            "current_ratio":  self._safe_div(fd["balance_sheet.current_assets.value"],
+                                              fd["balance_sheet.current_liabilities.value"]),
+            "op_mrg":         self._safe_div(fd["income_statement.operating_income_loss.value"],
+                                              fd["income_statement.revenues.value"]),
+            "net_mrg":        self._safe_div(fd["income_statement.net_income_loss.value"],
+                                              fd["income_statement.revenues.value"]),
+            "gross_mrg":      self._safe_div(
+                                   fd["income_statement.revenues.value"]
+                                   - fd["income_statement.costs_and_expenses.value"],
+                                   fd["income_statement.revenues.value"]),
+        })
+
+        # enterprise-value multiples
+        enterprise_value = (
+              fd["market_cap"]
+            + fd["balance_sheet.liabilities.value"]
+            - fd["balance_sheet.cash.value"]
+        )
+        ebitda = (
+              fd["income_statement.net_income_loss.value"]
+            + fd["income_statement.income_tax_expense_benefit.value"]
+            + fd["income_statement.interest_and_debt_expense.value"]
+            + fd["income_statement.depreciation_and_amortization.value"]
+        )
+        out["ev_ebitda"] = self._safe_div(enterprise_value, ebitda)
+
+        # ROIC
+        out["roic"] = self._safe_div(
+            fd["income_statement.net_income_loss.value"]
+            - fd["income_statement.common_stock_dividends.value"],
+            fd["balance_sheet.equity.value"] + fd["balance_sheet.liabilities.value"],
+        )
+
+        # per-share metrics
+        book_value = (
+              fd["balance_sheet.assets.value"]
+            - fd["balance_sheet.intangible_assets.value"]
+            - fd["balance_sheet.liabilities.value"]
+        )
+        shares = fd["income_statement.basic_average_shares.value"]
+        out["bv_per_share"]  = self._safe_div(book_value, shares)
+
+        free_cash_flow = (
+              fd["cash_flow_statement.net_cash_flow_from_operating_activities.value"]
+            - fd["cash_flow_statement.net_cash_flow_from_investing_activities.value"]
+        )
+        out["fcf_per_share"] = self._safe_div(free_cash_flow, shares)
+
+        out["eps"]          = fd["income_statement.basic_earnings_per_share.value"]
+
+        # valuation ratios
+        fd["share_price"] = (
+            fd["share_price"]
+            .apply(lambda v: np.nan if isinstance(v, pd.DataFrame) and v.empty else v)
+            .pipe(pd.to_numeric, errors="coerce") 
+        )
+        out["pe_ratio"]   = self._safe_div(fd["share_price"], out["eps"])
+        sales_per_sh     = self._safe_div(fd["income_statement.revenues.value"], fd["share_price"])
+        out["ps_ratio"]  = self._safe_div(fd["share_price"], sales_per_sh)
+        out["pb_ratio"]  = self._safe_div(fd["share_price"], out["bv_per_share"])
+        out["pfcf_ratio"] = self._safe_div(fd["share_price"], out["fcf_per_share"])
+
+        # Graham number (set to 0 if eps * bv_per_share is negative)
+        graham_product = 22.5 * out["eps"] * out["bv_per_share"]
+        out["graham_number"] = np.where(graham_product <= 0.0, 0.0, np.sqrt(graham_product))
+
+        # interest-coverage
+        interest_exp = fd["income_statement.interest_expense_operating.value"].abs()
+        out["interest_coverage"] = self._safe_div(
+            fd["income_statement.net_income_loss.value"]
+          + fd["income_statement.income_tax_expense_benefit.value"]
+          + fd["income_statement.interest_and_debt_expense.value"],
+            interest_exp,
+        )
+
+        # final tidy-up
+        return out
 
     def fetch(self):
         with ThreadPoolExecutor(max_workers=self.workers) as ex:
