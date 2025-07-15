@@ -243,7 +243,7 @@ class PortfolioManagerAgent:
         n = len(tickers)
         if n == 0:
             return None
-            
+
         # Align data
         A = alpha.values
         Sigma = cov.loc[tickers, tickers].values
@@ -256,11 +256,22 @@ class PortfolioManagerAgent:
         constraints = [
             w >= 0.0,
             w <= self.max_position_pct,
-            cp.sum(w) == 1.0,
+            cp.sum(w) <= 1.0,  # Allow sum to be less than 1 to avoid infeasibility
         ]
         prob = cp.Problem(obj, constraints)
         try:
-            prob.solve(solver=cp.OSQP, verbose=False)
+            # Use deterministic solver settings to ensure reproducible results
+            prob.solve(
+                solver=cp.OSQP, 
+                verbose=False,
+                eps_abs=1e-6,
+                eps_rel=1e-6,
+                max_iter=10000,
+                adaptive_rho=False,  # Disable adaptive rho for determinism
+                rho=0.1,
+                sigma=1e-6,
+                alpha=1.6
+            )
             if prob.status not in {cp.OPTIMAL, cp.OPTIMAL_INACCURATE}:
                 return None
             sol = np.maximum(w.value, 0.0)
@@ -293,13 +304,14 @@ class PortfolioManagerAgent:
         if not universe:
             print("No tradable tickers with prices – aborting rebalance.")
             return {}
-            
+
         # Sort by *positive* alpha and keep top‑K ------------------------
         pos_alpha = {t: a for t, a in alpha_signals.items() if a > 0.0 and t in universe}
         if not pos_alpha:
             print("No positive‑alpha names – nothing to buy.")
             return {}
-        top_tickers = sorted(pos_alpha, key=pos_alpha.get, reverse=True)[:max_long_positions]
+        # Sort by alpha value (descending) and then by ticker name (ascending) for deterministic tie-breaking
+        top_tickers = sorted(pos_alpha, key=lambda t: (-pos_alpha[t], t))[:max_long_positions]
 
         # All other tickers are forced to weight 0 -----------------------
         pruned_alpha = {t: alpha_signals[t] for t in top_tickers}
@@ -328,14 +340,14 @@ class PortfolioManagerAgent:
         acct = self.get_account_info()
         current_pos = self.get_current_positions()
         pv = acct['portfolio_value']
-        curr_w = pd.Series({t: curr_pos.get(t, 0) * price_map[t] / pv for t in tickers})
+        curr_w = pd.Series({t: current_pos.get(t, 0) * price_map[t] / pv for t in tickers})
 
         # QP Optimization
         optimal_weights = self._solve_qp(alpha_vec, cov, curr_w)
-        if w_opt is None:
+        if optimal_weights is None:
             print("QP failed – rebalance skipped.")
             return {}
-        
+
         # Calculate position targets
         reserve = self.reserve_fraction * pv
         investable = max(acct['cash'] - reserve, 0) + pv * (1 - self.reserve_fraction)

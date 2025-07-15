@@ -196,7 +196,7 @@ class DataFetcher:
         all_hols = pd.DatetimeIndex(fed).union(pd.DatetimeIndex(good_fridays))
         return all_hols.values.astype("datetime64[D]")
 
-    def fetch_stock_data(self, tickers, workers=20):
+    def fetch_stock_data(self, workers=20):
         """
         Fetch stock data for multiple tickers in parallel.
 
@@ -212,8 +212,6 @@ class DataFetcher:
         pd.DataFrame
             Combined DataFrame with all ticker data
         """
-        if isinstance(tickers, str):
-            tickers = [tickers]
 
         full_dates = np.array(
             pd.date_range(start=self.start_date, end=self.end_date, freq="D", tz="America/New_York")

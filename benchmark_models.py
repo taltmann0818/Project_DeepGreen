@@ -26,6 +26,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
+
 import quantstats_lumi as qs
 from tqdm import tqdm
 from google import genai
@@ -59,7 +60,7 @@ class ModelBenchmarkRunner:
         self.experiment_run = experiment_run
         self.models = models
         self.days = days
-        self.sample_size = 3000 #sample_size
+        self.sample_size = sample_size #sample_size
         self.prediction_window = prediction_window
         self.run_name = run_name or f"benchmark_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         self.out_dir = Path(out_dir)
@@ -68,8 +69,8 @@ class ModelBenchmarkRunner:
         self.cache_dir.mkdir(exist_ok=True)
         self.riskFreeRate = 0.04348 # 10yr U.S. Treasury Yield
         self.initial_capital = 10000.0
-        self.risk_aversion = 0.5
-        self.max_position_pct = 0.35
+        self.risk_aversion = 0.8
+        self.max_position_pct = 0.25
         self.transaction_cost_bps = 5.0
 
         # Initialize W&B
@@ -92,6 +93,7 @@ class ModelBenchmarkRunner:
         self.benchmark_returns = None
         self.stock_data_cache_path = self.cache_dir / "stock_data_cache.parquet"
         self.benchmark_data_cache_path = self.cache_dir / "benchmark_data_cache.parquet"
+        self.alpha_data_cache_path = self.cache_dir / "alpha_data_cache.parquet"
 
     def initialize_wandb(self):
         """Initialize Weights & Biases - find existing run by name instead of creating new one"""
@@ -266,6 +268,14 @@ class ModelBenchmarkRunner:
         except Exception as e:
             logging.warning("⚠️  Failed to save benchmark data cache: %s", e)
 
+    def _save_alpha_data_to_cache(self, data: pd.DataFrame):
+        """Save benchmark data to cache"""
+        try:
+            data.to_parquet(self.alpha_data_cache_path)
+            logging.info("💾 Saved Alpha data to cache: %s", self.alpha_data_cache_path)
+        except Exception as e:
+            logging.warning("⚠️  Failed to save Alpha data cache: %s", e)
+
     def prepare_benchmark_data(self):
         """Prepare benchmark data (NDX index) with caching"""
         # Try to load from cache first
@@ -286,7 +296,7 @@ class ModelBenchmarkRunner:
                 index_returns = data_retriever.get_ohlc_for_ticker('I:NDX')
                 index_returns = index_returns['Close'].pct_change().dropna()
                 index_returns.index = index_returns.index.tz_localize(None)
-                index_returns.name = "Benchmark"
+                index_returns.name = "daily_return"
                 self.benchmark_returns = index_returns
                 logging.info("✅ Loaded benchmark data (NDX)")
 
@@ -311,7 +321,7 @@ class ModelBenchmarkRunner:
         logging.info(f"Generated alpha signals for {len(alpha_dict)} dates")
 
         # Save to cache
-        self._save_benchmark_data_to_cache(alpha_df)
+        self._save_alpha_data_to_cache(alpha_df)
 
         if not alpha_dict:
             logging.warning("⚠️  No alpha signals generated for %s", model_name)
@@ -390,7 +400,7 @@ class ModelBenchmarkRunner:
         metrics = {
             'model': model_name,
             'backtesting_date': date.today(),
-            'total_return': full_total_return,
+            'total_return': float(full_total_return)*100,
             'cagr': full_cagr,
             'sharpe_ratio': full_sharpe,
             'sortino_ratio': full_sortino,
@@ -402,8 +412,8 @@ class ModelBenchmarkRunner:
 
         return metrics
 
-    def create_comparison_plots(self) -> None:
-        """Create comparison plots for all models"""
+    def create_comparison_plots(self) -> Dict[str, Any]:
+        """Create comparison plots for all models using Plotly"""
         plots = {}
 
         series_dict: Dict[str, pd.Series] = {}
@@ -418,16 +428,16 @@ class ModelBenchmarkRunner:
                 )
         elif isinstance(bench, (list, tuple)):
             bench = pd.Series(bench)
-    
+
         if not isinstance(bench, pd.Series):
             raise ValueError(
                 "`self.benchmark_returns` must be a Series, list/tuple, or a "
                 "DataFrame with ['date','daily_return'].  Got type "
                 f"{type(self.benchmark_returns)}"
             )
-    
+
         series_dict["NDX Benchmark"] = (1 + bench).cumprod() - 1
-    
+
         # --- models -------------------------------------------------------
         for model_name, res in self.model_results.items():
             if (
@@ -438,10 +448,10 @@ class ModelBenchmarkRunner:
             ):
                 s = res["strategy_returns"].set_index("date")["daily_return"]
                 series_dict[model_name] = (1 + s).cumprod() - 1
-    
+
         if len(series_dict) <= 1:
             raise ValueError("No valid model/benchmark return series to plot.")
-    
+
         # ------------------------------------------------------------------
         # 2. Align on the same date index & drop NaNs
         # ------------------------------------------------------------------
@@ -451,35 +461,57 @@ class ModelBenchmarkRunner:
             .dropna(how="all")   # drop rows where *every* col is NaN
             .ffill()             # forward-fill gaps (line charts hate NaNs)
         )
-        self.wandb_run.log(
-            {
-                "performance_comparison": wandb.plot.line_series(
-                    xs=cum_df.index.astype(str).tolist(),
-                    ys=[cum_df[col].tolist() for col in cum_df],
-                    keys=cum_df.columns.tolist(),
-                    title="Model vs Benchmark Cumulative Return"
-                )
-            }
+
+        # Create Plotly performance comparison chart
+        fig_performance = go.Figure()
+
+        # Plot each series
+        for col in cum_df.columns:
+            fig_performance.add_trace(go.Scatter(
+                x=cum_df.index,
+                y=cum_df[col].values,
+                mode='lines',
+                name=col,
+                line=dict(width=2),
+                hovertemplate='<b>%{fullData.name}</b><br>' +
+                             'Date: %{x}<br>' +
+                             'Return: %{y:.2%}<br>' +
+                             '<extra></extra>'
+            ))
+
+        fig_performance.update_layout(
+            title="Model vs Benchmark Cumulative Return",
+            xaxis_title="Date",
+            yaxis_title="Cumulative Return",
+            hovermode='x unified',
+            legend=dict(
+                yanchor="top",
+                y=0.99,
+                xanchor="left",
+                x=0.01
+            )
         )
 
-        # Metrics comparison - fixed for new data structure
+        # Export performance chart to HTML
+        perf_html_path = os.path.join(self.out_dir, "performance_comparison.html")
+        fig_performance.write_html(perf_html_path)
+
+        # Log to wandb directly with the Plotly figure
+        if self.wandb_run:
+            self.wandb_run.log({"performance_comparison": wandb.Plotly(fig_performance)})
+
+        plots['performance_comparison'] = fig_performance
+
+        # Metrics comparison using Plotly
         metrics_data = []
         for model_name, results in self.model_results.items():
             if results and 'results_df' in results and not results['results_df'].empty:
-                # results_df is already a single-row DataFrame per model, no need to group
                 model_metrics = results['results_df'].copy()
-                # Ensure model name is set correctly
                 model_metrics['model'] = model_name
                 metrics_data.append(model_metrics)
 
         if metrics_data:
             all_metrics = pd.concat(metrics_data, ignore_index=True)
-
-            # Create metrics comparison chart
-            fig_metrics = make_subplots(
-                rows=2, cols=2,
-                subplot_titles=['Sharpe Ratio', 'Total Return', 'Max Drawdown', 'Alpha']
-            )
 
             # Handle potential missing columns gracefully
             sharpe_col = 'sharpe_ratio' if 'sharpe_ratio' in all_metrics.columns else 'Sharpe'
@@ -487,29 +519,38 @@ class ModelBenchmarkRunner:
             drawdown_col = 'max_drawdown' if 'max_drawdown' in all_metrics.columns else 'Max Drawdown'
             alpha_col = 'Alpha' if 'Alpha' in all_metrics.columns else 'alpha'
 
+            # Create Plotly subplots for metrics comparison
+            fig_metrics = make_subplots(
+                rows=2, cols=2,
+                subplot_titles=['Sharpe Ratio', 'Total Return', 'Max Drawdown', 'Alpha']
+            )
+
             if sharpe_col in all_metrics.columns:
                 fig_metrics.add_trace(
-                    go.Bar(x=all_metrics['model'], y=all_metrics[sharpe_col], name='Sharpe'),
+                    go.Bar(x=all_metrics['model'], y=all_metrics[sharpe_col], 
+                          name='Sharpe', marker_color='navy', opacity=0.7),
                     row=1, col=1
                 )
 
             if return_col in all_metrics.columns:
                 fig_metrics.add_trace(
-                    go.Bar(x=all_metrics['model'], y=all_metrics[return_col], name='Return'),
+                    go.Bar(x=all_metrics['model'], y=all_metrics[return_col], 
+                          name='Return', marker_color='green', opacity=0.7),
                     row=1, col=2
                 )
 
             if drawdown_col in all_metrics.columns:
                 fig_metrics.add_trace(
-                    go.Bar(x=all_metrics['model'], y=all_metrics[drawdown_col], name='Drawdown'),
+                    go.Bar(x=all_metrics['model'], y=all_metrics[drawdown_col], 
+                          name='Drawdown', marker_color='red', opacity=0.7),
                     row=2, col=1
                 )
 
             if alpha_col in all_metrics.columns:
-                # Handle potential None values in Alpha column
                 alpha_values = all_metrics[alpha_col].fillna(0)
                 fig_metrics.add_trace(
-                    go.Bar(x=all_metrics['model'], y=alpha_values, name='Alpha'),
+                    go.Bar(x=all_metrics['model'], y=alpha_values, 
+                          name='Alpha', marker_color='orange', opacity=0.7),
                     row=2, col=2
                 )
 
@@ -518,6 +559,14 @@ class ModelBenchmarkRunner:
                 height=600,
                 showlegend=False
             )
+
+            # Export metrics chart to HTML
+            metrics_html_path = os.path.join(self.out_dir, "metrics_comparison.html")
+            fig_metrics.write_html(metrics_html_path)
+
+            # Log to wandb directly with the Plotly figure
+            if self.wandb_run:
+                self.wandb_run.log({"metrics_comparison": wandb.Plotly(fig_metrics)})
 
             plots['metrics_comparison'] = fig_metrics
 
@@ -569,7 +618,7 @@ class ModelBenchmarkRunner:
                 Experiment: {self.experiment_run}
                 Models Tested: {', '.join(self.models)}
                 Testing Period: {self.days} day(s)
-    
+
                 Performance Summary:
                 {json.dumps(summary_data, indent=2, default=str)}
                 """,
@@ -582,7 +631,7 @@ class ModelBenchmarkRunner:
             logging.error("❌ Error generating LLM report: %s", e)
             return f"Error generating LLM report: {e}"
 
-    def publish_wandb_report(self, plots: Dict[str, go.Figure], llm_report: str):
+    def publish_wandb_report(self, plots: Dict[str, Any], llm_report: str):
         """Publish comprehensive enterprise-grade report to W&B using WandbReportGenerator"""
         if not WANDB_AVAILABLE or not self.wandb_run:
             logging.info("⚠️  W&B not available, skipping report publishing")
@@ -682,14 +731,12 @@ class ModelBenchmarkRunner:
                 logging.error("❌ Error processing %s: %s", model_name, e)
                 self.model_results[model_name] = None
 
-        # Generate comparison plots
-        plots = self.create_comparison_plots()
+        # Ensure output directory exists
+        os.makedirs(self.out_dir, exist_ok=True)
 
-        # Save plots locally
-        for plot_name, fig in plots.items():
-            plot_path = self.out_dir / f"{plot_name}.html"
-            fig.write_html(plot_path)
-            logging.info("💾 Saved plot: %s", plot_path)
+        # Generate comparison plots (Plotly plots are already saved as HTML in the method)
+        plots = self.create_comparison_plots()
+        logging.info("💾 Plotly plots saved to %s directory", self.out_dir)
 
         # Generate LLM report
         summary_data = {
@@ -745,7 +792,7 @@ def main():
                        help="Days of data to use for backtesting")
     parser.add_argument("--horizon", default=3,
                    help="Forecast horizon for models")
-    parser.add_argument("--sample-size", type=int, default=100)
+    parser.add_argument("--sample-size", type=int, default=1000)
     parser.add_argument("--out-dir", default="benchmark_results",
                        help="Output directory for results")
     parser.add_argument("--use-llm", default=True, type=bool,

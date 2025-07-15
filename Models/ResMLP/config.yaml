@@ -1,0 +1,18 @@
+batch_size:
+    value: 256
+cache_dir:
+    value: data_cache
+dataset_parameters:
+    value:
+        rank_cols:
+            - ret_1d
+            - ret_1m
+            - ret_1m_rank
+            - vol_21d
+            - peer_resid
+            - fwd_3d_close
+window_size:
+    value: 20
+onnx_model_name:
+    value: Tempus_v2.fp8.onnx
+

@@ -205,7 +205,7 @@ class AlphaVectorPipeline:
 
         # Pack for optimiser ----------------------------------------------------
         packed: Dict[pd.Timestamp, Dict[str, float]] = {
-            d: g.set_index("Ticker")["alpha_pure"].to_dict()
+            d: g.set_index("Ticker")["alpha_shrunk"].to_dict()
             for d, g in df.groupby("date", sort=False)
         }
 

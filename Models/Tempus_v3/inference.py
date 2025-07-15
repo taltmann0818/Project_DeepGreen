@@ -6,6 +6,7 @@ import numpy as np
 from typing import Tuple, Optional
 import hashlib
 import sys
+from scipy.stats import norm
 from pathlib import Path
 import yaml
 import os
@@ -140,7 +141,7 @@ class Tempusv3Inference:
         opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
         session = ort.InferenceSession(
             model_path,
-            providers=["CoreMLExecutionProvider"],
+            providers=["TensorrtExecutionProvider", "CPUExecutionProvider"],
             sess_options=opts
         )
         print(f"Loaded ONNX Model: {const['ONNX_MODEL_PATH']}")
@@ -275,10 +276,7 @@ class Tempusv3Inference:
         result["Predicted"]    = pivot[np.median(quantiles)]    # median
         result["q_low"]        = pivot[np.min(quantiles)]       # 2 % quantile
         result["q_high"]       = pivot[np.max(quantiles)]       # 98 % quantile
-
-        Z_98 = 2.33
-        sigma_3d              = (result["q_high"] - result["q_low"]) / (2 * Z_98)
-        result["sigma_daily"] = sigma_3d / np.sqrt(3)
+        result["sigma_daily"] = (result["q_high"] - result["q_low"]) / (2 * norm.ppf(0.98)) / np.sqrt(3)
         result = result.reset_index().merge(predictions[['Ticker','date','Close']], on=["Ticker", "date"], how="left").drop_duplicates()
         result['pred_return'] = (result['Predicted'] - result['Close']) / result['Close'] # Updating to use implied returns instead of median quantile raw prediction
         result['q_low'] = (result['q_low'] - result['Close']) / result['Close'] # Updating to use implied returns instead of low quantile raw prediction

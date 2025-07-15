@@ -83,7 +83,7 @@ class CustomBacktestingEngine:
 
         # Set fixed capital for backtesting
         self.pm.capital = initial_capital
-        
+
         # Initialize tracking variables
         self.cash = initial_capital
         self.positions: Dict[str, float] = {}
@@ -182,7 +182,8 @@ class CustomBacktestingEngine:
 
             # Top‑K positive alpha --------------------------------------
             pos_alpha = {t: a for t, a in alpha.items() if a > 0}
-            top = sorted(pos_alpha, key=pos_alpha.get, reverse=True)[: self.max_long_positions]
+            # Sort by alpha value (descending) and then by ticker name (ascending) for deterministic tie-breaking
+            top = sorted(pos_alpha, key=lambda t: (-pos_alpha[t], t))[: self.max_long_positions]
             if len(top) < 2:
                 logging.debug(f"{date}: <2 positive alphas – skip rebalance")
                 continue
@@ -262,7 +263,7 @@ class CustomBacktestingEngine:
             'num_trades': len(pd.DataFrame(self.trades)),
             'avg_positions': returns_df['num_positions'].mean()
         }
-    
+
     def trade_log(self) -> pd.DataFrame:
         return pd.DataFrame(self.trades)
 

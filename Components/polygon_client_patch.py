@@ -12,7 +12,7 @@ def patch_polygon_client(max_pool_size: int = 10) -> None:
 
     def new_init(
         self,
-        api_key,
+        api_key: str = 'XizU4KyrwjCA6bxHrR5_eQnUxwFFUnI2',
         connect_timeout: float = 10.0,
         read_timeout: float = 10.0,
         num_pools: int = 10,

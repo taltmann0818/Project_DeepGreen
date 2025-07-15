@@ -1,4 +1,6 @@
 from polygon import RESTClient
+from Components.polygon_client_patch import patch_polygon_client
+patch_polygon_client(max_pool_size=50)
 import numpy as np
 import pandas as pd
 import os
@@ -16,7 +18,7 @@ class FundementalData:
         """
         Initialize the FundamentalData class with a ticker symbol and number of past days to fetch.
         """
-        self.client = RESTClient("1XhvFUa1rtoOvVsCuXQQL7a0kl79TU9Q")
+        self.client = RESTClient()
         self.tickers = tickers
 
         self.current_date = kwargs.get('end_date', datetime.today())

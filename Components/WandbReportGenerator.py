@@ -213,7 +213,7 @@ class WandbReportGenerator:
                         except Exception as e2:
                             self.logger.warning(f"Could not add plot {plot_file.name}: {e2}")
 
-    def create_wandb_report(self, llm_summary: str, benchmark_plots: Dict[str, go.Figure], 
+    def create_wandb_report(self, llm_summary: str, benchmark_plots: Dict[str, Any], 
                                wandb_run):
         """
         Create a comprehensive enterprise-grade report with all components
@@ -255,17 +255,39 @@ class WandbReportGenerator:
             recommendations = f"# 1.3 Recommendation(s)\n\n{llm_summary['recommendations']}\n\n"
             self.report.blocks.append(wr.MarkdownBlock(text=recommendations))
 
+            # 2. Backtesting Results
+            backtesting_header = "# 2 Backtesting Result(s)\n"
+            self.report.blocks.append(wr.MarkdownBlock(text=backtesting_header))
+            self.report.blocks.append(
+                wr.PanelGrid(
+                    panels=[
+                        wr.CustomChart(
+                            chart_name="performance_comparison"
+                        )
+                    ]
+                )
+            )
 
-            # 2. Model Training Metrics
+            self.report.blocks.append(
+                wr.PanelGrid(
+                    panels=[
+                        wr.CustomChart(
+                            chart_name="metrics_comparison"
+                        )
+                    ]
+                )
+            )
+
+            # 3. Model Training Metrics
             metrics_table = self.create_metrics_markdown_table(target_run, target_metrics, previous_run, previous_metrics)
-            metrics_markdown = f"# 2.1 Training Performance\n\n{metrics_table}\n\n"
+            metrics_markdown = f"# 3.1 Training Performance\n\n{metrics_table}\n\n"
             self.report.blocks.append(wr.MarkdownBlock(text=metrics_markdown))
                         # 5. Training Plots and Visualizations
             self.add_training_plots_to_report(target_run)
 
-            # 4. Model Training Hyperparameters
+            # 3. Model Training Hyperparameters
             hyperparams_table = self.create_hyperparameters_markdown_table(target_run)
-            hyperparams_markdown = f"# 2.2 Training Parameters\n\n{hyperparams_table}\n\n"
+            hyperparams_markdown = f"# 3.2 Training Parameters\n\n{hyperparams_table}\n\n"
             self.report.blocks.append(wr.MarkdownBlock(text=hyperparams_markdown))
 
 

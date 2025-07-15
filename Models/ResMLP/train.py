@@ -8,18 +8,19 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 import datetime
 import hashlib
-from resmlp_lightning import ResMLP
+from Models.ResMLP.resmlp_lightning import ResMLPLightning
 from datamodule import DataModule
-from lightning.pytorch import Trainer
-from lightning.pytorch.loggers import WandbLogger
-from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping, LearningRateMonitor
-from pytorch_forecasting import MAE, RMSE, MAPE, SMAPE
+import pytorch_lightning as pl
+from pytorch_lightning import Trainer
+from pytorch_lightning.loggers import WandbLogger
+from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping, LearningRateMonitor
+from torchmetrics import MeanAbsoluteError, MeanSquaredError, MeanAbsolutePercentageError
 import sys
 
 # Enable optimizations
-torch.backends.cuda.matmul.allow_tf32 = True
-torch.backends.cudnn.allow_tf32 = True
-torch.backends.cuda.enable_flash_sdp(True)
+#torch.backends.cuda.matmul.allow_tf32 = True
+#torch.backends.cudnn.allow_tf32 = True
+#torch.backends.cuda.enable_flash_sdp(True)
 
 class ResNetTrainer:
     """
@@ -48,7 +49,8 @@ class ResNetTrainer:
     def setup_logging(self):
         """Setup WandB and MLFlow logging."""
         # WandB Logger
-        if self.config.get("use_wandb", True):
+        numb = True
+        if numb:
             wandb_config = self.config.copy()
             # Add notes to WandB config if provided
             if self.config.get("notes"):
@@ -90,9 +92,11 @@ class ResNetTrainer:
         """Prepare data using CrossSectionalDataModule."""
         self.data_module = DataModule(
             batch_size=self.config["batch_size"],
+            feature_cols=self.config.get("feature_cols", ["Close"]),
             days=self.config.get("days", 252),
+            sample_size=self.config.get("sample_size", 100),
             prediction_window=self.config.get("prediction_window", 3),
-            num_workers=self.config.get("num_workers", None),
+            num_workers=self.config.get("num_workers", 4),
             #use_cache=self.config.get("use_cache", True),
             cache_dir=self.config.get("cache_dir", "data_cache")
         )
@@ -100,13 +104,9 @@ class ResNetTrainer:
 
     def create_model(self):
         """Create ResNET model from dataset"""
-        self.model = ResMLP(n_features=len(self.data_module.feature_cols),
+        return ResMLPLightning(n_features=len(self.data_module.feature_cols),
                        lr=self.config["learning_rate"], wd=self.config["weight_decay"], d=self.config["width"],
                        n_blocks=self.config["blocks"], dropout=self.config["dropout"])
-
-        print(f"Model created with {sum(p.numel() for p in self.model.parameters())} parameters")
-
-        return self.model
 
     def setup_trainer(self):
         """Setup PyTorch Lightning trainer with callbacks."""
@@ -145,7 +145,7 @@ class ResNetTrainer:
             "enable_model_summary": True,
             "gradient_clip_val": self.config["gradient_clip"],
             "accumulate_grad_batches": self.config["accumulate_grad_batches"],
-            "val_check_interval": self.config.get("val_check_interval", 0.25),
+            #"val_check_interval": self.config.get("val_check_interval", 0.5),
             "enable_checkpointing": True,
             "deterministic": False,
             "callbacks": callbacks,
@@ -155,7 +155,7 @@ class ResNetTrainer:
         if self.wandb_logger:
             trainer_kwargs["logger"] = self.wandb_logger
 
-        self.trainer = Trainer(**trainer_kwargs)
+        self.trainer = pl.Trainer(**trainer_kwargs)
         return self.trainer
 
     def train(self):
@@ -164,7 +164,7 @@ class ResNetTrainer:
             self.prepare_data()
 
         if self.model is None:
-            self.create_model()
+            self.model = self.create_model()
 
         if self.trainer is None:
             self.setup_trainer()
@@ -198,13 +198,17 @@ class ResNetTrainer:
         print("Evaluating model...")
 
         # Load best model
-        best_model = ResMLP.load_from_checkpoint(best_model_path)
+        best_model = ResMLPLightning.load_from_checkpoint(best_model_path)
 
         # Get validation dataloader
         val_dataloader = self.data_module.val_dataloader()
 
         # Calculate metrics
-        metrics = {"MAE": MAE(), "RMSE": RMSE(), "MAPE": MAPE(), "SMAPE": SMAPE()}
+        metrics = {
+            "MAE": MeanAbsoluteError(),
+            "RMSE": MeanSquaredError(squared=False),  # RMSE is MSE with squared=False
+            "MAPE": MeanAbsolutePercentageError()
+        }
         device = torch.device('cpu')
         best_model = best_model.to(device)
         best_model.eval()
@@ -221,9 +225,14 @@ class ResNetTrainer:
                 else:
                     y_hat = out
 
-                y_hat_single = y_hat[..., 0]
+                # Ensure both tensors are 1D for metric calculation
+                if y_hat.dim() > 1:
+                    y_hat = y_hat.squeeze()
+                if y.dim() > 1:
+                    y = y.squeeze()
+
                 for metric in metrics.values():
-                    metric.update(y_hat_single, y)
+                    metric.update(y_hat, y)
 
         # Compute final metrics
         results = {name: metric.compute().item() for name, metric in metrics.items()}
@@ -238,15 +247,68 @@ class ResNetTrainer:
 
         return results, best_model
 
+    def plot_predictions(self, model, num_examples: int = 5):
+        """Generate prediction plots for visualization."""
+        print("Generating prediction plots...")
+
+        val_dataloader = self.data_module.val_dataloader()
+        device = torch.device('cpu')
+        model = model.to(device)
+        model.eval()
+
+        plots = []
+        examples_plotted = 0
+
+        with torch.no_grad():
+            for batch_idx, (x, y) in enumerate(val_dataloader):
+                if examples_plotted >= num_examples:
+                    break
+
+                out = model(x)
+                if isinstance(out, dict) and "prediction" in out:
+                    y_hat = out["prediction"]
+                elif hasattr(out, "prediction"):
+                    y_hat = out.prediction
+                elif isinstance(out, (tuple, list)):
+                    y_hat = out[0]
+                else:
+                    y_hat = out
+
+                # Ensure proper dimensions for plotting
+                if y_hat.dim() > 1:
+                    y_hat = y_hat.squeeze()
+                if y.dim() > 1:
+                    y = y.squeeze()
+
+                # Create plot for each sample in batch
+                batch_size = min(x.size(0), num_examples - examples_plotted)
+                for i in range(batch_size):
+                    plt.figure(figsize=(10, 6))
+                    plt.plot(y[i].cpu().numpy(), label='Actual', marker='o')
+                    plt.plot(y_hat[i].cpu().numpy(), label='Predicted', marker='s')
+                    plt.title(f'Prediction vs Actual - Example {examples_plotted + 1}')
+                    plt.xlabel('Time Step')
+                    plt.ylabel('Value')
+                    plt.legend()
+                    plt.grid(True)
+
+                    plot_path = f"plots/prediction_example_{examples_plotted + 1}.png"
+                    plt.savefig(plot_path)
+                    plt.close()
+
+                    plots.append(plot_path)
+                    examples_plotted += 1
+
+                    if examples_plotted >= num_examples:
+                        break
+
+        return plots
+
     def export_onnx(self, model, model_name: str = "tft_model.onnx"):
         """Export model to ONNX format."""
         print("Exporting model to ONNX...")
-
-        val_dataloader = self.data_module.val_dataloader()
-
         # Get sample batch
         batch, _ = next(iter(self.data_module.val_dataloader()))
-        example_inputs = batch["features"].to("cpu")
 
         # Move to CPU
         device = torch.device('cpu')
@@ -256,16 +318,16 @@ class ResNetTrainer:
 
         onnx_path = f"TFT/Models/{self.config.get('onnx_model_name','model.onnx')}"
 
-        torch.onnx.dynamo_export(
+        torch.onnx.export(
             model,
-            example_inputs,
+            batch.to("cpu"),
             onnx_path,
-            export_args=(),
-            dynamic_shapes={
-                "x" : {0: "batch", 1: "n_tokens"},  # names the dynamic dims
-                "output_0": {0: "batch", 1: "n_tokens"}
+            dynamic_axes={
+                "input": {0: "batch_size"},
+                "output": {0: "batch_size"}
             },
             opset_version=17,
+            dynamo=True
         )
 
         # Log ONNX model to MLFlow
@@ -352,37 +414,38 @@ def generate_auto_experiment_name(config: Dict[str, Any]) -> str:
     param_str = "_".join([f"{k}{v}" for k, v in key_params.items()])
     param_hash = hashlib.md5(param_str.encode()).hexdigest()[:6]
 
-    return f"tft_{timestamp}_{param_hash}"
+    return f"resNET_{timestamp}_{param_hash}"
 
 
 def get_default_config():
-    """Get default configuration for TFT training."""
+    """Get default configuration for ResNET training."""
     return {
         # Model parameters
-        "epochs": 15,
+        "epochs": 20,
         "width": 384,
         "blocks": 8,
-        "learning_rate": 1e-3,
-        "weight_decay": 1e-2,
+        "learning_rate": 1e-3,  # Reduced for better stability
+        "weight_decay": 1e-3,   # Reduced from 1e-2 for better stability
         "dropout": 0.1,
-        "gradient_clip": 0.5,
+        "gradient_clip": 1.0,   # Increased for better gradient stability
         "accumulate_grad_batches": 4,
 
         # Data parameters
-        "days": 255,
+        "days": 1260,
         "prediction_window": 3,
         "use_cache": True,
         "cache_dir": "data_cache",
-        "batch_size": 1,
+        "batch_size": 64,       # Increased for more stable gradients
+        "sample_size": 2000,
 
         # Training parameters
         "accelerator": "gpu",
-        "precision": "bf16-mixed",
-        "optimizer": "Adafactor",
-        "val_check_interval": 0.25,
+        "precision": "bf16-mixed",      # Changed to full precision for numerical stability
+        "optimizer": "AdamW",   # Changed from Adafactor for better stability
+        "val_check_interval": 1,
         "early_stopping": True,
-        "early_stopping_patience": 5,
-        "early_stopping_min_delta": 1e-5,
+        "early_stopping_patience": 10,  # Increased patience
+        "early_stopping_min_delta": 1e-4,  # Increased min delta
         "reduce_on_plateau_patience": 5,
 
         # Logging parameters
@@ -458,4 +521,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
