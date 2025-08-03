@@ -71,9 +71,9 @@ class ShortSales:
             'svr_ma_20', 'svr_std_20', 'svr_z_20', 'svr_pctchg_20',
             'avg_vol_20', 'days_to_cover_est', 'high_short_flag', 'exempt_spike_flag',
         ]
-        needed_feats = [ind for ind in shorts_indicators if ind in indicator_list]
+        needed_features = [ind for ind in shorts_indicators if ind in indicator_list]
 
-        if not needed_feats:
+        if not needed_features:
             return df
 
         # Get unique tickers
@@ -118,19 +118,15 @@ class ShortSales:
                 df_reset['date'] = pd.to_datetime(df_reset['date']).dt.tz_localize(None)
 
             # Merge only the requested indicators
-            for indicator in needed_feats:
+            df = df_reset.merge(
+                shorts_with_features[['Ticker', 'date'] + [col for col in needed_features if col in shorts_with_features.columns]],
+                left_on=['date', 'Ticker'],
+                right_on=['date', 'Ticker'],
+                how='left'
+            ).set_index('date')
+
+            for indicator in needed_features:
                 if indicator in shorts_with_features.columns:
-                    indicator_data = shorts_with_features[['Ticker','date', indicator]]
-
-                    indicator_data['date'] = pd.to_datetime(indicator_data['date']).dt.tz_localize(None)
-                    df_reset['date'] = pd.to_datetime(df_reset['date']).dt.tz_localize(None)
-
-                    df = df_reset.merge(
-                        indicator_data,
-                        left_on=['date', 'Ticker'],
-                        right_on=['date', 'Ticker'],
-                        how='left'
-                    ).set_index('date')
                     df[indicator] = df[indicator].fillna(0.0)
 
         return df

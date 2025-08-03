@@ -131,14 +131,15 @@ class AnalystUpdates:
         analyst_daily = AnalystUpdates.build_analyst_daily(insiders, df_reset[['close_t-1', 'date', 'Ticker']])
 
         # Merge only the requested indicators
+        df = df_reset.merge(
+            analyst_daily[['Ticker', 'date'] + [col for col in needed_features if col in analyst_daily.columns]],
+            left_on=['date', 'Ticker'],
+            right_on=['date', 'Ticker'],
+            how='left'
+        ).set_index('date')
+
         for indicator in needed_features:
             if indicator in analyst_daily.columns:
-                indicator_data = analyst_daily[['Ticker','date', indicator]]
-                df = df_reset.merge(
-                    indicator_data,
-                    left_on=['date', 'Ticker'],
-                    right_on=['date', 'Ticker'],
-                    how='left'
-                ).set_index('date')
+                df[indicator] = df[indicator].fillna(0.0)
 
         return df

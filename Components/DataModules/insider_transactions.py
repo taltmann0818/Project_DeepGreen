@@ -111,15 +111,15 @@ class InsiderTransactions:
         insider_daily = InsiderTransactions.build_insider_daily(insiders, df_reset[['close_t-1','date','Ticker','share_count']])
 
         # Merge only the requested indicators
+        df = df_reset.merge(
+            insider_daily[['Ticker', 'date'] + [col for col in needed_features if col in insider_daily.columns]],
+            left_on=['date', 'Ticker'],
+            right_on=['date', 'Ticker'],
+            how='left'
+        ).set_index('date')
+
         for indicator in needed_features:
             if indicator in insider_daily.columns:
-                indicator_data = insider_daily[['Ticker','date', indicator]]
-                df = df_reset.merge(
-                    indicator_data,
-                    left_on=['date', 'Ticker'],
-                    right_on=['date', 'Ticker'],
-                    how='left'
-                ).set_index('date')
                 df[indicator] = df[indicator].fillna(0.0)
 
         return df
