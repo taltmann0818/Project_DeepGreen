@@ -12,12 +12,13 @@ def patch_polygon_client(max_pool_size: int = 10) -> None:
 
     def new_init(
         self,
-        api_key: str = 'XizU4KyrwjCA6bxHrR5_eQnUxwFFUnI2',
+        api_key,
         connect_timeout: float = 10.0,
         read_timeout: float = 10.0,
         num_pools: int = 10,
         retries: int = 3,
         base: str = "https://api.polygon.io",
+        pagination: bool = True,
         verbose: bool = False,
         trace: bool = False,
         custom_json=None,
@@ -57,6 +58,7 @@ def patch_polygon_client(max_pool_size: int = 10) -> None:
 
         if verbose:
             logger.setLevel(logging.DEBUG)
+        self.pagination = pagination
         self.trace = trace
         if custom_json:
             self.json = custom_json

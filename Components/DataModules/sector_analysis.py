@@ -99,7 +99,7 @@ class SectorAnalysis:
             return 'Unknown'
 
     @staticmethod
-    def _process_ticker(ticker, data_fetcher):
+    def _process_ticker(data_fetcher, ticker):
         """
         Helper method to process a single ticker for concurrent execution.
 
@@ -115,12 +115,16 @@ class SectorAnalysis:
         tuple
             (ticker, sector) tuple
         """
-        sic_code = data_fetcher.get_sic_code_for_ticker(ticker)
-        sector = SectorAnalysis.map_sic_to_sector(sic_code)
-        return ticker, sector
+        details = data_fetcher._get_details_for_ticker(ticker)
+        sector = SectorAnalysis.map_sic_to_sector(details.get("sic_code"))
+        if isinstance(details, dict):
+            details["sic_sector"] = sector
+        else:
+            setattr(details, "sic_sector", sector)
+        return ticker, details
 
     @staticmethod
-    def create_sector_indicator(tickers, data_fetcher, max_workers=None):
+    def create_detail_indicator(tickers, data_fetcher, max_workers=50):
         """
         Create sector indicator based on SIC codes for a list of tickers using ThreadPoolExecutor.
 
@@ -138,30 +142,25 @@ class SectorAnalysis:
         dict
             Dictionary mapping tickers to their sectors
         """
-        ticker_sectors = {}
-
+        out = {}
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # Submit all tasks
-            future_to_ticker = {
-                executor.submit(SectorAnalysis._process_ticker, ticker, data_fetcher): ticker
-                for ticker in tickers
+            futures = {
+                executor.submit(SectorAnalysis._process_ticker, data_fetcher, tk): tk
+                for tk in tickers
             }
-
-            # Collect results as they complete
-            for future in as_completed(future_to_ticker):
+            for fut in as_completed(futures):
                 try:
-                    ticker, sector = future.result()
-                    ticker_sectors[ticker] = sector
+                    tk, details = fut.result()
+                    out[tk] = details
                 except Exception as exc:
-                    ticker = future_to_ticker[future]
-                    #print(f'Ticker {ticker} generated an exception: {exc}')
-                    ticker_sectors[ticker] = 'Unknown'
+                    ticker = futures[fut]
+                    out[ticker] = {'sic_sector': 'Unknown','asset_type': 'Unknown', 'sic_code': 'Unknown', 'employees': 0, 'share_count': 0}
 
-        return ticker_sectors
+        return out
 
 
     @staticmethod
-    def add_sector_indicators(df, data_fetcher, indicator_list):
+    def add_detail_indicators(df, data_fetcher, indicator_list):
         """
         Add sector-related indicators to the dataframe.
         
@@ -180,89 +179,17 @@ class SectorAnalysis:
             DataFrame with sector indicators added
         """
         # Process SIC sector indicator
-        # Process SIC sector indicator
-        if 'sic_sector' in indicator_list:
-            # Check if Ticker is in columns or index
-            if 'Ticker' in df.columns:
-                unique_tickers = df['Ticker'].unique()
-                ticker_sectors = SectorAnalysis.create_sector_indicator(unique_tickers, data_fetcher)
-                df['sic_sector'] = df['Ticker'].map(ticker_sectors)
-            elif isinstance(df.index, pd.MultiIndex) and 'Ticker' in df.index.names:
-                # Ticker is part of a MultiIndex
-                unique_tickers = df.index.get_level_values('Ticker').unique()
-                ticker_sectors = SectorAnalysis.create_sector_indicator(unique_tickers, data_fetcher)
-                # Create the mapping using the index level
-                df['sic_sector'] = df.index.get_level_values('Ticker').map(ticker_sectors)
-            elif df.index.name == 'Ticker':
-                # Ticker is a single-level index
-                unique_tickers = df.index.unique()
-                ticker_sectors = SectorAnalysis.create_sector_indicator(unique_tickers, data_fetcher)
-                df['sic_sector'] = df.index.map(ticker_sectors)
-            else:
-                # Fallback: try to reset index to find Ticker
-                temp_df = df.reset_index()
-                if 'Ticker' in temp_df.columns:
-                    unique_tickers = temp_df['Ticker'].unique()
-                    ticker_sectors = SectorAnalysis.create_sector_indicator(unique_tickers, data_fetcher)
-                    df['sic_sector'] = temp_df['Ticker'].map(ticker_sectors).values
-                else:
-                    # If we still can't find Ticker, skip this indicator
-                    print("Warning: Could not find 'Ticker' column or index level. Skipping sic_sector indicator.")
-        return df
+        temp_df = df.reset_index()
+        if 'Ticker' in temp_df.columns:
+            unique_tickers = temp_df['Ticker'].unique()
+            details = SectorAnalysis.create_detail_indicator(unique_tickers, data_fetcher)
+            details_df = pd.DataFrame(details).T.reset_index().rename(columns={'index':'Ticker'})
+            temp_df = temp_df.merge(details_df, on='Ticker')
 
-    @staticmethod
-    def get_sector_statistics(df, sector_column='sic_sector'):
-        """
-        Get statistics about sector distribution in the dataset.
-        
-        Parameters:
-        -----------
-        df : pd.DataFrame
-            DataFrame containing sector information
-        sector_column : str, default='sic_sector'
-            Name of the column containing sector information
-            
-        Returns:
-        --------
-        pd.Series
-            Series with sector counts
-        """
-        if sector_column in df.columns:
-            return df[sector_column].value_counts()
+            temp_df = temp_df[temp_df['asset_type'] == 'CS']
+            temp_df = temp_df[temp_df['sic_sector'] != 'Unknown']
+
         else:
-            return pd.Series(dtype=int)
-
-    @staticmethod
-    def get_sector_performance(df, sector_column='sic_sector', return_column='Close'):
-        """
-        Calculate performance metrics by sector.
-        
-        Parameters:
-        -----------
-        df : pd.DataFrame
-            DataFrame containing sector and price information
-        sector_column : str, default='sic_sector'
-            Name of the column containing sector information
-        return_column : str, default='Close'
-            Name of the column to calculate returns from
+            print("Warning: Could not find 'Ticker' column or index level. Skipping sic_sector indicator.")
             
-        Returns:
-        --------
-        pd.DataFrame
-            DataFrame with sector performance metrics
-        """
-        if sector_column not in df.columns or return_column not in df.columns:
-            return pd.DataFrame()
-            
-        # Calculate returns
-        df_copy = df.copy()
-        df_copy['returns'] = df_copy.groupby('Ticker')[return_column].pct_change()
-        
-        # Group by sector and calculate metrics
-        sector_stats = df_copy.groupby(sector_column)['returns'].agg([
-            'mean', 'std', 'count'
-        ]).round(4)
-        
-        sector_stats.columns = ['avg_return', 'volatility', 'observations']
-        
-        return sector_stats
+        return temp_df

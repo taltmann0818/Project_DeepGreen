@@ -279,8 +279,6 @@ class Tempusv3Inference:
         result["sigma_daily"] = (result["q_high"] - result["q_low"]) / (2 * norm.ppf(0.98)) / np.sqrt(3)
         result = result.reset_index().merge(predictions[['Ticker','date','Close']], on=["Ticker", "date"], how="left").drop_duplicates()
         result['pred_return'] = (result['Predicted'] - result['Close']) / result['Close'] # Updating to use implied returns instead of median quantile raw prediction
-        result['q_low'] = (result['q_low'] - result['Close']) / result['Close'] # Updating to use implied returns instead of low quantile raw prediction
-        result['q_high'] = (result['q_high'] - result['Close']) / result['Close'] # Updating to use implied returns instead of high quantile raw prediction
 
         return result.set_index('date') #.drop(columns='Close')
 

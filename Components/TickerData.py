@@ -3,6 +3,7 @@ Refactored TickerData class that uses modular components.
 This is the main orchestration class that brings together all the separated modules.
 """
 from datetime import datetime, timedelta
+import os, logging
 import numpy as np
 import pandas as pd
 from polygon import RESTClient
@@ -15,6 +16,9 @@ from Components.DataModules.sector_analysis import SectorAnalysis
 from Components.DataModules.calendar_earnings import CalendarEarnings
 from Components.DataModules.market_news import MarketNews
 from Components.MarketRegimes import RegimeDetector
+from Components.DataModules.insider_transactions import InsiderTransactions
+from Components.DataModules.analyst_updates import AnalystUpdates
+from Components.DataModules.short_sale import ShortSales
 
 from pathlib import Path
 def _find_model(pickle_name: str) -> Path:
@@ -54,6 +58,7 @@ class TickerData:
             - max_workers : int, default=None
                 Maximum number of worker threads for parallel processing
         """
+
         # Configuration
         if indicator_list is not None:
             self.indicator_list = set(indicator_list)
@@ -66,8 +71,11 @@ class TickerData:
         self.max_workers = kwargs.get('max_workers', None)
         self.sample_size = kwargs.get('sample_size', None)
 
+        # Kwarg for handling adding current positions to ticker list
+        self.extra_tickers = kwargs.get('extra_tickers', None)
+
         # Initialize data fetcher
-        api_key = 'XizU4KyrwjCA6bxHrR5_eQnUxwFFUnI2'
+        api_key = os.environ.get('POLYGON_API_KEY', 'test_polygon_key_1234567890')
         self.client = RESTClient(api_key, num_pools=50)
         self.data_fetcher = DataFetcher(
             client=self.client,
@@ -98,7 +106,7 @@ class TickerData:
         if self.max_workers:
             workers = max(workers, self.max_workers)
             
-        return self.data_fetcher.fetch_stock_data(workers)
+        return self.data_fetcher.fetch_stock_data(tickers=[], workers=workers, extra_tickers=self.extra_tickers)
 
     def preprocess_data(self):
         """Preprocess the fetched data"""
@@ -137,31 +145,32 @@ class TickerData:
         if not isinstance(df.index, pd.DatetimeIndex):
             if 'date' in df.columns:
                 df["date"] = pd.to_datetime(df["date"])
-                # Create a multi-index with Ticker and date to avoid duplicate labels
-                df = df.set_index(["Ticker", "date"]).sort_index()
+                # Set date as index but keep Ticker as column for grouping
+                df = df.set_index("date").sort_index()
             else:
                 # If no date column, assume index is already the date
                 df.index = pd.to_datetime(df.index)
-                df.index = df.index.tz_localize(None)
+                if df.index.tz is not None:
+                    df.index = df.index.tz_localize(None)
         else:
             # If we already have a DatetimeIndex, ensure it's timezone-naive
             if df.index.tz is not None:
                 df.index = df.index.tz_localize(None)
 
-        # Group by ticker for indicator calculations
-        grouped = df.groupby('Ticker')
+        self.data_fetcher.client.client.clear()
+        df = SectorAnalysis.add_detail_indicators(df, self.data_fetcher, self.indicator_list)
+        print("Finished adding ticker detail indicators")
+
+        if self.sample_size is not None and self.sample_size <= len(df['Ticker'].unique()):
+            tickers = np.random.choice(df['Ticker'].unique(), self.sample_size)
+            if self.extra_tickers is not None:
+                tickers = list(np.unique(np.concatenate([tickers, self.extra_tickers])))
+            df = df[df['Ticker'].isin(tickers)]
 
         # Add basic technical indicators
+        grouped = df.groupby('Ticker')
         df = TechnicalIndicators.add_technical_indicators(df=df,grouped=grouped,indicator_list=self.indicator_list,nasdaq_data=None)
         print("Finished adding technical indicators")
-
-        # Add cross-asset indicators
-        #df = self._add_cross_asset_indicators(df)
-
-        # Add sector indicators
-        self.data_fetcher.client.client.clear()
-        df = SectorAnalysis.add_sector_indicators(df, self.data_fetcher, self.indicator_list)
-        print("Finished adding sector indicators")
 
         # Add news indicators
         self.data_fetcher.client.client.clear()
@@ -172,60 +181,24 @@ class TickerData:
         df = CalendarEarnings.add_calendar_earnings_indicators(df, self.data_fetcher, self.indicator_list)
         print("Finished adding calendar indicators")
 
+        # Add insider transactions indicators
+        df = InsiderTransactions.add_insider_indicators(df, self.data_fetcher, self.indicator_list)
+        print("Finished adding insider transactions indicators")
+
+        # Add analyst upgrades/downgrades indicators
+        df = AnalystUpdates.add_analyst_indicators(df, self.data_fetcher, self.indicator_list)
+        print("Finished adding analyst indicators")
+
+        # Add short sales indicators
+        df = ShortSales.add_shorts_indicators(df, self.data_fetcher, self.indicator_list)
+        print("Finished adding short sales indicators")
+
         # Add Hidden Markov Model market regimes
         if 'hmm_state' in self.indicator_list:
             hmm = _find_model("hmm_v2.pkl")
             _, df['hmm_state']  = RegimeDetector.load(hmm).predict(df, ma=5)
 
         self.dataset_ex_df = df
-        return df
-
-    def _add_cross_asset_indicators(self, df):
-        """Add cross-asset indicators like SPY, VIX, sector ETFs"""
-        cross_asset_indicators = ['spy_ret_1', 'spy_ret_3', 'sector_etf_ret_1', 'vix_delta_1', 'yc_2y10y_delta']
-        needed_cross_asset = [ind for ind in cross_asset_indicators if ind in self.indicator_list]
-
-        if needed_cross_asset:
-            # SPY returns
-            if 'spy_ret_1' in self.indicator_list or 'spy_ret_3' in self.indicator_list:
-                spy_data = self.data_fetcher.get_spy_data()
-                if spy_data is not None:
-                    spy_returns = TechnicalIndicators.calculate_returns(spy_data['close'], [1, 3])
-                    if 'spy_ret_1' in self.indicator_list:
-                        spy_ret_1 = spy_returns['ret_1'].rename('spy_ret_1')
-                        df = df.merge(spy_ret_1.to_frame(), left_index=True, right_index=True, how='left')
-                    if 'spy_ret_3' in self.indicator_list:
-                        spy_ret_3 = spy_returns['ret_3'].rename('spy_ret_3')
-                        df = df.merge(spy_ret_3.to_frame(), left_index=True, right_index=True, how='left')
-                else:
-                    # Create placeholder columns if SPY data fetch fails
-                    if 'spy_ret_1' in self.indicator_list:
-                        df['spy_ret_1'] = np.nan
-                    if 'spy_ret_3' in self.indicator_list:
-                        df['spy_ret_3'] = np.nan
-
-            # Sector ETF returns (using XLK as representative)
-            if 'sector_etf_ret_1' in self.indicator_list:
-                sector_data = self.data_fetcher.get_sector_etf_data(['XLK'])
-                if 'XLK' in sector_data:
-                    xlk_ret_1 = sector_data['XLK']['close'].pct_change().rename('sector_etf_ret_1')
-                    df = df.merge(xlk_ret_1.to_frame(), left_index=True, right_index=True, how='left')
-                else:
-                    df['sector_etf_ret_1'] = np.nan
-
-            # VIX delta
-            if 'vix_delta_1' in self.indicator_list:
-                vix_data = self.data_fetcher.get_vix_data()
-                if vix_data is not None:
-                    vix_delta_1 = vix_data['close'].diff().rename('vix_delta_1')
-                    df = df.merge(vix_delta_1.to_frame(), left_index=True, right_index=True, how='left')
-                else:
-                    df['vix_delta_1'] = np.nan
-
-            # Yield curve (2y-10y) - placeholder implementation
-            if 'yc_2y10y_delta' in self.indicator_list:
-                df['yc_2y10y_delta'] = 0.0  # Placeholder
-
         return df
 
     def merge_data(self, df=None):
@@ -244,6 +217,16 @@ class TickerData:
 
         # Filter columns that actually exist in the dataframe
         available_cols = [col for col in cols if col in df.columns]
+        missing_cols = [col for col in cols if col not in df.columns]
+        
+        if missing_cols:
+            print(f"Warning: Missing columns: {missing_cols}")
+            print(f"Available columns: {list(df.columns)}")
+            print(f"Requested columns: {cols}")
+
+        # Only proceed if we have at least Ticker and some indicators
+        if len(available_cols) <= 1:  # Only Ticker column
+            raise ValueError(f"No indicator columns found. Missing: {missing_cols}")
 
         self.final_df = df[available_cols].replace(
             [float('inf'), float('-inf')], float('nan')
@@ -262,7 +245,7 @@ class TickerData:
         """
         self.preprocess_data()
         self.add_features()
-        return self.merge_data()
+        return self.merge_data(), self.stock_data
 
     def get_data_summary(self):
         """Get a summary of the processed data"""
@@ -289,7 +272,7 @@ class TickerData:
 
         if not self.end_date:
             self.end_date = datetime.now().strftime("%Y-%m-%d")
-        
+
         aggs_iter = self.client.list_aggs(
             ticker=ticker,
             multiplier=multiplier,
@@ -323,6 +306,13 @@ class TickerData:
         # 8) Reindex to full_dates, filling missing days with zeros
         daily.index.name = "date"
         daily["Ticker"] = ticker
-        daily = daily.rename(columns={'ticker': 'Ticker','open':'Open','high':'High','low':'Low','close':'Close','volume':'Volume'})
+        daily = daily.rename(
+            columns={'ticker': 'Ticker', 'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close',
+                     'volume': 'Volume'})
 
         return daily
+
+
+
+
+

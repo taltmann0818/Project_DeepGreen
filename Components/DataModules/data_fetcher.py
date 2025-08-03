@@ -10,7 +10,8 @@ from datetime import datetime, timedelta
 import time
 from pandas.tseries.holiday import USFederalHolidayCalendar
 from dateutil.easter import easter
-
+import logging
+import yfinance as yf
 
 class DataFetcher:
     """Handles all data fetching operations from Polygon API"""
@@ -33,19 +34,16 @@ class DataFetcher:
         self.client = client
         self.days = days
         self.sample_size = sample_size
-
         if not start_date:
-            self.start_date = (datetime.now() - timedelta(days=self.days)).strftime("%Y-%m-%d")
+            self.start_date = (datetime.now() - timedelta(days=self.days + 1)).strftime("%Y-%m-%d")
         else:
             self.start_date = start_date
 
         if not end_date:
-            self.end_date = datetime.now().strftime("%Y-%m-%d")
+            self.end_date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
         else:
             self.end_date = end_date
 
-        # Cache for SIC codes to avoid repeated API calls
-        self.sic_code_cache = {}
         self.last_api_call_time = 0
         self.api_call_delay = 0.2  # 200ms delay between API calls to avoid rate limiting
 
@@ -158,26 +156,18 @@ class DataFetcher:
                 print(f"Warning: Could not fetch {etf} data: {e}")
         return sector_data
 
-    def get_sic_code_for_ticker(self, ticker):
-        """Get SIC code for a ticker using Polygon API with rate limiting and caching"""
-        # Check cache first
-        if ticker in self.sic_code_cache:
-            return self.sic_code_cache[ticker]
-
+    def _get_details_for_ticker(self, ticker):
         try:
             details = self.client.get_ticker_details(ticker)
-            sic_code = getattr(details, 'sic_code', None)
-
-            # Cache the result (even if None)
-            self.sic_code_cache[ticker] = sic_code
-            return sic_code
+            ticker_details = {'asset_type': getattr(details, 'type', 'Unknown'),
+                            'sic_code': int(getattr(details, 'sic_code', np.NaN)),
+                            'employees': getattr(details, 'total_employees', 0),
+                            'share_count': getattr(details, 'weighted_shares_outstanding', 0)
+                            }
+            return ticker_details
 
         except Exception as e:
             error_str = str(e).lower()
-            # For non-rate-limiting errors, don't retry
-            #print(f"Warning: Could not fetch SIC code for {ticker}: {e}")
-            # Cache the failure
-            self.sic_code_cache[ticker] = None
             return None
 
     def generate_us_market_holidays(self, start_year: int, end_year: int) -> np.ndarray:
@@ -196,7 +186,42 @@ class DataFetcher:
         all_hols = pd.DatetimeIndex(fed).union(pd.DatetimeIndex(good_fridays))
         return all_hols.values.astype("datetime64[D]")
 
-    def fetch_stock_data(self, workers=20):
+    def get_analyst_data(self, tickers):
+        dfs = []
+        for t in tickers:
+            df = yf.Ticker(t).get_upgrades_downgrades()
+            df['Ticker'] = t
+            dfs.append(df)
+        df = pd.concat(dfs).reset_index().rename(columns={'index': 'date'})
+        df['date'] = pd.to_datetime(df['date']).dt.date
+
+        return df
+
+    def get_insider_transactions_data(self, tickers):
+        dfs = []
+        for t in tickers:
+            df = yf.Ticker(t).get_insider_transactions()
+            df['Ticker'] = t
+            dfs.append(df)
+        df = pd.concat(dfs).reset_index().rename(columns={"Start Date": "date"})
+        df['date'] = pd.to_datetime(df['date']).dt.date
+
+        return df
+
+    def get_shorts_for_ticker(self, ticker, start_date, end_date, limit=1000):
+        shorts = self.client.list_short_volume(
+            ticker=ticker,
+            date_lte=end_date,
+            date_gte=start_date,
+            limit=limit,
+            sort="ticker.asc"
+        )
+
+        short_df = pd.DataFrame(shorts).rename(columns={"ticker": "Ticker"})
+
+        return short_df
+
+    def fetch_stock_data(self, tickers, workers=20, extra_tickers=None):
         """
         Fetch stock data for multiple tickers in parallel.
 
@@ -212,6 +237,10 @@ class DataFetcher:
         pd.DataFrame
             Combined DataFrame with all ticker data
         """
+        if isinstance(tickers, str):
+            tickers = [tickers]
+
+        logging.info(f"Fetching stock data from date range: {self.start_date} to {self.end_date}")
 
         full_dates = np.array(
             pd.date_range(start=self.start_date, end=self.end_date, freq="D", tz="America/New_York")
@@ -243,10 +272,14 @@ class DataFetcher:
         all_data = all_data.drop_duplicates(subset=['ticker', 'date'], keep='last')
 
         stock_data = all_data.rename(columns={'ticker': 'Ticker','open':'Open','high':'High','low':'Low','close':'Close','volume':'Volume'})
+  
+        filtered_data = stock_data[stock_data['Close'] >= 3.0]
+        filtered_data = filtered_data[filtered_data.groupby('Ticker')['Volume'].transform('mean') >= 350_000]
+        tickers = filtered_data['Ticker'].unique()
 
-        if self.sample_size is not None:
-            tickers = stock_data['Ticker'].unique()
-            tickers = np.random.choice(tickers, self.sample_size)
-            stock_data = stock_data[stock_data['Ticker'].isin(tickers)]
+        if extra_tickers is not None:
+            tickers = list(np.unique(np.concatenate([tickers, extra_tickers])))
+
+        stock_data = stock_data[stock_data['Ticker'].isin(tickers)]
 
         return stock_data

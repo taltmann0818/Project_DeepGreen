@@ -9,36 +9,48 @@ import numpy as np
 
 class CalendarEarnings:
     """Handles calendar-based and earnings-related indicators"""
-    
+
     @staticmethod
     def add_calendar_indicators(df):
         """
         Add calendar-based indicators to the dataframe.
-        
+
         Parameters:
         -----------
         df : pd.DataFrame
-            DataFrame with datetime index
-            
+            DataFrame with datetime index or MultiIndex containing date
+
         Returns:
         --------
         pd.DataFrame
             DataFrame with calendar indicators added
         """
-        # Ensure index is datetime
-        if not isinstance(df.index, pd.DatetimeIndex):
-            df.index = pd.to_datetime(df.index)
+        # Handle MultiIndex case (Ticker, date) vs simple datetime index
+        if isinstance(df.index, pd.MultiIndex):
+            # For MultiIndex, use the date level (assumed to be level 1)
+            if df.index.nlevels >= 2:
+                date_index = df.index.get_level_values(1)  # Get the date level
+                if not isinstance(date_index, pd.DatetimeIndex):
+                    date_index = pd.to_datetime(date_index)
+            else:
+                raise ValueError("Expected MultiIndex with at least 2 levels")
+        else:
+            # For simple index, convert to datetime if needed
+            if not isinstance(df.index, pd.DatetimeIndex):
+                date_index = pd.to_datetime(df.index)
+            else:
+                date_index = df.index
 
         # Day of week (0=Monday, 6=Sunday)
-        df['day_of_week'] = df.index.dayofweek
+        df['day_of_week'] = date_index.dayofweek
 
         # Day of month (1-31)
-        df['day_of_month'] = df.index.day
+        df['day_of_month'] = date_index.day
 
         # Days to month end
         # Get the last day of each month for each date
-        month_ends = df.index.to_period('M').end_time
-        current_dates = df.index
+        month_ends = date_index.to_period('M').end_time
+        current_dates = date_index
         df['days_to_month_end'] = (month_ends - current_dates).days
 
         return df

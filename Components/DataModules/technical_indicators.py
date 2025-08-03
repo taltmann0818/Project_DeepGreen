@@ -385,51 +385,48 @@ class TechnicalIndicators:
                     elif indicator == 'parabolic_sar':
                         values = TechnicalIndicators.compute_parabolic_sar(group[['High', 'Low', 'Close']])
                     results.append(values)
-                concatenated = pd.concat(results)
-                df[indicator] = concatenated.reindex(df.index)
+                concatenated = pd.concat(results, ignore_index=False)
+                df[indicator] = df.index.to_series().map(concatenated.to_dict())
 
         # Process multi-output indicators
         if {'keltner_upper', 'keltner_lower'} & indicator_list:
-            keltner_upper_results = []
-            keltner_lower_results = []
-            for ticker, group in grouped:
-                upper, lower = TechnicalIndicators.keltner_channel(group['High'], group['Low'], group['Close'])
-                keltner_upper_results.append(upper)
-                keltner_lower_results.append(lower)
-            if 'keltner_upper' in indicator_list:
-                concatenated_upper = pd.concat(keltner_upper_results)
-                df['keltner_upper'] = concatenated_upper.reindex(df.index)
-            if 'keltner_lower' in indicator_list:
-                concatenated_lower = pd.concat(keltner_lower_results)
-                df['keltner_lower'] = concatenated_lower.reindex(df.index)
+            for indicator_name in ['keltner_upper', 'keltner_lower']:
+                if indicator_name in indicator_list:
+                    results = []
+                    for ticker, group in grouped:
+                        upper, lower = TechnicalIndicators.keltner_channel(group['High'], group['Low'], group['Close'])
+                        if indicator_name == 'keltner_upper':
+                            results.append(upper)
+                        else:
+                            results.append(lower)
+                    concatenated = pd.concat(results, ignore_index=False)
+                    df[indicator_name] = df.index.to_series().map(concatenated.to_dict())
 
         if {'price_momentum', 'volume_momentum'} & indicator_list:
-            price_momentum_results = []
-            volume_momentum_results = []
-            for ticker, group in grouped:
-                price_mom, volume_mom = TechnicalIndicators.momentum_signals(group['Close'], group['Volume'])
-                price_momentum_results.append(price_mom)
-                volume_momentum_results.append(volume_mom)
-            if 'price_momentum' in indicator_list:
-                concatenated_price = pd.concat(price_momentum_results)
-                df['price_momentum'] = concatenated_price.reindex(df.index)
-            if 'volume_momentum' in indicator_list:
-                concatenated_volume = pd.concat(volume_momentum_results)
-                df['volume_momentum'] = concatenated_volume.reindex(df.index)
+            for indicator_name in ['price_momentum', 'volume_momentum']:
+                if indicator_name in indicator_list:
+                    results = []
+                    for ticker, group in grouped:
+                        price_mom, volume_mom = TechnicalIndicators.momentum_signals(group['Close'], group['Volume'])
+                        if indicator_name == 'price_momentum':
+                            results.append(price_mom)
+                        else:
+                            results.append(volume_mom)
+                    concatenated = pd.concat(results, ignore_index=False)
+                    df[indicator_name] = df.index.to_series().map(concatenated.to_dict())
 
         if {'bullish_engulfing', 'bearish_engulfing'} & indicator_list:
-            bullish_results = []
-            bearish_results = []
-            for ticker, group in grouped:
-                bullish, bearish = TechnicalIndicators.engulfing_patterns(group['Open'], group['Close'])
-                bullish_results.append(bullish)
-                bearish_results.append(bearish)
-            if 'bullish_engulfing' in indicator_list:
-                concatenated_bullish = pd.concat(bullish_results)
-                df['bullish_engulfing'] = concatenated_bullish.reindex(df.index)
-            if 'bearish_engulfing' in indicator_list:
-                concatenated_bearish = pd.concat(bearish_results)
-                df['bearish_engulfing'] = concatenated_bearish.reindex(df.index)
+            for indicator_name in ['bullish_engulfing', 'bearish_engulfing']:
+                if indicator_name in indicator_list:
+                    results = []
+                    for ticker, group in grouped:
+                        bullish, bearish = TechnicalIndicators.engulfing_patterns(group['Open'], group['Close'])
+                        if indicator_name == 'bullish_engulfing':
+                            results.append(bullish)
+                        else:
+                            results.append(bearish)
+                    concatenated = pd.concat(results, ignore_index=False)
+                    df[indicator_name] = df.index.to_series().map(concatenated.to_dict())
 
         # Process log returns indicators
         if {'log_ret_1', 'log_ret_2', 'log_ret_3'} & indicator_list:
@@ -440,8 +437,8 @@ class TechnicalIndicators:
                     for ticker, group in grouped:
                         log_returns = TechnicalIndicators.log_returns(group['Close'], periods=[period])
                         results.append(log_returns[indicator_name])
-                    concatenated = pd.concat(results)
-                    df[indicator_name] = concatenated.reindex(df.index)
+                    concatenated = pd.concat(results, ignore_index=False)
+                    df[indicator_name] = df.index.to_series().map(concatenated.to_dict())
 
         # Process specific named indicators with custom naming conventions
         specific_indicators = {
@@ -466,24 +463,23 @@ class TechnicalIndicators:
                 for ticker, group in grouped:
                     values = func(group)
                     results.append(values)
-                concatenated = pd.concat(results)
-                df[indicator_name] = concatenated.reindex(df.index)
+                concatenated = pd.concat(results, ignore_index=False)
+                df[indicator_name] = df.index.to_series().map(concatenated.to_dict())
 
         # Process stochastic oscillator indicators (stoch_k_5, stoch_d_5)
         if {'stoch_k_5', 'stoch_d_5'} & indicator_list:
-            stoch_k_results = []
-            stoch_d_results = []
-            for ticker, group in grouped:
-                k_percent, d_percent = TechnicalIndicators.stochastic_oscillator(
-                    group['High'], group['Low'], group['Close'], k_period=5, d_period=3
-                )
-                stoch_k_results.append(k_percent)
-                stoch_d_results.append(d_percent)
-            if 'stoch_k_5' in indicator_list:
-                concatenated_k = pd.concat(stoch_k_results)
-                df['stoch_k_5'] = concatenated_k.reindex(df.index)
-            if 'stoch_d_5' in indicator_list:
-                concatenated_d = pd.concat(stoch_d_results)
-                df['stoch_d_5'] = concatenated_d.reindex(df.index)
+            for indicator_name in ['stoch_k_5', 'stoch_d_5']:
+                if indicator_name in indicator_list:
+                    results = []
+                    for ticker, group in grouped:
+                        k_percent, d_percent = TechnicalIndicators.stochastic_oscillator(
+                            group['High'], group['Low'], group['Close'], k_period=5, d_period=3
+                        )
+                        if indicator_name == 'stoch_k_5':
+                            results.append(k_percent)
+                        else:
+                            results.append(d_percent)
+                    concatenated = pd.concat(results, ignore_index=False)
+                    df[indicator_name] = df.index.to_series().map(concatenated.to_dict())
 
         return df
